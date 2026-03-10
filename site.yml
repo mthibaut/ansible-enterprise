@@ -1,0 +1,26 @@
+---
+- name: Enterprise configuration
+  hosts: all
+  become: true
+
+  pre_tasks:
+    - name: Run preflight validation
+      include_role:
+        name: preflight
+
+  roles:
+    - role: common
+    - role: ssh_hardening
+    - role: geoip
+      when: geoip.enabled | default(false) | bool
+    - role: firewall_geo
+    - role: dns
+    - role: nginx
+    - role: users
+    - role: nextcloud
+      when:
+        - services.nextcloud is defined
+        - services.nextcloud.enabled | default(false) | bool
+        - services.nextcloud.app.type == 'nextcloud'
+    - role: mailserver
+      when: mailserver.enabled | default(false) | bool

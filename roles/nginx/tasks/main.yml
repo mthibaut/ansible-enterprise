@@ -1,0 +1,4 @@
+---
+- name: Placeholder for nginx
+  debug:
+    msg: 'nginx'

@@ -1,0 +1,6 @@
+---
+- name: Assert core variables are shaped correctly
+  assert:
+    that:
+      - admin_users is iterable
+      - services is mapping

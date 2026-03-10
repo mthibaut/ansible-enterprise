@@ -1,0 +1,31 @@
+---
+ssh_port: 22
+admin_users: [myadmin]
+admin_ssh_public_key: ""
+capabilities:
+  tls: {provider: nginx}
+  reverse_proxy: {provider: nginx}
+  dns: {provider: bind}
+  database: {provider: mariadb}
+  firewall: {provider: nftables}
+  geoip: {provider: maxmind_nftables}
+geoip:
+  enabled: false
+  license_key: ""
+  download_dir: /var/lib/geoip
+  sets_dir: /etc/nftables.d/geoip
+  allowed_countries: []
+dns_hidden_primary_zones: []
+dns_secondaries: []
+dns_admin_ip: ""
+mailserver:
+  enabled: false
+  domain: mail.example.com
+  admin_mail_user: mailadmin
+  admin_mail_password: ""
+  masquerading_enabled: false
+  masquerade_domain: ""
+  masquerade_users: []
+  masquerade_hosts: []
+nextcloud_version: '29.0.6'
+services: {}

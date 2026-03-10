@@ -1,0 +1,10 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  vars:
+    admin_users: [myadmin]
+    admin_ssh_public_key: "ssh-ed25519 AAAATESTKEY"
+  roles:
+    - common
+    - ssh_hardening

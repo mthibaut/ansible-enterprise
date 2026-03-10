@@ -1,0 +1,4 @@
+---
+ssh_port: 49222
+admin_users: [myadmin]
+admin_ssh_public_key: "ssh-ed25519 AAAAEXAMPLE"

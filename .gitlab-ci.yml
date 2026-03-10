@@ -1,0 +1,7 @@
+stages:
+  - validate
+
+validate:
+  image: python:3.11
+  script:
+    - python scripts/verify_repo_contracts.py

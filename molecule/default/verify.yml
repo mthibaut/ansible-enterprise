@@ -1,0 +1,13 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  tasks:
+    - name: Check sshd_config exists
+      stat:
+        path: /etc/ssh/sshd_config
+      register: sshd
+    - assert:
+        that:
+          - sshd.stat.exists
+        fail_msg: "/etc/ssh/sshd_config is missing"

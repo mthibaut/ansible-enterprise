@@ -1,0 +1,4 @@
+---
+- name: Placeholder for geoip
+  debug:
+    msg: 'geoip'

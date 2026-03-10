@@ -1,0 +1,7 @@
+group_vars/all/vault.yml
+*.private
+*.key
+*.pem
+__pycache__/
+*.pyc
+.regen-staging/

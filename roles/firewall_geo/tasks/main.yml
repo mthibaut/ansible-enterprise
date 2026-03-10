@@ -1,0 +1,4 @@
+---
+- name: Placeholder for firewall_geo
+  debug:
+    msg: 'firewall_geo'

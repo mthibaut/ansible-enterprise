@@ -1,0 +1,25 @@
+---
+- name: Install OpenSSH server
+  package:
+    name: openssh-server
+    state: present
+- name: Ensure admin users exist
+  user:
+    name: "{{ item }}"
+    shell: /bin/bash
+    state: present
+  loop: "{{ admin_users }}"
+- name: Deploy sshd_config
+  template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    mode: "0600"
+    validate: "sshd -t -f %s"
+  notify: Restart SSH
+- meta: flush_handlers
+- name: Deploy admin SSH keys
+  ansible.posix.authorized_key:
+    user: "{{ item }}"
+    key: "{{ admin_ssh_public_key }}"
+  loop: "{{ admin_users }}"
+  when: admin_ssh_public_key | length > 0

@@ -1,0 +1,11 @@
+---
+- name: Validate services schema
+  command: python3 scripts/validate_services_schema.py
+  args:
+    chdir: "{{ playbook_dir }}"
+- name: Ensure admin SSH key is populated
+  assert:
+    that:
+      - admin_ssh_public_key is defined
+      - admin_ssh_public_key | length > 20
+    fail_msg: "admin_ssh_public_key must be set to a real public key"

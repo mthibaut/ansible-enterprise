@@ -1,0 +1,5 @@
+Port {{ ssh_port }}
+PasswordAuthentication no
+PubkeyAuthentication yes
+UsePAM yes
+AllowUsers {{ admin_users | join(" ") }}

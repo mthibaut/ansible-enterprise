@@ -1,0 +1,4 @@
+---
+- name: Placeholder for mailserver
+  debug:
+    msg: 'mailserver'
