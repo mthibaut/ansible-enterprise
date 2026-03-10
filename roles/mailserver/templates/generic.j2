@@ -1,0 +1,4 @@
+{% for user in mailserver.masquerade_users | default([]) %}
+{{ user }} {{ user }}@{{ mailserver.masquerade_domain }}
+{{ user }}@{{ ansible_fqdn | default('localhost') }} {{ user }}@{{ mailserver.masquerade_domain }}
+{% endfor %}

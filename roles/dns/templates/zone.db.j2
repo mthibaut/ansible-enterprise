@@ -1,1 +1,10 @@
 $TTL 86400
+@   IN  SOA ns1.{{ item }}. admin.{{ item }}. (
+        2026010101
+        3600
+        1800
+        1209600
+        86400
+)
+@   IN  NS  ns1.{{ item }}.
+ns1 IN  A   {{ ansible_default_ipv4.address }}

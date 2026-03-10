@@ -1,1 +1,38 @@
 flush ruleset
+
+{% if geoip.enabled | default(false) | bool %}
+include "{{ geoip.sets_dir }}/geoip_ipv4.nft"
+include "{{ geoip.sets_dir }}/geoip_ipv6.nft"
+{% endif %}
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0;
+    policy drop;
+
+    ct state established,related accept
+    iif lo accept
+    ip protocol icmp accept
+    ip6 nexthdr ipv6-icmp accept
+
+    {% if geoip.enabled | default(false) | bool and (geoip.allowed_countries | length > 0) %}
+    # GeoIP: drop TCP traffic not from allowed countries before port rules
+    ip saddr != $geoip_allowed_ipv4 ip protocol tcp drop
+    ip6 saddr != $geoip_allowed_ipv6 ip6 nexthdr tcp drop
+    {% endif %}
+
+    tcp dport {{ ssh_port }} accept
+
+    {% for svc in services | dict2items | sort(attribute='key') %}
+    {% if svc.value.enabled | default(false) | bool %}
+    {% if svc.value.security.expose_http | default(false) | bool %}
+    tcp dport 80 accept
+    {% endif %}
+    {% if svc.value.security.expose_https | default(false) | bool %}
+    tcp dport 443 accept
+    {% endif %}
+    {% endif %}
+    {% endfor %}
+
+  }
+}

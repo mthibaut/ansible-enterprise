@@ -1,2 +1,12 @@
-events {}
-http { include /etc/nginx/conf.d/*.conf; }
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+events { worker_connections 1024; }
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  sendfile on;
+  keepalive_timeout 65;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  include /etc/nginx/conf.d/*.conf;
+}

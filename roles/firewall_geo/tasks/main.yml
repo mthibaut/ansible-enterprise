@@ -1,4 +1,21 @@
 ---
-- name: Placeholder for firewall_geo
-  debug:
-    msg: 'firewall_geo'
+- name: Install nftables
+  package:
+    name: nftables
+    state: present
+- name: Ensure nftables include directory exists
+  file:
+    path: /etc/nftables.d
+    state: directory
+    mode: "0755"
+- name: Deploy nftables rules
+  template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    mode: "0644"
+  notify: Reload nftables
+- name: Enable nftables
+  service:
+    name: nftables
+    enabled: true
+    state: started

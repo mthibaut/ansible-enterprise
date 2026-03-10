@@ -1,4 +1,36 @@
 ---
-- name: Placeholder for geoip
-  debug:
-    msg: 'geoip'
+- name: Install GeoIP prerequisites
+  package:
+    name:
+      - python3
+      - curl
+      - unzip
+    state: present
+- name: Ensure GeoIP directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ geoip.download_dir }}"
+    - "{{ geoip.sets_dir }}"
+- name: Install GeoIP ingestion helper
+  copy:
+    src: geoip_ingest.py
+    dest: /usr/local/sbin/geoip_ingest.py
+    mode: "0755"
+- name: Render allowed countries file
+  copy:
+    dest: "{{ geoip.download_dir }}/allowed_countries.txt"
+    content: |
+      {% for c in geoip.allowed_countries %}
+      {{ c }}
+      {% endfor %}
+- name: Run GeoIP ingestion
+  command: >
+    python3 /usr/local/sbin/geoip_ingest.py
+    --license-key {{ geoip.license_key }}
+    --download-dir {{ geoip.download_dir }}
+    --sets-dir {{ geoip.sets_dir }}
+    --countries-file {{ geoip.download_dir }}/allowed_countries.txt
+  when: geoip.enabled | default(false) | bool

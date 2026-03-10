@@ -4,3 +4,19 @@
     that:
       - admin_users is iterable
       - services is mapping
+    fail_msg: "admin_users must be a list and services must be a mapping"
+
+- name: Assert admin_ssh_public_key is set
+  assert:
+    that:
+      - admin_ssh_public_key is defined
+      - admin_ssh_public_key | length > 0
+    fail_msg: "admin_ssh_public_key must be set in vault — an empty value will lock out SSH access"
+
+- name: Assert ssh_port is valid
+  assert:
+    that:
+      - ssh_port is defined
+      - ssh_port | int > 0
+      - ssh_port | int < 65536
+    fail_msg: "ssh_port must be a valid port number (1-65535)"

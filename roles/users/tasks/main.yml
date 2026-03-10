@@ -1,4 +1,17 @@
 ---
-- name: Placeholder for users
-  debug:
-    msg: 'users'
+- name: Ensure service owners exist
+  user:
+    name: "{{ item.value.owner }}"
+    shell: /bin/bash
+    state: present
+  loop: "{{ services | dict2items | sort(attribute='key') }}"
+  when: item.value.enabled | default(false) | bool
+- name: Ensure web roots exist
+  file:
+    path: "/var/www/{{ item.value.domain }}"
+    state: directory
+    owner: "{{ item.value.owner }}"
+    group: "{{ item.value.owner }}"
+    mode: "0755"
+  loop: "{{ services | dict2items | sort(attribute='key') }}"
+  when: item.value.enabled | default(false) | bool

@@ -8,6 +8,51 @@
         path: /etc/ssh/sshd_config
       register: sshd
     - assert:
-        that:
-          - sshd.stat.exists
+        that: sshd.stat.exists
         fail_msg: "/etc/ssh/sshd_config is missing"
+
+    - name: Check PasswordAuthentication is disabled
+      command: grep -i "^PasswordAuthentication no" /etc/ssh/sshd_config
+      changed_when: false
+      failed_when: false
+      register: pw_check
+    - assert:
+        that: pw_check.rc == 0
+        fail_msg: "PasswordAuthentication is not disabled in sshd_config"
+
+    - name: Check nftables is installed
+      package:
+        name: nftables
+        state: present
+      check_mode: true
+      register: nft_pkg
+    - assert:
+        that: not nft_pkg.changed
+        fail_msg: "nftables is not installed"
+
+    - name: Check nftables.conf exists
+      stat:
+        path: /etc/nftables.conf
+      register: nft_conf
+    - assert:
+        that: nft_conf.stat.exists
+        fail_msg: "/etc/nftables.conf is missing"
+
+    - name: Check nftables service is enabled
+      command: systemctl is-enabled nftables
+      changed_when: false
+      failed_when: false
+      register: nft_enabled
+    - assert:
+        that: nft_enabled.rc == 0
+        fail_msg: "nftables service is not enabled"
+
+    - name: Check nginx is installed
+      package:
+        name: nginx
+        state: present
+      check_mode: true
+      register: nginx_pkg
+    - assert:
+        that: not nginx_pkg.changed
+        fail_msg: "nginx is not installed"

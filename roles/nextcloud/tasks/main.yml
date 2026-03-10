@@ -1,4 +1,55 @@
 ---
-- name: Placeholder for nextcloud
-  debug:
-    msg: 'nextcloud'
+- name: Install Nextcloud dependencies
+  package:
+    name:
+      - php
+      - php-fpm
+      - php-mysql
+      - php-gd
+      - php-curl
+      - php-xml
+      - php-mbstring
+      - mariadb-server
+      - tar
+      - bzip2
+    state: present
+- name: Ensure MariaDB is running
+  service:
+    name: mariadb
+    enabled: true
+    state: started
+  ignore_errors: true
+- name: Create Nextcloud database
+  community.mysql.mysql_db:
+    name: "{{ services.nextcloud.app.db_name }}"
+    state: present
+  when: services.nextcloud is defined and services.nextcloud.enabled | default(false) | bool
+- name: Create Nextcloud database user
+  community.mysql.mysql_user:
+    name: "{{ services.nextcloud.app.db_user }}"
+    password: "{{ services.nextcloud.app.db_password }}"
+    priv: "{{ services.nextcloud.app.db_name }}.*:ALL"
+    host: "localhost"
+    state: present
+  when: services.nextcloud is defined and services.nextcloud.enabled | default(false) | bool
+- name: Download Nextcloud
+  get_url:
+    url: "https://download.nextcloud.com/server/releases/nextcloud-{{ services.nextcloud.app.version | default('30.0.4') }}.tar.bz2"
+    dest: /tmp/nextcloud.tar.bz2
+    mode: "0644"
+  when: services.nextcloud is defined and services.nextcloud.enabled | default(false) | bool
+- name: Extract Nextcloud if absent
+  unarchive:
+    src: /tmp/nextcloud.tar.bz2
+    dest: /var/www/
+    remote_src: true
+    creates: /var/www/nextcloud
+  when: services.nextcloud is defined and services.nextcloud.enabled | default(false) | bool
+- name: Ensure Nextcloud data directory exists
+  file:
+    path: "{{ services.nextcloud.app.data_dir }}"
+    state: directory
+    owner: "{{ services.nextcloud.owner }}"
+    group: "{{ services.nextcloud.owner }}"
+    mode: "0750"
+  when: services.nextcloud is defined and services.nextcloud.enabled | default(false) | bool

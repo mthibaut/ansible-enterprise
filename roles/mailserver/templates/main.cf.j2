@@ -1,0 +1,19 @@
+myhostname = {{ mailserver.domain }}
+myorigin = /etc/mailname
+inet_interfaces = all
+inet_protocols = all
+mydestination = localhost
+home_mailbox = Maildir/
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = yes
+smtpd_recipient_restrictions = permit_sasl_authenticated,permit_mynetworks,reject_unauth_destination
+milter_default_action = accept
+milter_protocol = 2
+smtpd_milters = inet:127.0.0.1:8891
+non_smtpd_milters = inet:127.0.0.1:8891
+{% if mailserver.masquerading_enabled | default(false) | bool %}
+smtp_generic_maps = hash:/etc/postfix/generic
+{% endif %}

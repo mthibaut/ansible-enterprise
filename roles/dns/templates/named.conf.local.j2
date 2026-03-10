@@ -1,1 +1,13 @@
-acl secondaries { };
+acl secondaries {
+{% for ip in dns_secondaries %}
+  {{ ip }};
+{% endfor %}
+};
+
+{% for zone in dns_hidden_primary_zones %}
+zone "{{ zone }}" {
+  type master;
+  file "{{ ('/etc/bind/zones/' if ansible_os_family == 'Debian' else '/var/named/') + zone + '.zone' }}";
+  allow-transfer { secondaries; };
+};
+{% endfor %}

@@ -1,1 +1,21 @@
-server { listen 80; }
+server {
+  {% if svc.security.expose_http | default(false) | bool %}
+  listen 80;
+  {% endif %}
+  {% if svc.security.tls | default(false) | bool %}
+  listen 443 ssl http2;
+  ssl_certificate /etc/letsencrypt/live/{{ svc.domain }}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/{{ svc.domain }}/privkey.pem;
+  ssl_client_certificate {{ svc.security.client_ca_path }};
+  ssl_verify_client on;
+  {% endif %}
+  server_name {{ svc.domain }};
+
+  location / {
+    if ($ssl_client_verify != SUCCESS) { return 403; }
+    proxy_pass http://{{ svc.web.upstream_host }}:{{ svc.web.upstream_port }};
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}

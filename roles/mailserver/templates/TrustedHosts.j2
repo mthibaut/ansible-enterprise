@@ -1,0 +1,6 @@
+127.0.0.1
+localhost
+{{ mailserver.domain }}
+{% for host in mailserver.masquerade_hosts | default([]) %}
+{{ host }}
+{% endfor %}

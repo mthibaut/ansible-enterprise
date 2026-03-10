@@ -1,5 +1,15 @@
 ---
+- name: Validate Bind configuration
+  command: named-checkconf
+  listen: Validate and Restart DNS
+- name: Validate zones
+  command: >
+    named-checkzone {{ item }}
+    {{ ('/etc/bind/zones/' if ansible_os_family == 'Debian' else '/var/named/') + item + '.zone' }}
+  loop: "{{ dns_hidden_primary_zones }}"
+  listen: Validate and Restart DNS
 - name: Restart DNS
   service:
-    name: bind9
+    name: "{{ 'bind9' if ansible_os_family == 'Debian' else 'named' }}"
     state: restarted
+  listen: Validate and Restart DNS

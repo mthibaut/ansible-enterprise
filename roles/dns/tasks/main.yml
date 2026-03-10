@@ -1,4 +1,35 @@
 ---
-- name: Placeholder for dns
-  debug:
-    msg: 'dns'
+- name: Install Bind
+  package:
+    name: "{{ 'bind9' if ansible_os_family == 'Debian' else 'bind' }}"
+    state: present
+- name: Ensure Bind zone directory exists
+  file:
+    path: "{{ '/etc/bind/zones' if ansible_os_family == 'Debian' else '/var/named' }}"
+    state: directory
+    mode: "0755"
+- name: Install DNS serial update helper
+  copy:
+    src: update_dns_serial.py
+    dest: /usr/local/sbin/update_dns_serial.py
+    mode: "0755"
+- name: Render named include configuration
+  template:
+    src: named.conf.local.j2
+    dest: "{{ '/etc/bind/named.conf.local' if ansible_os_family == 'Debian' else '/etc/named.conf' }}"
+    mode: "0644"
+  notify: Validate and Restart DNS
+- name: Create zone files only if missing
+  template:
+    src: zone.db.j2
+    dest: "{{ ('/etc/bind/zones/' if ansible_os_family == 'Debian' else '/var/named/') + item + '.zone' }}"
+    mode: "0644"
+    force: false
+  loop: "{{ dns_hidden_primary_zones }}"
+  notify: Validate and Restart DNS
+- name: Update zone serials without overwriting zone files
+  command: >
+    python3 /usr/local/sbin/update_dns_serial.py
+    --zone-file {{ ('/etc/bind/zones/' if ansible_os_family == 'Debian' else '/var/named/') + item + '.zone' }}
+  loop: "{{ dns_hidden_primary_zones }}"
+  changed_when: false

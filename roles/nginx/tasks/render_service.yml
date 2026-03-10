@@ -1,3 +1,11 @@
 ---
-- debug:
-    msg: render service
+- name: Render service vhost
+  template:
+    src: "{{ 'client_cert_site.conf.j2' if service.value.security.require_client_cert | default(false) | bool else 'site.conf.j2' }}"
+    dest: "/etc/nginx/conf.d/{{ service.key }}.conf"
+    mode: "0644"
+    validate: "nginx -t -c %s"
+  vars:
+    svc: "{{ service.value }}"
+  when: service.value.enabled | default(false) | bool
+  notify: Reload nginx

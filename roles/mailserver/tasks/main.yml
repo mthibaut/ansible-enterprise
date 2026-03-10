@@ -1,4 +1,77 @@
 ---
-- name: Placeholder for mailserver
-  debug:
-    msg: 'mailserver'
+- name: Install mail packages
+  package:
+    name:
+      - postfix
+      - dovecot-core
+      - dovecot-imapd
+      - opendkim
+      - opendkim-tools
+      - spamassassin
+    state: present
+  ignore_errors: true
+- name: Ensure mail config directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/opendkim/keys
+    - /etc/postfix
+- name: Deploy postfix main.cf
+  template:
+    src: main.cf.j2
+    dest: /etc/postfix/main.cf
+    mode: "0644"
+  notify: Reload postfix
+- name: Deploy dovecot mail config
+  template:
+    src: 10-mail.conf.j2
+    dest: /etc/dovecot/conf.d/10-mail.conf
+    mode: "0644"
+  notify: Reload dovecot
+- name: Deploy dovecot auth socket config
+  template:
+    src: 10-master.conf.j2
+    dest: /etc/dovecot/conf.d/10-master.conf
+    mode: "0644"
+  notify: Reload dovecot
+- name: Deploy OpenDKIM config
+  template:
+    src: opendkim.conf.j2
+    dest: /etc/opendkim.conf
+    mode: "0644"
+  notify: Reload opendkim
+- name: Deploy OpenDKIM key table
+  template:
+    src: KeyTable.j2
+    dest: /etc/opendkim/KeyTable
+    mode: "0644"
+  notify: Reload opendkim
+- name: Deploy OpenDKIM signing table
+  template:
+    src: SigningTable.j2
+    dest: /etc/opendkim/SigningTable
+    mode: "0644"
+  notify: Reload opendkim
+- name: Deploy OpenDKIM trusted hosts
+  template:
+    src: TrustedHosts.j2
+    dest: /etc/opendkim/TrustedHosts
+    mode: "0644"
+  notify: Reload opendkim
+- name: Generate DKIM key if absent
+  command: >
+    opendkim-genkey -D /etc/opendkim/keys -d {{ mailserver.domain }} -s mail
+  args:
+    creates: /etc/opendkim/keys/mail.private
+  notify: Reload opendkim
+- name: Deploy postfix generic map
+  template:
+    src: generic.j2
+    dest: /etc/postfix/generic
+    mode: "0644"
+  when: mailserver.masquerading_enabled | default(false) | bool
+  notify:
+    - Rebuild postfix generic map
+    - Reload postfix
