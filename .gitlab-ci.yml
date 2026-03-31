@@ -1,0 +1,10 @@
+stages:
+  - validate
+
+validate:
+  image: python:3.11
+  script:
+    - pip install PyYAML jsonschema
+    - make generate
+    - make validate
+    - make checkpoints

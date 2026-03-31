@@ -1,0 +1,20 @@
+# Ansible Enterprise Platform
+# Hand-managed .gitignore (not generated)
+
+# Generated Ansible runtime - regenerate with: make generate
+build/
+
+# Sensitive credentials
+group_vars/all/vault.yml
+*.private
+*.key
+*.pem
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generator staging dirs
+src/.regen-staging
+src/.regen-staging-verify

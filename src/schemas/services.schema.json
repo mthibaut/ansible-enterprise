@@ -1,0 +1,223 @@
+{
+  "$comment": "GENERATED FILE - DO NOT EDIT. This schema is overwritten by generate_ansible_enterprise.py. Source of truth: PROMPT.md.",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": {
+    "$ref": "#/definitions/service"
+  },
+  "definitions": {
+    "service": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "domain"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tls": {
+              "type": "boolean",
+              "default": false
+            },
+            "expose_http": {
+              "type": "boolean",
+              "default": false
+            },
+            "expose_https": {
+              "type": "boolean",
+              "default": false
+            },
+            "require_client_cert": {
+              "type": "boolean",
+              "default": false
+            },
+            "client_ca_path": {
+              "type": "string"
+            },
+            "geoip_allowed_countries": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 2
+              },
+              "description": "ISO 3166-1 alpha-2 country codes allowed for this service's ports. Overrides the global geoip_allowed_countries for the affected ports. Union of all overrides per port is applied. Omit to use the global list."
+            },
+            "geoip_allowlist": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "IPs, CIDRs, or networks that bypass geoip filtering for this service's ports. Mixed IPv4/IPv6. Union across services per port. These are accepted before the geoip drop rules."
+            },
+            "geoip_enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether geoip country filtering applies to this service's ports. When false, geoip filtering is disabled for the port(s) this service uses. One service opting out disables geoip for the entire port (L4 constraint)."
+            },
+            "access_allowlist": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "IP addresses and CIDRs (IPv4 or IPv6) that are the ONLY sources permitted to reach this service. nginx enforces this with allow/deny directives independent of geoip. When set, a dedicated nginx vhost template is used that denies all traffic except the listed addresses. Use for internal services (Prometheus, Grafana, admin UIs) that must not be publicly reachable."
+            }
+          }
+        },
+        "web": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "upstream_host": {
+              "type": "string",
+              "minLength": 1
+            },
+            "upstream_port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          },
+          "required": [
+            "upstream_host",
+            "upstream_port"
+          ]
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "nextcloud",
+                "generic"
+              ]
+            },
+            "version": {
+              "type": "string"
+            },
+            "db_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "db_user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "db_password": {
+              "type": "string"
+            },
+            "data_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "admin_password": {
+              "type": "string"
+            }
+          }
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Capability names this service depends on (e.g. tls, mail). Each name must be a key in the capabilities dict. The resolve_capabilities pre-task maps these to provider role names at runtime."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Shorthand upstream port for Docker-managed services. nginx normalises this to web.upstream_port with upstream_host defaulting to 127.0.0.1."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "app": {
+                "properties": {
+                  "type": {
+                    "const": "nextcloud"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            },
+            "required": [
+              "app"
+            ]
+          },
+          "then": {
+            "required": [
+              "app"
+            ],
+            "properties": {
+              "app": {
+                "required": [
+                  "type",
+                  "db_name",
+                  "db_user",
+                  "db_password",
+                  "data_dir",
+                  "admin_password"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "app": {
+                "properties": {
+                  "type": {
+                    "const": "generic"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            },
+            "required": [
+              "app"
+            ]
+          },
+          "then": {
+            "required": [
+              "web"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,430 @@
+# source_of_truth mapping philosophy:
+# PROMPT.md is listed for every entry as the architectural spec.
+# generate_ansible_enterprise.py is the proximate mechanism that writes each file.
+# Paths are relative to src/.
+# Validate with: cd src && python3 scripts/verify_repo_contracts.py
+
+generated_contracts:
+  group_vars/all/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+      - spec/architecture.md
+  group_vars/all/vault.yml.example:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  inventory/group_vars/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  inventory/host_vars/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  inventory/hosts.ini.example:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  inventory/pull.ini:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  molecule/default/converge.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  molecule/default/molecule.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+      - spec/architecture.md
+  molecule/default/verify.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  requirements.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/common/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/geoip/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/ssh_hardening/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/file_copy/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/file_copy/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/templates/certbot-tsig.key.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/templates/dns-auth.sh.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/templates/dns-cleanup.sh.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/certbot/templates/renew-deploy-hook.sh.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/common/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/files/sync_dns_records.py:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/files/update_dns_serial.py:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/templates/named.conf.local.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/templates/zone.db.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall_geo/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall_geo/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall_geo/templates/nftables.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/geoip/files/geoip_ingest.py:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/geoip/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/10-auth.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/10-mail.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/10-master.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/KeyTable.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/SigningTable.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/TrustedHosts.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/generic.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/main.cf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/master.cf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/opendkim.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nextcloud/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nextcloud/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nextcloud/meta/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/step_ca/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/step_ca/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/step_ca/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/samba/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/samba/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/samba/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/samba/templates/smb.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nfs/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nfs/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nfs/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nfs/templates/exports.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/node_exporter/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/node_exporter/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/node_exporter/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nextcloud/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nextcloud/templates/docker-compose.yml.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/tasks/render_service.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/templates/client_cert_site.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/templates/restricted_site.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/templates/nextcloud.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/templates/nginx.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/nginx/templates/site.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/preflight/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/step_ca/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/step_ca/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/step_ca/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/openvpn/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/openvpn/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/openvpn/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/openvpn/templates/client.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/openvpn/templates/server.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/ssh_hardening/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/ssh_hardening/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/ssh_hardening/templates/sshd_config.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/users/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  site.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+      - spec/architecture.md
+  templates/bind/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  templates/dovecot/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  templates/nftables/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  templates/nginx/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  templates/postfix/.gitkeep:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/geoip/templates/geoip.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/geoip/files/geoip_refresh.sh:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/docker/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/prometheus/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/prometheus/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/prometheus/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/prometheus/templates/prometheus.yml.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/grafana/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/grafana/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/grafana/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall_geo/templates/pf.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py

@@ -1,0 +1,7 @@
+/generate_ansible_enterprise.py @maintainer
+/scripts/verify_repo_contracts.py @maintainer
+/scripts/resolve_service_order.py @maintainer
+/schemas/* @maintainer
+/roles/firewall_geo/ @maintainer
+/roles/mailserver/ @maintainer
+/roles/nextcloud/ @maintainer

@@ -1,0 +1,32 @@
+# -----------------------------------------------------------------------------
+# GENERATED FILE - DO NOT EDIT
+# This file is overwritten by generate_ansible_enterprise.py.
+# Source of truth: PROMPT.md.
+# Manual edits will be lost on the next regeneration.
+# -----------------------------------------------------------------------------
+# Known gaps registry - managed by hand, not by the generator.
+# Each entry:
+#   id:          short identifier, used in error messages
+#   description: what is incomplete
+#   status:      open | closed  (closed entries must be removed)
+#   blocking:    true = CI fails while open
+#                false = CI warns but passes
+#   added:       ISO date the gap was first recorded
+#
+# Rules:
+#   - Add an entry BEFORE starting work that introduces a known gap.
+#   - Remove the entry (do not set status: closed) when the gap is fixed.
+#   - Blocking gaps must be resolved before merging to main.
+#   - Non-blocking gaps are tracked here to prevent them being forgotten.
+#
+# Current open gaps: none
+# Previously recorded gaps (now resolved):
+#   nginx-user            - nginx.conf hardcoded www-data user
+#   nginx-not-started     - nginx had no state: started task
+#   nextcloud-fastcgi     - nextcloud served via proxy_pass not fastcgi
+#   phpfpm-not-configured - php-fpm pool and start task missing
+#   schema-web-required   - web block wrongly required for nextcloud
+#   no-listen-fallback    - server block missing listen when tls=false
+#   admin-reuses-dbpass   - occ install used db_password as admin password
+#
+gaps: []
