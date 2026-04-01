@@ -3120,3 +3120,11 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      Fix sftp-server path for RedHat family. Fedora, Alma, Rocky use
      /usr/libexec/openssh/sftp-server (not /usr/libexec/sftp-server).
      FreeBSD remains /usr/libexec/sftp-server (no openssh subdir).
+
+199. `checkpoint-199-set-hostname-domain`
+     New capability: set_hostname and set_domain_name variables in
+     common/defaults. When set_hostname is non-empty, applies via the
+     Ansible hostname module and updates /etc/hosts with a 127.0.1.1
+     entry (FQDN + short name if domain is also set). When
+     set_domain_name is non-empty, writes a search directive to
+     /etc/resolv.conf. Both default to empty string (no change).

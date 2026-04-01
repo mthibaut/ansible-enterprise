@@ -581,6 +581,14 @@ prometheus_enabled: false
 # Not supported on FreeBSD. Disabled by default (opt-in).
 grafana_enabled: false
 
+# Hostname to apply via hostnamectl / hostname(1).
+# Leave empty to keep the current hostname unchanged.
+set_hostname: ''
+
+# Domain name (search domain) written to /etc/resolv.conf via resolvconf
+# or directly. Leave empty to keep the current domain unchanged.
+set_domain_name: ''
+
 # Services dict. Declare application services in inventory group_vars
 # or host_vars. Each entry drives nginx, DNS, TLS, and firewall config.
 # See group_vars/all/main.yml for examples.
@@ -1124,6 +1132,29 @@ fi
 - name: Set root group name
   set_fact:
     _root_group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
+
+# -- Set hostname ----------------------------------------
+- name: Set system hostname
+  hostname:
+    name: "{{ set_hostname }}"
+  when: set_hostname | default('') | length > 0
+
+- name: Update /etc/hosts with hostname
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\\.0\\.1\\.1\\s'
+    line: "127.0.1.1  {{ set_hostname + '.' + set_domain_name if set_domain_name | default('') | length > 0 else set_hostname }}  {{ set_hostname }}"
+    state: present
+  when: set_hostname | default('') | length > 0
+
+# -- Set domain name ----------------------------------------
+- name: Set search domain in resolv.conf
+  lineinfile:
+    path: /etc/resolv.conf
+    regexp: '^search\\s'
+    line: "search {{ set_domain_name }}"
+    state: present
+  when: set_domain_name | default('') | length > 0
 
 # FreeBSD: the Ansible package must be installed on the managed host
 # for Python-based modules to function. Package name includes the Python

@@ -17,7 +17,7 @@ modes.
 **Remote git repository:**
 `git@github.com:mthibaut/ansible-enterprise-test.git`
 
-**Current HEAD:** checkpoint-198 — `fix: checkpoint-198-sshd-sftp-redhat-path`
+**Current HEAD:** checkpoint-199 — `feat: checkpoint-199-set-hostname-domain`
 
 **PROMPT.md version:** 1.4.0 (PROMPT.md is a validation anchor only — it is
 not a real specification. The FILE_MANIFEST in `src/generate_ansible_enterprise.py`
@@ -476,8 +476,9 @@ Tracked future work (from `src/spec/architecture.md`):
 | **196** | **fix: step_ca RedHat repo — write .repo file via copy with correct baseurl packages.smallstep.com/stable/fedora/** |
 | **197** | **fix: sshd_config missing Subsystem sftp directive — platform-aware sftp-server path** |
 | **198** | **fix: sshd sftp-server path for RedHat — /usr/libexec/openssh/sftp-server** |
+| **199** | **feat: set_hostname and set_domain_name variables in common role** |
 
-Next checkpoint will be **199**.
+Next checkpoint will be **200**.
 
 ## Generator format note (checkpoint-042)
 FILE_MANIFEST now uses triple-quoted multiline strings. To add or edit content:
