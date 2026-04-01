@@ -3098,3 +3098,12 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        literal newline by the YAML formatter, producing invalid YAML. step-ca
        strips trailing whitespace from the password file, so the newline is
        unnecessary.
+
+196. `checkpoint-196-step-ca-redhat-repo-url`
+     Fix step_ca RedHat repository configuration. The previous get_url
+     approach downloading from packages.smallstep.com/stable/rpm/smallstep.repo
+     returned HTTP 404 — that URL does not exist. Replaced with a copy task
+     that writes the .repo file directly, using the correct baseurl
+     https://packages.smallstep.com/stable/fedora/ and GPG key
+     https://packages.smallstep.com/keys/smallstep-0x889B19391F774443.gpg.
+     Also added update_cache: true to the dnf install task.

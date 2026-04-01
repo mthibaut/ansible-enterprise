@@ -4634,14 +4634,22 @@ step_ca:
 - name: Install step-ca (RedHat)
   block:
     - name: Add Smallstep RPM repository (RedHat)
-      get_url:
-        url: https://packages.smallstep.com/stable/rpm/smallstep.repo
+      copy:
         dest: /etc/yum.repos.d/smallstep.repo
         mode: '0644'
+        content: |
+          [smallstep]
+          name=Smallstep
+          baseurl=https://packages.smallstep.com/stable/fedora/
+          enabled=1
+          repo_gpgcheck=0
+          gpgcheck=1
+          gpgkey=https://packages.smallstep.com/keys/smallstep-0x889B19391F774443.gpg
     - name: Install step-ca and step-cli (RedHat)
       package:
         name: [step-ca, step-cli]
         state: present
+        update_cache: true
   when:
     - step_ca.enabled | default(false) | bool
     - ansible_facts.os_family == 'RedHat'

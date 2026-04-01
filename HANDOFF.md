@@ -17,7 +17,7 @@ modes.
 **Remote git repository:**
 `git@github.com:mthibaut/ansible-enterprise-test.git`
 
-**Current HEAD:** checkpoint-195 — `fix: checkpoint-195-step-ca-copr-password-fixes`
+**Current HEAD:** checkpoint-196 — `fix: checkpoint-196-step-ca-redhat-repo-url`
 
 **PROMPT.md version:** 1.4.0 (PROMPT.md is a validation anchor only — it is
 not a real specification. The FILE_MANIFEST in `src/generate_ansible_enterprise.py`
@@ -473,8 +473,9 @@ Tracked future work (from `src/spec/architecture.md`):
 | **193** | **fix: openvpn client.conf.j2 cipher uses openvpn.client.cipher (was openvpn.server.cipher)** |
 | **194** | **fix: openvpn FreeBSD paths — _ovpn_server/client_conf_dir, EASYRSA_PKI, absolute cert paths, openvpn.conf filename, group fix** |
 | **195** | **fix: step_ca COPR replaced with official RPM repo get_url; password file content without trailing newline** |
+| **196** | **fix: step_ca RedHat repo — write .repo file via copy with correct baseurl packages.smallstep.com/stable/fedora/** |
 
-Next checkpoint will be **196**.
+Next checkpoint will be **197**.
 
 ## Generator format note (checkpoint-042)
 FILE_MANIFEST now uses triple-quoted multiline strings. To add or edit content:
