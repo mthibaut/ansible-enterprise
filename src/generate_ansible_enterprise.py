@@ -5417,7 +5417,7 @@ PubkeyAuthentication yes
 PermitRootLogin {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' }}
 UsePAM yes
 AllowUsers root {{ admin_users | join(" ") }}
-Subsystem sftp {{ '/usr/libexec/sftp-server' if ansible_facts.os_family in ['RedHat', 'FreeBSD'] else '/usr/lib/openssh/sftp-server' if ansible_facts.os_family == 'Debian' else '/usr/lib/ssh/sftp-server' }}
+Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family == 'RedHat' else '/usr/libexec/sftp-server' if ansible_facts.os_family == 'FreeBSD' else '/usr/lib/openssh/sftp-server' if ansible_facts.os_family == 'Debian' else '/usr/lib/ssh/sftp-server' }}
 """,
     'roles/users/tasks/main.yml': """\
 ---

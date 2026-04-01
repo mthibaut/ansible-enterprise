@@ -3115,3 +3115,8 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        RedHat:   /usr/libexec/sftp-server
        FreeBSD:  /usr/libexec/sftp-server
        Arch:     /usr/lib/ssh/sftp-server
+
+198. `checkpoint-198-sshd-sftp-redhat-path`
+     Fix sftp-server path for RedHat family. Fedora, Alma, Rocky use
+     /usr/libexec/openssh/sftp-server (not /usr/libexec/sftp-server).
+     FreeBSD remains /usr/libexec/sftp-server (no openssh subdir).
