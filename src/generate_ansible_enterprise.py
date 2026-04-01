@@ -4633,9 +4633,11 @@ step_ca:
 
 - name: Install step-ca (RedHat)
   block:
-    - name: Add Smallstep COPR repository (RedHat)
-      command: dnf copr enable smallstep/smallstep -y
-      changed_when: false
+    - name: Add Smallstep RPM repository (RedHat)
+      get_url:
+        url: https://packages.smallstep.com/stable/rpm/smallstep.repo
+        dest: /etc/yum.repos.d/smallstep.repo
+        mode: '0644'
     - name: Install step-ca and step-cli (RedHat)
       package:
         name: [step-ca, step-cli]
@@ -4684,7 +4686,7 @@ step_ca:
 - name: Write step-ca password file
   copy:
     dest: "{{ step_ca.data_dir | default('/etc/step-ca') }}/password.txt"
-    content: "{{ step_ca_password | trim }}\n"
+    content: "{{ step_ca_password | trim }}"
     owner: "{{ step_ca.user | default('step-ca') }}"
     group: "{{ _root_group }}"
     mode: '0600'
@@ -4986,12 +4988,25 @@ openvpn:
       {{ 'openvpn@client' if ansible_facts.os_family == 'Debian'
          else 'openvpn-client@client' if ansible_facts.os_family in ['RedHat', 'Archlinux']
          else 'openvpn' }}
-    _easyrsa_dir: /etc/openvpn/easy-rsa
+    _easyrsa_dir: >-
+      {{ '/usr/local/etc/openvpn/easy-rsa' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc/openvpn/easy-rsa' }}
+    _easyrsa_pki_dir: >-
+      {{ '/usr/local/etc/openvpn/easy-rsa' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc/openvpn/easy-rsa' }}/pki
     _easyrsa_bin: >-
       {{ '/usr/share/easy-rsa/easyrsa'        if ansible_facts.os_family == 'Debian'
          else '/usr/share/easy-rsa/3/easyrsa' if ansible_facts.os_family == 'RedHat'
          else '/usr/bin/easyrsa'               if ansible_facts.os_family == 'Archlinux'
-         else '/usr/local/share/easy-rsa/easyrsa' }}
+         else '/usr/local/bin/easyrsa' }}
+    _ovpn_server_conf_dir: >-
+      {{ '/usr/local/etc/openvpn' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc/openvpn'        if ansible_facts.os_family == 'Debian'
+         else '/etc/openvpn/server' }}
+    _ovpn_client_conf_dir: >-
+      {{ '/usr/local/etc/openvpn' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc/openvpn'        if ansible_facts.os_family == 'Debian'
+         else '/etc/openvpn/client' }}
 # EasyRSA binary path -- use 'find' to locate it dynamically since
 # paths vary between distro versions. Fall back to 'easyrsa' in PATH.
 
@@ -5023,7 +5038,7 @@ openvpn:
     chdir: "{{ _easyrsa_dir }}"
     creates: "{{ _easyrsa_dir }}/pki"
   environment:
-    EASYRSA: "{{ _easyrsa_dir }}"
+    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
   when:
     - openvpn.enabled | default(false) | bool
     - openvpn.mode | default('server') == 'server'
@@ -5034,7 +5049,7 @@ openvpn:
     chdir: "{{ _easyrsa_dir }}"
     creates: "{{ _easyrsa_dir }}/pki/ca.crt"
   environment:
-    EASYRSA: "{{ _easyrsa_dir }}"
+    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
     EASYRSA_REQ_CN: "{{ inventory_hostname }} CA"
   when:
     - openvpn.enabled | default(false) | bool
@@ -5046,7 +5061,7 @@ openvpn:
     chdir: "{{ _easyrsa_dir }}"
     creates: "{{ _easyrsa_dir }}/pki/issued/server.crt"
   environment:
-    EASYRSA: "{{ _easyrsa_dir }}"
+    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
   when:
     - openvpn.enabled | default(false) | bool
     - openvpn.mode | default('server') == 'server'
@@ -5057,14 +5072,14 @@ openvpn:
     chdir: "{{ _easyrsa_dir }}"
     creates: "{{ _easyrsa_dir }}/pki/dh.pem"
   environment:
-    EASYRSA: "{{ _easyrsa_dir }}"
+    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
   when:
     - openvpn.enabled | default(false) | bool
     - openvpn.mode | default('server') == 'server'
 
 - name: Ensure OpenVPN config directory exists (server)
   file:
-    path: "{{ _ovpn_conf_dir }}"
+    path: "{{ _ovpn_server_conf_dir }}"
     state: directory
     owner: root
     group: "{{ _root_group }}"
@@ -5087,7 +5102,7 @@ openvpn:
     chdir: "{{ _easyrsa_dir }}"
     creates: "{{ _easyrsa_dir }}/pki/issued/{{ item }}.crt"
   environment:
-    EASYRSA: "{{ _easyrsa_dir }}"
+    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
   loop: "{{ openvpn.server.clients | default([]) }}"
   when:
     - openvpn.enabled | default(false) | bool
@@ -5096,7 +5111,7 @@ openvpn:
 - name: Deploy server config
   template:
     src: server.conf.j2
-    dest: "{{ _ovpn_conf_dir }}/server.conf"
+    dest: "{{ _ovpn_server_conf_dir }}/{{ 'openvpn.conf' if ansible_facts.os_family == 'FreeBSD' else 'server.conf' }}"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
@@ -5137,7 +5152,7 @@ openvpn:
 # - CLIENT -
 - name: Ensure OpenVPN client config dir exists
   file:
-    path: "{{ _ovpn_conf_dir }}"
+    path: "{{ _ovpn_client_conf_dir }}"
     state: directory
     owner: root
     group: "{{ _root_group }}"
@@ -5149,7 +5164,7 @@ openvpn:
 - name: Copy client CA certificate
   copy:
     src: "{{ openvpn.client.ca_cert }}"
-    dest: "{{ _ovpn_conf_dir }}/ca.crt"
+    dest: "{{ _ovpn_client_conf_dir }}/ca.crt"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
@@ -5162,7 +5177,7 @@ openvpn:
 - name: Copy client certificate
   copy:
     src: "{{ openvpn.client.cert }}"
-    dest: "{{ _ovpn_conf_dir }}/client.crt"
+    dest: "{{ _ovpn_client_conf_dir }}/client.crt"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
@@ -5175,7 +5190,7 @@ openvpn:
 - name: Copy client key
   copy:
     src: "{{ openvpn.client.key }}"
-    dest: "{{ _ovpn_conf_dir }}/client.key"
+    dest: "{{ _ovpn_client_conf_dir }}/client.key"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
@@ -5188,7 +5203,7 @@ openvpn:
 - name: Copy client tls-auth key
   copy:
     src: "{{ openvpn.client.tls_auth }}"
-    dest: "{{ _ovpn_conf_dir }}/ta.key"
+    dest: "{{ _ovpn_client_conf_dir }}/ta.key"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
@@ -5201,7 +5216,7 @@ openvpn:
 - name: Deploy client config
   template:
     src: client.conf.j2
-    dest: "{{ _ovpn_conf_dir }}/client.conf"
+    dest: "{{ _ovpn_client_conf_dir }}/{{ 'openvpn.conf' if ansible_facts.os_family == 'FreeBSD' else 'client.conf' }}"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
@@ -5245,10 +5260,10 @@ port {{ openvpn.port | default(1194) }}
 proto {{ openvpn.proto | default('udp') }}
 dev {{ openvpn.dev | default('tun') }}
 
-ca   {{ _ovpn_conf_dir }}/../easy-rsa/pki/ca.crt
-cert {{ _ovpn_conf_dir }}/../easy-rsa/pki/issued/server.crt
-key  {{ _ovpn_conf_dir }}/../easy-rsa/pki/private/server.key
-dh   {{ _ovpn_conf_dir }}/../easy-rsa/pki/dh.pem
+ca   {{ _easyrsa_pki_dir }}/ca.crt
+cert {{ _easyrsa_pki_dir }}/issued/server.crt
+key  {{ _easyrsa_pki_dir }}/private/server.key
+dh   {{ _easyrsa_pki_dir }}/dh.pem
 
 server {{ openvpn.server.network | default('10.8.0.0') }} {{ openvpn.server.netmask | default('255.255.255.0') }}
 ifconfig-pool-persist {{ _ovpn_conf_dir }}/ipp.txt
@@ -5268,7 +5283,7 @@ tls-auth {{ _ovpn_conf_dir }}/ta.key 0
 key-direction 0
 
 user nobody
-group {{ 'nobody' if ansible_facts.os_family == 'FreeBSD' else 'nogroup' }}
+group {{ 'nogroup' if ansible_facts.os_family == 'Debian' else 'nobody' }}
 persist-key
 persist-tun
 
@@ -5286,12 +5301,12 @@ remote {{ openvpn.client.remote }} {{ openvpn.port | default(1194) }}
 resolv-retry infinite
 nobind
 
-ca   {{ _ovpn_conf_dir }}/ca.crt
-cert {{ _ovpn_conf_dir }}/client.crt
-key  {{ _ovpn_conf_dir }}/client.key
+ca   {{ _ovpn_client_conf_dir }}/ca.crt
+cert {{ _ovpn_client_conf_dir }}/client.crt
+key  {{ _ovpn_client_conf_dir }}/client.key
 
 {% if openvpn.client.tls_auth is defined %}
-tls-auth {{ _ovpn_conf_dir }}/ta.key 1
+tls-auth {{ _ovpn_client_conf_dir }}/ta.key 1
 key-direction 1
 {% endif %}
 
@@ -5300,9 +5315,9 @@ persist-key
 persist-tun
 
 user nobody
-group {{ 'nobody' if ansible_facts.os_family == 'FreeBSD' else 'nogroup' }}
+group {{ 'nogroup' if ansible_facts.os_family == 'Debian' else 'nobody' }}
 
-log {{ _ovpn_conf_dir }}/openvpn-client.log
+log {{ _ovpn_client_conf_dir }}/openvpn-client.log
 verb 3
 """,
     'roles/ssh_hardening/handlers/main.yml': """\

@@ -3071,3 +3071,30 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      causing an undefined variable error. Added openvpn.client.cipher default
      (AES-256-GCM) to defaults/main.yml; client.conf.j2 now uses
      openvpn.client.cipher | default('AES-256-GCM').
+
+194. `checkpoint-194-openvpn-freebsd-server-client-paths`
+     Multiple openvpn role fixes for FreeBSD and cross-platform correctness:
+     - Added _ovpn_server_conf_dir and _ovpn_client_conf_dir facts (separate
+       server and client config dirs per distro; replaces single _ovpn_conf_dir
+       used for both, which was wrong on RedHat/Arch).
+     - Added FreeBSD-aware _easyrsa_dir and _easyrsa_pki_dir facts.
+     - Corrected FreeBSD easyrsa binary path to /usr/local/bin/easyrsa.
+     - Replaced EASYRSA env var with EASYRSA_PKI in all EasyRSA commands
+       (EASYRSA_PKI is the correct variable for specifying the PKI directory).
+     - server.conf.j2: replaced ../easy-rsa/pki relative paths with
+       {{ _easyrsa_pki_dir }} absolute paths.
+     - server.conf.j2 and client.conf.j2: deploy to openvpn.conf on FreeBSD
+       (rc.d script expects that filename; was server.conf / client.conf).
+     - Fixed group directive: only Debian uses nogroup; all others use nobody.
+
+195. `checkpoint-195-step-ca-copr-password-fixes`
+     Two step_ca role fixes:
+     - RedHat: replaced "dnf copr enable smallstep/smallstep" with get_url
+       downloading from https://packages.smallstep.com/stable/rpm/smallstep.repo.
+       Smallstep COPR has no Fedora 42 build; the official RPM repo URL works
+       on all supported RedHat-family releases.
+     - Password file content: removed trailing \n from
+       "{{ step_ca_password | trim }}\n". The \n was being expanded to a
+       literal newline by the YAML formatter, producing invalid YAML. step-ca
+       strips trailing whitespace from the password file, so the newline is
+       unnecessary.
