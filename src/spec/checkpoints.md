@@ -3107,3 +3107,11 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      https://packages.smallstep.com/stable/fedora/ and GPG key
      https://packages.smallstep.com/keys/smallstep-0x889B19391F774443.gpg.
      Also added update_cache: true to the dnf install task.
+
+197. `checkpoint-197-sshd-sftp-subsystem`
+     The sshd_config template was missing the Subsystem sftp directive,
+     breaking SFTP access. Added platform-aware sftp-server path:
+       Debian:   /usr/lib/openssh/sftp-server
+       RedHat:   /usr/libexec/sftp-server
+       FreeBSD:  /usr/libexec/sftp-server
+       Arch:     /usr/lib/ssh/sftp-server
