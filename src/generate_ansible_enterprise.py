@@ -4954,85 +4954,69 @@ step_ca:
 """,
     'roles/openvpn/defaults/main.yml': """\
 ---
-# OpenVPN role -- routed tun, EasyRSA PKI.
-openvpn:
-  enabled: false
-
-  # mode: server | client
-  mode: server
-
-  port: 1194
-  proto: udp      # udp | tcp
-  dev: tun
-
-  # Server settings (mode: server)
-  server:
-    network: 10.8.0.0
-    netmask: 255.255.255.0
-    push_routes: []         # extra routes pushed to clients
-    push_dns: []            # DNS servers pushed to clients
-    cipher: AES-256-GCM
-    keepalive: '10 120'
-    max_clients: 50
-    # clients: list of names for which to generate EasyRSA client certs
-    # Example:
-    #   clients: [laptop, phone]
-    clients: []
-
-  # Client settings (mode: client)
-  client:
-    remote: ''             # VPN server hostname or IP
-    cipher: AES-256-GCM
-    # ca_cert, cert, key, tls_auth: paths on Ansible controller
-    # (relative to playbook dir or absolute)
-    # ca_cert: files/vpn/ca.crt
-    # cert:    files/vpn/client.crt
-    # key:     files/vpn/client.key
-    # tls_auth: files/vpn/ta.key   # optional but recommended
+# OpenVPN role -- supports multiple server and client instances.
+#
+# openvpn_instances is a list of dicts.  Each entry creates an
+# independent OpenVPN tunnel with its own PKI (server), config,
+# and systemd service unit.
+#
+# Common keys (all instances):
+#   name:   (required) unique instance name -- drives filenames and service names
+#   mode:   (required) server | client
+#   port:   listen/connect port            (default 1194)
+#   proto:  udp | tcp                      (default udp)
+#   dev:    tun | tap                      (default tun)
+#   cipher: data channel cipher            (default AES-256-GCM)
+#
+# Server-only keys:
+#   network:      VPN subnet               (default 10.8.0.0)
+#   netmask:      VPN subnet mask          (default 255.255.255.0)
+#   push_routes:  extra routes pushed to clients  (default [])
+#   push_dns:     DNS servers pushed to clients   (default [])
+#   keepalive:    keepalive interval        (default '10 120')
+#   max_clients:  max simultaneous clients  (default 50)
+#   clients:      list of client cert names to generate (default [])
+#
+# Client-only keys:
+#   remote:    VPN server hostname or IP (required)
+#   ca_cert:   path on controller to CA cert
+#   cert:      path on controller to client cert
+#   key:       path on controller to client key
+#   tls_auth:  path on controller to tls-auth key (optional)
+#
+# Example:
+#   openvpn_instances:
+#     - name: main
+#       mode: server
+#       port: 1194
+#       clients: [laptop, phone]
+#     - name: office
+#       mode: client
+#       remote: vpn.office.com
+#       ca_cert: files/vpn/ca.crt
+#       cert: files/vpn/client.crt
+#       key: files/vpn/client.key
+#       tls_auth: files/vpn/ta.key
+openvpn_instances: []
 """,
     'roles/openvpn/handlers/main.yml': """\
 ---
-- name: Restart OpenVPN server
-  systemd:
-    name: "{{ _ovpn_service }}"
-    state: restarted
-    daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
-
-- name: Restart OpenVPN server (FreeBSD)
+# Multi-instance restarts are handled inline in server_instance.yml
+# and client_instance.yml.  This handler is a fallback for FreeBSD
+# where all profiles are managed by a single rc.d service.
+- name: Restart OpenVPN (FreeBSD)
   command: service openvpn restart
   changed_when: false
   when: ansible_facts.os_family == 'FreeBSD'
 """,
     'roles/openvpn/tasks/main.yml': """\
 ---
-# Platform-specific paths and package names.
+# Platform-specific paths.
 - name: Set OpenVPN platform facts
   set_fact:
-    _ovpn_pkg: >-
-      {{ 'openvpn' if ansible_facts.os_family in ['Debian', 'RedHat', 'Archlinux']
-         else 'openvpn' }}
-    _easyrsa_pkg: >-
-      {{ 'easy-rsa' if ansible_facts.os_family in ['Debian', 'RedHat', 'Archlinux']
-         else 'easy-rsa' }}
     _ovpn_conf_dir: >-
       {{ '/usr/local/etc/openvpn' if ansible_facts.os_family == 'FreeBSD'
          else '/etc/openvpn' }}
-    _ovpn_service: >-
-      {{ 'openvpn@server' if ansible_facts.os_family == 'Debian'
-         else 'openvpn-server@server' if ansible_facts.os_family == 'RedHat'
-         else 'openvpn-server@server' if ansible_facts.os_family == 'Archlinux'
-         else 'openvpn' }}
-    _ovpn_client_service: >-
-      {{ 'openvpn@client' if ansible_facts.os_family == 'Debian'
-         else 'openvpn-client@client' if ansible_facts.os_family in ['RedHat', 'Archlinux']
-         else 'openvpn' }}
-    _easyrsa_dir: >-
-      {{ '/usr/local/etc/openvpn/easy-rsa' if ansible_facts.os_family == 'FreeBSD'
-         else '/etc/openvpn/easy-rsa' }}
-    _easyrsa_pki_dir: >-
-      {{ '/usr/local/etc/openvpn/easy-rsa' if ansible_facts.os_family == 'FreeBSD'
-         else '/etc/openvpn/easy-rsa' }}/pki
     _easyrsa_bin: >-
       {{ '/usr/share/easy-rsa/easyrsa'        if ansible_facts.os_family == 'Debian'
          else '/usr/share/easy-rsa/3/easyrsa' if ansible_facts.os_family == 'RedHat'
@@ -5046,279 +5030,269 @@ openvpn:
       {{ '/usr/local/etc/openvpn' if ansible_facts.os_family == 'FreeBSD'
          else '/etc/openvpn'        if ansible_facts.os_family == 'Debian'
          else '/etc/openvpn/client' }}
-# EasyRSA binary path -- use 'find' to locate it dynamically since
-# paths vary between distro versions. Fall back to 'easyrsa' in PATH.
+  when: openvpn_instances | default([]) | length > 0
 
 - name: Install OpenVPN
   package:
-    name: "{{ _ovpn_pkg }}"
+    name: openvpn
     state: present
+  when: openvpn_instances | default([]) | length > 0
 
 - name: Install EasyRSA
   package:
-    name: "{{ _easyrsa_pkg }}"
+    name: easy-rsa
     state: present
+  when: openvpn_instances | default([]) | selectattr('mode', 'equalto', 'server') | list | length > 0
 
-# - SERVER -
-- name: Create EasyRSA working directory
+# -- Per-instance dispatch --
+- name: Configure OpenVPN server instances
+  include_tasks: server_instance.yml
+  loop: "{{ openvpn_instances | default([]) | selectattr('mode', 'equalto', 'server') | list }}"
+  loop_control:
+    loop_var: _inst
+
+- name: Configure OpenVPN client instances
+  include_tasks: client_instance.yml
+  loop: "{{ openvpn_instances | default([]) | selectattr('mode', 'equalto', 'client') | list }}"
+  loop_control:
+    loop_var: _inst
+
+# -- FreeBSD: register all profiles and start the single rc.d service --
+- name: Set FreeBSD openvpn profiles
+  command: >-
+    sysrc openvpn_profiles="{{ openvpn_instances | default([]) | map(attribute='name') | join(' ') }}"
+  changed_when: false
+  when:
+    - openvpn_instances | default([]) | length > 0
+    - ansible_facts.os_family == 'FreeBSD'
+
+- name: Set FreeBSD openvpn config files per profile
+  command: >-
+    sysrc openvpn_{{ item.name }}_configfile="{{ _ovpn_conf_dir }}/{{ item.name }}.conf"
+  changed_when: false
+  loop: "{{ openvpn_instances | default([]) }}"
+  when: ansible_facts.os_family == 'FreeBSD'
+
+- name: Enable openvpn at boot (FreeBSD)
+  command: sysrc openvpn_enable=YES openvpn_if=tun
+  changed_when: false
+  when:
+    - openvpn_instances | default([]) | length > 0
+    - ansible_facts.os_family == 'FreeBSD'
+
+- name: Start openvpn (FreeBSD)
+  command: service openvpn restart
+  register: _ovpn_fbsd_start
+  changed_when: "'already running' not in _ovpn_fbsd_start.stderr"
+  failed_when: "_ovpn_fbsd_start.rc != 0 and 'already running' not in _ovpn_fbsd_start.stderr"
+  when:
+    - openvpn_instances | default([]) | length > 0
+    - ansible_facts.os_family == 'FreeBSD'
+""",
+    'roles/openvpn/tasks/server_instance.yml': """\
+---
+# Server instance tasks -- called via include_tasks with loop_var: _inst
+- name: "Set instance paths [{{ _inst.name }}]"
+  set_fact:
+    _inst_easyrsa_dir: "{{ _ovpn_conf_dir }}/easy-rsa/{{ _inst.name }}"
+    _inst_pki_dir: "{{ _ovpn_conf_dir }}/easy-rsa/{{ _inst.name }}/pki"
+    _inst_service: >-
+      {{ 'openvpn@' + _inst.name if ansible_facts.os_family == 'Debian'
+         else 'openvpn-server@' + _inst.name if ansible_facts.os_family in ['RedHat', 'Archlinux']
+         else 'openvpn' }}
+    _inst_conf_file: >-
+      {{ _ovpn_server_conf_dir + '/' + _inst.name + '.conf' if ansible_facts.os_family != 'FreeBSD'
+         else _ovpn_conf_dir + '/' + _inst.name + '.conf' }}
+
+- name: "Create EasyRSA dir [{{ _inst.name }}]"
   file:
-    path: "{{ _easyrsa_dir }}"
+    path: "{{ _inst_easyrsa_dir }}"
     state: directory
     owner: root
     group: "{{ _root_group }}"
     mode: '0700'
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
 
-- name: Initialise EasyRSA PKI
+- name: "Init EasyRSA PKI [{{ _inst.name }}]"
   command: "{{ _easyrsa_bin }} --batch init-pki"
   args:
-    chdir: "{{ _easyrsa_dir }}"
-    creates: "{{ _easyrsa_dir }}/pki"
+    chdir: "{{ _inst_easyrsa_dir }}"
+    creates: "{{ _inst_pki_dir }}"
   environment:
-    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+    EASYRSA_PKI: "{{ _inst_pki_dir }}"
 
-- name: Build EasyRSA CA
+- name: "Build CA [{{ _inst.name }}]"
   command: "{{ _easyrsa_bin }} --batch build-ca nopass"
   args:
-    chdir: "{{ _easyrsa_dir }}"
-    creates: "{{ _easyrsa_dir }}/pki/ca.crt"
+    chdir: "{{ _inst_easyrsa_dir }}"
+    creates: "{{ _inst_pki_dir }}/ca.crt"
   environment:
-    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
-    EASYRSA_REQ_CN: "{{ inventory_hostname }} CA"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+    EASYRSA_PKI: "{{ _inst_pki_dir }}"
+    EASYRSA_REQ_CN: "{{ inventory_hostname }} {{ _inst.name }} CA"
 
-- name: Build server certificate
+- name: "Build server cert [{{ _inst.name }}]"
   command: "{{ _easyrsa_bin }} --batch build-server-full server nopass"
   args:
-    chdir: "{{ _easyrsa_dir }}"
-    creates: "{{ _easyrsa_dir }}/pki/issued/server.crt"
+    chdir: "{{ _inst_easyrsa_dir }}"
+    creates: "{{ _inst_pki_dir }}/issued/server.crt"
   environment:
-    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+    EASYRSA_PKI: "{{ _inst_pki_dir }}"
 
-- name: Generate Diffie-Hellman parameters
+- name: "Generate DH params [{{ _inst.name }}]"
   command: "{{ _easyrsa_bin }} --batch gen-dh"
   args:
-    chdir: "{{ _easyrsa_dir }}"
-    creates: "{{ _easyrsa_dir }}/pki/dh.pem"
+    chdir: "{{ _inst_easyrsa_dir }}"
+    creates: "{{ _inst_pki_dir }}/dh.pem"
   environment:
-    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+    EASYRSA_PKI: "{{ _inst_pki_dir }}"
 
-- name: Ensure OpenVPN config directory exists (server)
+- name: "Ensure server config dir [{{ _inst.name }}]"
   file:
     path: "{{ _ovpn_server_conf_dir }}"
     state: directory
     owner: root
     group: "{{ _root_group }}"
     mode: '0700'
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
 
-- name: Generate tls-auth key
-  command: openvpn --genkey secret {{ _ovpn_conf_dir }}/ta.key
+- name: "Generate tls-auth key [{{ _inst.name }}]"
+  command: openvpn --genkey secret {{ _inst_easyrsa_dir }}/ta.key
   args:
-    creates: "{{ _ovpn_conf_dir }}/ta.key"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+    creates: "{{ _inst_easyrsa_dir }}/ta.key"
 
-- name: Generate client certificates
+- name: "Generate client certs [{{ _inst.name }}]"
   command: "{{ _easyrsa_bin }} --batch build-client-full {{ item }} nopass"
   args:
-    chdir: "{{ _easyrsa_dir }}"
-    creates: "{{ _easyrsa_dir }}/pki/issued/{{ item }}.crt"
+    chdir: "{{ _inst_easyrsa_dir }}"
+    creates: "{{ _inst_pki_dir }}/issued/{{ item }}.crt"
   environment:
-    EASYRSA_PKI: "{{ _easyrsa_pki_dir }}"
-  loop: "{{ openvpn.server.clients | default([]) }}"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+    EASYRSA_PKI: "{{ _inst_pki_dir }}"
+  loop: "{{ _inst.clients | default([]) }}"
 
-- name: Deploy server config
+- name: "Deploy server config [{{ _inst.name }}]"
   template:
     src: server.conf.j2
-    dest: "{{ _ovpn_server_conf_dir }}/{{ 'openvpn.conf' if ansible_facts.os_family == 'FreeBSD' else 'server.conf' }}"
+    dest: "{{ _inst_conf_file }}"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
-  notify: Restart OpenVPN server
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
+  register: _ovpn_server_cfg
 
-- name: Enable and start OpenVPN server
+- name: "Enable and start server [{{ _inst.name }}]"
   systemd:
-    name: "{{ _ovpn_service }}"
+    name: "{{ _inst_service }}"
     enabled: true
-    state: started
+    state: "{{ 'restarted' if _ovpn_server_cfg is changed else 'started' }}"
     daemon_reload: true
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
-    - ansible_facts.os_family != 'FreeBSD'
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    'roles/openvpn/tasks/client_instance.yml': """\
+---
+# Client instance tasks -- called via include_tasks with loop_var: _inst
+- name: "Set instance paths [{{ _inst.name }}]"
+  set_fact:
+    _inst_conf_dir: "{{ _ovpn_client_conf_dir }}/{{ _inst.name }}"
+    _inst_service: >-
+      {{ 'openvpn@' + _inst.name if ansible_facts.os_family == 'Debian'
+         else 'openvpn-client@' + _inst.name if ansible_facts.os_family in ['RedHat', 'Archlinux']
+         else 'openvpn' }}
+    _inst_conf_file: >-
+      {{ _ovpn_client_conf_dir + '/' + _inst.name + '.conf' if ansible_facts.os_family != 'FreeBSD'
+         else _ovpn_conf_dir + '/' + _inst.name + '.conf' }}
 
-- name: Enable OpenVPN server at boot (FreeBSD)
-  command: sysrc openvpn_enable=YES openvpn_if=tun
-  changed_when: false
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
-    - ansible_facts.os_family == 'FreeBSD'
-
-- name: Start OpenVPN server (FreeBSD)
-  command: service openvpn onestart
-  register: _ovpn_start
-  changed_when: "'already running' not in _ovpn_start.stderr"
-  failed_when: "_ovpn_start.rc != 0 and 'already running' not in _ovpn_start.stderr"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'server'
-    - ansible_facts.os_family == 'FreeBSD'
-
-# - CLIENT -
-- name: Ensure OpenVPN client config dir exists
+- name: "Create client cert dir [{{ _inst.name }}]"
   file:
-    path: "{{ _ovpn_client_conf_dir }}"
+    path: "{{ _inst_conf_dir }}"
     state: directory
     owner: root
     group: "{{ _root_group }}"
     mode: '0700'
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
 
-- name: Copy client CA certificate
+- name: "Copy CA cert [{{ _inst.name }}]"
   copy:
-    src: "{{ openvpn.client.ca_cert }}"
-    dest: "{{ _ovpn_client_conf_dir }}/ca.crt"
+    src: "{{ _inst.ca_cert }}"
+    dest: "{{ _inst_conf_dir }}/ca.crt"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
-  notify: Restart OpenVPN server
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - openvpn.client.ca_cert is defined
+  when: _inst.ca_cert is defined
+  register: _ovpn_client_ca
 
-- name: Copy client certificate
+- name: "Copy client cert [{{ _inst.name }}]"
   copy:
-    src: "{{ openvpn.client.cert }}"
-    dest: "{{ _ovpn_client_conf_dir }}/client.crt"
+    src: "{{ _inst.cert }}"
+    dest: "{{ _inst_conf_dir }}/client.crt"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
-  notify: Restart OpenVPN server
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - openvpn.client.cert is defined
+  when: _inst.cert is defined
+  register: _ovpn_client_cert
 
-- name: Copy client key
+- name: "Copy client key [{{ _inst.name }}]"
   copy:
-    src: "{{ openvpn.client.key }}"
-    dest: "{{ _ovpn_client_conf_dir }}/client.key"
+    src: "{{ _inst.key }}"
+    dest: "{{ _inst_conf_dir }}/client.key"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
-  notify: Restart OpenVPN server
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - openvpn.client.key is defined
+  when: _inst.key is defined
+  register: _ovpn_client_key
 
-- name: Copy client tls-auth key
+- name: "Copy tls-auth key [{{ _inst.name }}]"
   copy:
-    src: "{{ openvpn.client.tls_auth }}"
-    dest: "{{ _ovpn_client_conf_dir }}/ta.key"
+    src: "{{ _inst.tls_auth }}"
+    dest: "{{ _inst_conf_dir }}/ta.key"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
-  notify: Restart OpenVPN server
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - openvpn.client.tls_auth is defined
+  when: _inst.tls_auth is defined
+  register: _ovpn_client_ta
 
-- name: Deploy client config
+- name: "Deploy client config [{{ _inst.name }}]"
   template:
     src: client.conf.j2
-    dest: "{{ _ovpn_client_conf_dir }}/{{ 'openvpn.conf' if ansible_facts.os_family == 'FreeBSD' else 'client.conf' }}"
+    dest: "{{ _inst_conf_file }}"
     owner: root
     group: "{{ _root_group }}"
     mode: '0600'
-  notify: Restart OpenVPN server
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
+  register: _ovpn_client_cfg
 
-- name: Enable and start OpenVPN client
+- name: "Enable and start client [{{ _inst.name }}]"
   systemd:
-    name: "{{ _ovpn_client_service }}"
+    name: "{{ _inst_service }}"
     enabled: true
-    state: started
+    state: >-
+      {{ 'restarted' if (_ovpn_client_cfg is changed or
+          _ovpn_client_ca is changed or _ovpn_client_cert is changed or
+          _ovpn_client_key is changed or _ovpn_client_ta is changed)
+         else 'started' }}
     daemon_reload: true
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - ansible_facts.os_family != 'FreeBSD'
-
-- name: Enable OpenVPN client at boot (FreeBSD)
-  command: sysrc openvpn_enable=YES openvpn_if=tun
-  changed_when: false
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - ansible_facts.os_family == 'FreeBSD'
-
-- name: Start OpenVPN client (FreeBSD)
-  command: service openvpn onestart
-  register: _ovpn_client_start
-  changed_when: "'already running' not in _ovpn_client_start.stderr"
-  failed_when: "_ovpn_client_start.rc != 0 and 'already running' not in _ovpn_client_start.stderr"
-  when:
-    - openvpn.enabled | default(false) | bool
-    - openvpn.mode | default('server') == 'client'
-    - ansible_facts.os_family == 'FreeBSD'
+  when: ansible_facts.os_family != 'FreeBSD'
 """,
     'roles/openvpn/templates/server.conf.j2': """\
-# server.conf - managed by Ansible
-port {{ openvpn.port | default(1194) }}
-proto {{ openvpn.proto | default('udp') }}
-dev {{ openvpn.dev | default('tun') }}
+# {{ _inst.name }} server - managed by Ansible
+port {{ _inst.port | default(1194) }}
+proto {{ _inst.proto | default('udp') }}
+dev {{ _inst.dev | default('tun') }}
 
-ca   {{ _easyrsa_pki_dir }}/ca.crt
-cert {{ _easyrsa_pki_dir }}/issued/server.crt
-key  {{ _easyrsa_pki_dir }}/private/server.key
-dh   {{ _easyrsa_pki_dir }}/dh.pem
+ca   {{ _inst_pki_dir }}/ca.crt
+cert {{ _inst_pki_dir }}/issued/server.crt
+key  {{ _inst_pki_dir }}/private/server.key
+dh   {{ _inst_pki_dir }}/dh.pem
 
-server {{ openvpn.server.network | default('10.8.0.0') }} {{ openvpn.server.netmask | default('255.255.255.0') }}
-ifconfig-pool-persist {{ _ovpn_conf_dir }}/ipp.txt
+server {{ _inst.network | default('10.8.0.0') }} {{ _inst.netmask | default('255.255.255.0') }}
+ifconfig-pool-persist {{ _ovpn_conf_dir }}/ipp-{{ _inst.name }}.txt
 
-{% for route in openvpn.server.push_routes | default([]) %}
+{% for route in _inst.push_routes | default([]) %}
 push "route {{ route }}"
 {% endfor %}
-{% for dns in openvpn.server.push_dns | default([]) %}
+{% for dns in _inst.push_dns | default([]) %}
 push "dhcp-option DNS {{ dns }}"
 {% endfor %}
 
-keepalive {{ openvpn.server.keepalive | default('10 120') }}
-cipher {{ openvpn.server.cipher | default('AES-256-GCM') }}
-max-clients {{ openvpn.server.max_clients | default(50) }}
+keepalive {{ _inst.keepalive | default('10 120') }}
+cipher {{ _inst.cipher | default('AES-256-GCM') }}
+max-clients {{ _inst.max_clients | default(50) }}
 
-tls-auth {{ _ovpn_conf_dir }}/ta.key 0
+tls-auth {{ _inst_easyrsa_dir }}/ta.key 0
 key-direction 0
 
 user nobody
@@ -5326,37 +5300,37 @@ group {{ 'nogroup' if ansible_facts.os_family == 'Debian' else 'nobody' }}
 persist-key
 persist-tun
 
-status  {{ _ovpn_conf_dir }}/openvpn-status.log
-log     {{ _ovpn_conf_dir }}/openvpn.log
+status  {{ _ovpn_conf_dir }}/openvpn-status-{{ _inst.name }}.log
+log     {{ _ovpn_conf_dir }}/openvpn-{{ _inst.name }}.log
 verb 3
 """,
     'roles/openvpn/templates/client.conf.j2': """\
-# client.conf - managed by Ansible
+# {{ _inst.name }} client - managed by Ansible
 client
-dev {{ openvpn.dev | default('tun') }}
-proto {{ openvpn.proto | default('udp') }}
+dev {{ _inst.dev | default('tun') }}
+proto {{ _inst.proto | default('udp') }}
 
-remote {{ openvpn.client.remote }} {{ openvpn.port | default(1194) }}
+remote {{ _inst.remote }} {{ _inst.port | default(1194) }}
 resolv-retry infinite
 nobind
 
-ca   {{ _ovpn_client_conf_dir }}/ca.crt
-cert {{ _ovpn_client_conf_dir }}/client.crt
-key  {{ _ovpn_client_conf_dir }}/client.key
+ca   {{ _inst_conf_dir }}/ca.crt
+cert {{ _inst_conf_dir }}/client.crt
+key  {{ _inst_conf_dir }}/client.key
 
-{% if openvpn.client.tls_auth is defined %}
-tls-auth {{ _ovpn_client_conf_dir }}/ta.key 1
+{% if _inst.tls_auth is defined %}
+tls-auth {{ _inst_conf_dir }}/ta.key 1
 key-direction 1
 {% endif %}
 
-cipher {{ openvpn.client.cipher | default('AES-256-GCM') }}
+cipher {{ _inst.cipher | default('AES-256-GCM') }}
 persist-key
 persist-tun
 
 user nobody
 group {{ 'nogroup' if ansible_facts.os_family == 'Debian' else 'nobody' }}
 
-log {{ _ovpn_client_conf_dir }}/openvpn-client.log
+log {{ _ovpn_conf_dir }}/openvpn-{{ _inst.name }}.log
 verb 3
 """,
     'roles/ssh_hardening/handlers/main.yml': """\

@@ -1,5 +1,5 @@
-source_hash: 5ae33f72589e85ea2ceda2425bb4372eed7e7b583ab007d45451e87c1e60b9c7
-output_hash: 5af95838a546c8274df5f7ec688a3757e88857f1825f7954619a68fcd497d658
+source_hash: 05cc361df7d1c4582eb25e55471c5edac1c48bc9891cca7919be01ac5c6e3e55
+output_hash: afa71b63f2b2a948e3657ac8867821842797507b65c80fda861983e6fb488c6a
 generated_files:
   - group_vars/all/main.yml
   - group_vars/all/vault.yml.example
@@ -77,7 +77,9 @@ generated_files:
   - roles/node_exporter/tasks/main.yml
   - roles/openvpn/defaults/main.yml
   - roles/openvpn/handlers/main.yml
+  - roles/openvpn/tasks/client_instance.yml
   - roles/openvpn/tasks/main.yml
+  - roles/openvpn/tasks/server_instance.yml
   - roles/openvpn/templates/client.conf.j2
   - roles/openvpn/templates/server.conf.j2
   - roles/preflight/tasks/main.yml

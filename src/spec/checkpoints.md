@@ -3128,3 +3128,18 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      entry (FQDN + short name if domain is also set). When
      set_domain_name is non-empty, writes a search directive to
      /etc/resolv.conf. Both default to empty string (no change).
+
+200. `checkpoint-200-openvpn-multi-instance`
+     Refactored openvpn role from single-instance (openvpn dict with
+     mode: server|client) to multi-instance (openvpn_instances list).
+     Each entry has a name and mode; a machine can run any number of
+     server and client tunnels simultaneously.  Each server instance
+     gets its own EasyRSA PKI under easy-rsa/<name>/, its own ta.key,
+     config file, and systemd service unit.  Each client instance gets
+     its own cert directory and config.  Systemd naming: openvpn@<name>
+     on Debian, openvpn-server@<name> / openvpn-client@<name> on
+     RedHat/Arch.  FreeBSD uses rc.d profiles (openvpn_profiles sysrc).
+     Templates now reference _inst.* variables from include_tasks loop.
+     Inline restarts replace handler-based restarts for per-instance
+     granularity.  New files: tasks/server_instance.yml,
+     tasks/client_instance.yml.

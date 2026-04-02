@@ -335,6 +335,14 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/openvpn/tasks/server_instance.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/openvpn/tasks/client_instance.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/openvpn/templates/client.conf.j2:
     source_of_truth:
       - PROMPT.md
