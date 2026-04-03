@@ -18,3 +18,6 @@ __pycache__/
 # Generator staging dirs
 src/.regen-staging
 src/.regen-staging-verify
+
+# Claude Code local config
+.claude/

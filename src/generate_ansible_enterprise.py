@@ -6048,6 +6048,22 @@ bootstrap_repo_uri: ""
       admin_dev_password_hash: "{{ admin_dev_password_hash | default('') }}"
       repo_uri: "{{ bootstrap_repo_uri_override | default(bootstrap_repo_uri) | default('') }}"
 
+# Collect all host variables excluding Ansible internals and bootstrap
+# vars. These are bundled into the script so the playbook has a complete
+# set of vars when running on the target.
+- name: Collect host variables for bundling
+  set_fact:
+    _bs_host_vars: >-
+      {{ hostvars[inventory_hostname]
+         | dict2items
+         | rejectattr('key', 'match', '^(ansible_|_|module_|inventory_|role_|playbook_|bootstrap_)')
+         | rejectattr('key', 'in', ['group_names', 'groups', 'omit', 'environment'])
+         | items2dict }}
+
+- name: Encode host variables as base64 YAML
+  set_fact:
+    _bs_vars_b64: "{{ _bs_host_vars | to_nice_yaml | b64encode }}"
+
 - name: Generate plaintext bootstrap script
   template:
     src: bootstrap.sh.j2
@@ -6117,12 +6133,14 @@ set -euo pipefail
 KEYFILE=""
 {% endif %}
 URI_OVERRIDE=""
+VERBOSE=0
+RUN_PLAYBOOK="yes"
 
 usage() {
 {% if _encrypted_mode %}
-    echo "Usage: $0 --key /path/to/bootstrap_key [--uri <repo-uri>]"
+    echo "Usage: $0 --key /path/to/bootstrap_key [--uri <repo-uri>] [--run-playbook yes|no] [--verbose]"
 {% else %}
-    echo "Usage: $0 [--uri <repo-uri>]"
+    echo "Usage: $0 [--uri <repo-uri>] [--run-playbook yes|no] [--verbose]"
 {% endif %}
     exit 1
 }
@@ -6137,6 +6155,11 @@ while [ $# -gt 0 ]; do
         --uri|-u)
             [ $# -ge 2 ] || usage
             URI_OVERRIDE="$2"; shift 2 ;;
+        --run-playbook)
+            [ $# -ge 2 ] || usage
+            RUN_PLAYBOOK="$2"; shift 2 ;;
+        --verbose|-v)
+            VERBOSE=1; shift ;;
         -h|--help)
             usage ;;
         *)
@@ -6152,6 +6175,11 @@ while [ $# -gt 0 ]; do
 {% endif %}
     esac
 done
+
+# When verbose, show every command that runs.
+if [ "$VERBOSE" -eq 1 ]; then
+    set -x
+fi
 
 {% if _encrypted_mode %}
 [ -n "$KEYFILE" ] || { echo "ERROR: --key is required"; usage; }
@@ -6195,6 +6223,7 @@ eval "$(echo "$PAYLOAD" | openssl enc -aes-256-cbc -pbkdf2 -a -d -salt -pass "fi
 #---BEGIN SECRETS---
 ADMIN_SSH_PUBLIC_KEY='{{ _bs.admin_ssh_public_key }}'
 ADMIN_DEV_PASSWORD_HASH='{{ _bs.admin_dev_password_hash }}'
+BOOTSTRAP_VARS_B64='{{ _bs_vars_b64 }}'
 #---END SECRETS---
 {% endif %}
 
@@ -6211,6 +6240,7 @@ REPO_URI="${URI_OVERRIDE:-{{ _bs.repo_uri }}}"
 #---BEGIN SECRETS---
 ADMIN_SSH_PUBLIC_KEY='{{ _bs.admin_ssh_public_key }}'
 ADMIN_DEV_PASSWORD_HASH='{{ _bs.admin_dev_password_hash }}'
+BOOTSTRAP_VARS_B64='{{ _bs_vars_b64 }}'
 #---END SECRETS---
 {% endif %}
 
@@ -6222,13 +6252,13 @@ case "$PLATFORM" in
     Debian)
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq python3 sudo openssh-server curl git ansible ;;
+        apt-get install -y -qq python3 sudo openssh-server curl ;;
     RedHat)
-        dnf install -y python3 sudo openssh-server curl git ansible-core ;;
+        dnf install -y python3 sudo openssh-server curl ;;
     Archlinux)
-        pacman -Sy --noconfirm python sudo openssh curl git ansible ;;
+        pacman -Sy --noconfirm python sudo openssh curl ;;
     FreeBSD)
-        pkg install -y python311 sudo bash curl openssh-portable git py311-ansible ;;
+        pkg install -y python311 sudo bash curl openssh-portable ;;
 esac
 
 # -------------------------------------------------------------------------
@@ -6335,9 +6365,9 @@ fi
 # Restart SSH
 echo "==> Restarting SSH..."
 case "$PLATFORM" in
-    Debian)     systemctl restart ssh ;;
-    RedHat)     systemctl restart sshd ;;
-    Archlinux)  systemctl restart sshd ;;
+    Debian)     systemctl daemon-reload && systemctl restart ssh ;;
+    RedHat)     systemctl daemon-reload && systemctl restart sshd ;;
+    Archlinux)  systemctl daemon-reload && systemctl restart sshd ;;
     FreeBSD)    service sshd restart ;;
 esac
 
@@ -6372,6 +6402,42 @@ if [ -n "$REPO_URI" ]; then
             echo "WARNING: unrecognised repo URI format: $REPO_URI (skipping)"
             ;;
     esac
+fi
+
+# -------------------------------------------------------------------------
+# 6. Generate build/ and run playbook
+# -------------------------------------------------------------------------
+if [ -n "$REPO_URI" ] && [ "$RUN_PLAYBOOK" = "yes" ]; then
+    echo "==> Installing Ansible and build dependencies..."
+    case "$PLATFORM" in
+        Debian)
+            apt-get install -y -qq git ansible python3-yaml make ;;
+        RedHat)
+            dnf install -y git ansible-core python3-pyyaml make ;;
+        Archlinux)
+            pacman -S --noconfirm git ansible python-yaml make ;;
+        FreeBSD)
+            pkg install -y git py311-ansible py311-yaml gmake ;;
+    esac
+
+    echo "==> Generating build tree..."
+    cd "$REPO_DIR"
+    MAKE_CMD="make"
+    [ "$PLATFORM" = "FreeBSD" ] && MAKE_CMD="gmake"
+    $MAKE_CMD generate
+
+    echo "==> Writing bundled host variables..."
+    echo "$BOOTSTRAP_VARS_B64" | base64 -d > "$REPO_DIR/build/bootstrap_vars.yml"
+
+    echo "==> Installing Ansible collections..."
+    ansible-galaxy collection install -r build/requirements.yml
+
+    echo "==> Running playbook..."
+    cd "$REPO_DIR/build"
+    ansible-playbook -i inventory/pull.ini site.yml \
+        --connection local \
+        -e "@bootstrap_vars.yml"
+    cd /
 fi
 
 echo ""
