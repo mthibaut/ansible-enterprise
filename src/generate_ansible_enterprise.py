@@ -1561,6 +1561,21 @@ if new_text != text:
     label: "{{ item.name }}"
   notify: Validate and Restart DNS
 
+# Repair zone files that have an NS record without a trailing dot.
+# This can happen when a zone file was created (force: false) before the
+# trailing dot was present in soa.primary_ns. BIND treats a name without a
+# trailing dot as relative and appends the zone origin, producing an invalid
+# double-suffix FQDN (e.g. ns.example.com.example.com).
+- name: Ensure NS record has trailing dot in primary zone files
+  replace:
+    path: "{{ _bind_zone_dir }}/{{ item.name }}.zone"
+    regexp: '^(@\\s+(?:\\d+\\s+)?(?:IN\\s+)?NS\\s+)(\\S+(?<!\\.))[ \\t]*$'
+    replace: '\\1\\2.'
+  loop: "{{ _dns_primary_zones }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Validate and Restart DNS
+
 # Sync explicit records declared in zones[].records into zone files.
 # state: absent removes the record; default state: present adds it.
 - name: Sync explicit records into primary zone files
@@ -1837,6 +1852,7 @@ zone "{{ _zone.name }}" {
 {% set _soa_expire  = item.soa.expire  | default(dns.defaults.soa.expire  | default(604800)) if item.soa is defined else dns.defaults.soa.expire  | default(604800) %}
 {% set _soa_minimum = item.soa.minimum | default(dns.defaults.soa.minimum | default(300))  if item.soa is defined else dns.defaults.soa.minimum | default(300)  %}
 {% set _primary_ns  = item.soa.primary_ns | default(inventory_hostname + '.') if item.soa is defined else inventory_hostname + '.' %}
+{% set _primary_ns  = _primary_ns if _primary_ns.endswith('.') else _primary_ns + '.' %}
 {% set _email       = item.soa.email | default('hostmaster.' + item.name + '.') if item.soa is defined else 'hostmaster.' + item.name + '.' %}
 $TTL {{ _zone_ttl }}
 @   IN  SOA {{ _primary_ns }} {{ _email }} (
@@ -5608,6 +5624,23 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
     # file_copy runs on every host but is a no-op when file_copy_items is empty.
     - role: file_copy
       tags: [file_copy, files]
+
+# -----------------------------------------------------------------------
+# Bootstrap play -- runs entirely on localhost, no remote connection needed.
+# Generates per-host bootstrap shell scripts using inventory variables.
+# Invoked with: ansible-playbook site.yml --tags bootstrap -l <host>
+# -----------------------------------------------------------------------
+- name: Generate bootstrap scripts
+  hosts: all
+  gather_facts: false
+  connection: local
+  become: false
+  tags: [bootstrap, never]
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+
+  roles:
+    - role: bootstrap_scripts
 """,
     'templates/bind/.gitkeep': """\
 """,
@@ -5948,6 +5981,418 @@ grafana_org_name: "Ansible Enterprise"
     enabled: true
     state: started
     daemon_reload: true
+""",
+
+    # bootstrap_scripts role
+    # Generates per-host bootstrap shell scripts on localhost.
+    # Two versions: plaintext (all secrets visible) and encrypted
+    # (secrets in an openssl-encrypted payload, decrypted at runtime).
+    # Run with: ansible-playbook site.yml --tags bootstrap -l <host>
+    'roles/bootstrap_scripts/defaults/main.yml': """\
+---
+# Directory where bootstrap scripts are written (on the Ansible controller).
+bootstrap_output_dir: "{{ playbook_dir }}/bootstrap"
+
+# Optional URI to the Ansible repo. When set, the bootstrap script
+# clones or copies the repo onto the target host so it can run
+# ansible-pull immediately after bootstrap.
+# Accepted formats:
+#   - local path:  /opt/ansible-enterprise
+#   - HTTPS:       https://github.com/user/repo.git
+#   - SSH:         ssh://user@host/path/to/repo.git
+#   - git@:        git@github.com:user/repo.git
+# Leave empty to skip repo provisioning.
+bootstrap_repo_uri: ""
+""",
+    'roles/bootstrap_scripts/tasks/main.yml': """\
+---
+# This role runs in a separate play with connection: local and
+# gather_facts: false. No remote connection is attempted.
+# Invoke with: ansible-playbook site.yml --tags bootstrap -l <host>
+
+- name: Ensure bootstrap output directory exists
+  file:
+    path: "{{ bootstrap_output_dir }}"
+    state: directory
+    mode: "0700"
+  run_once: true
+
+- name: Check if bootstrap encryption key exists
+  stat:
+    path: "{{ bootstrap_output_dir }}/.bootstrap_key"
+  register: _bootstrap_key_stat
+
+- name: Generate bootstrap encryption key
+  shell: openssl rand -base64 32 > "{{ bootstrap_output_dir }}/.bootstrap_key" && chmod 0600 "{{ bootstrap_output_dir }}/.bootstrap_key"
+  when: not _bootstrap_key_stat.stat.exists
+
+- name: Read bootstrap encryption key
+  slurp:
+    src: "{{ bootstrap_output_dir }}/.bootstrap_key"
+  register: _bootstrap_key_raw
+
+- name: Set bootstrap key fact
+  set_fact:
+    _bootstrap_key: "{{ _bootstrap_key_raw.content | b64decode | trim }}"
+
+# Collect the variables the template needs into a single dict so the
+# template stays readable.
+- name: Build bootstrap variable set
+  set_fact:
+    _bs:
+      hostname: "{{ set_hostname | default(inventory_hostname) }}"
+      domain: "{{ set_domain_name | default('') }}"
+      ssh_port: "{{ ssh_port | default(22) }}"
+      admin_users: "{{ admin_users | default(['myadmin']) }}"
+      admin_ssh_public_key: "{{ admin_ssh_public_key | default('') }}"
+      admin_dev_password_hash: "{{ admin_dev_password_hash | default('') }}"
+      repo_uri: "{{ bootstrap_repo_uri_override | default(bootstrap_repo_uri) | default('') }}"
+
+- name: Generate plaintext bootstrap script
+  template:
+    src: bootstrap.sh.j2
+    dest: "{{ bootstrap_output_dir }}/{{ inventory_hostname }}-bootstrap.sh"
+    mode: "0700"
+  vars:
+    _encrypted_mode: false
+
+- name: Generate encrypted bootstrap script
+  template:
+    src: bootstrap.sh.j2
+    dest: "{{ bootstrap_output_dir }}/{{ inventory_hostname }}-bootstrap.sh.enc.tmp"
+    mode: "0700"
+  vars:
+    _encrypted_mode: true
+
+# Encrypt the secrets section: extract everything between the BEGIN/END
+# markers, encrypt it, and produce the final self-decrypting script.
+- name: Build self-decrypting bootstrap script
+  shell: |
+    set -euo pipefail
+    TMPFILE="{{ bootstrap_output_dir }}/{{ inventory_hostname }}-bootstrap.sh.enc.tmp"
+    OUTFILE="{{ bootstrap_output_dir }}/{{ inventory_hostname }}-bootstrap.sh.enc"
+    KEYFILE="{{ bootstrap_output_dir }}/.bootstrap_key"
+
+    # Extract the header (everything before __ENCRYPTED_PAYLOAD__)
+    sed -n '1,/^__ENCRYPTED_PAYLOAD__$/p' "$TMPFILE" > "$OUTFILE"
+
+    # Extract the secrets block (between BEGIN/END markers) and encrypt
+    sed -n '/^#---BEGIN SECRETS---$/,/^#---END SECRETS---$/p' "$TMPFILE" \\
+      | openssl enc -aes-256-cbc -pbkdf2 -a -salt -pass "file:$KEYFILE" \\
+      >> "$OUTFILE"
+
+    chmod 0700 "$OUTFILE"
+    rm -f "$TMPFILE"
+  args:
+    executable: /bin/bash
+
+- name: Bootstrap scripts generated
+  debug:
+    msg: >-
+      Bootstrap scripts for {{ inventory_hostname }} written to
+      {{ bootstrap_output_dir }}/. Copy the .bootstrap_key file
+      separately via a secure channel -- never bundle it with the
+      script.
+""",
+    'roles/bootstrap_scripts/templates/bootstrap.sh.j2': """\
+#!/usr/bin/env bash
+# Bootstrap script for {{ inventory_hostname }}
+# Generated by ansible-enterprise bootstrap_scripts role.
+#
+{% if _encrypted_mode %}
+# ENCRYPTED MODE: secrets are in an openssl-encrypted payload at the
+# end of this script. Run with:
+#   ./{{ inventory_hostname }}-bootstrap.sh.enc --key /path/to/bootstrap_key [--uri <repo>]
+{% else %}
+# PLAINTEXT MODE: all values including secrets are embedded directly.
+# Handle this file as you would a vault -- delete after use.
+#   ./{{ inventory_hostname }}-bootstrap.sh [--uri <repo>]
+{% endif %}
+set -euo pipefail
+
+# -------------------------------------------------------------------------
+# Argument parsing
+# -------------------------------------------------------------------------
+{% if _encrypted_mode %}
+KEYFILE=""
+{% endif %}
+URI_OVERRIDE=""
+
+usage() {
+{% if _encrypted_mode %}
+    echo "Usage: $0 --key /path/to/bootstrap_key [--uri <repo-uri>]"
+{% else %}
+    echo "Usage: $0 [--uri <repo-uri>]"
+{% endif %}
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+{% if _encrypted_mode %}
+        --key|-k)
+            [ $# -ge 2 ] || usage
+            KEYFILE="$2"; shift 2 ;;
+{% endif %}
+        --uri|-u)
+            [ $# -ge 2 ] || usage
+            URI_OVERRIDE="$2"; shift 2 ;;
+        -h|--help)
+            usage ;;
+        *)
+{% if _encrypted_mode %}
+            # Legacy: bare first argument treated as key file
+            if [ -z "$KEYFILE" ]; then
+                KEYFILE="$1"; shift
+            else
+                echo "Unknown argument: $1"; usage
+            fi ;;
+{% else %}
+            echo "Unknown argument: $1"; usage ;;
+{% endif %}
+    esac
+done
+
+{% if _encrypted_mode %}
+[ -n "$KEYFILE" ] || { echo "ERROR: --key is required"; usage; }
+[ -f "$KEYFILE" ] || { echo "ERROR: key file not found: $KEYFILE"; exit 1; }
+{% endif %}
+
+# -------------------------------------------------------------------------
+# Platform detection
+# -------------------------------------------------------------------------
+detect_platform() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        case "$ID" in
+            debian|ubuntu)    PLATFORM=Debian ;;
+            rocky|alma|rhel|centos|fedora) PLATFORM=RedHat ;;
+            arch|manjaro)     PLATFORM=Archlinux ;;
+            *)                PLATFORM=Unknown ;;
+        esac
+    elif [ "$(uname)" = "FreeBSD" ]; then
+        PLATFORM=FreeBSD
+    else
+        PLATFORM=Unknown
+    fi
+}
+detect_platform
+echo "Detected platform: $PLATFORM"
+[ "$PLATFORM" != "Unknown" ] || { echo "ERROR: unsupported platform"; exit 1; }
+
+{% if _encrypted_mode %}
+# -------------------------------------------------------------------------
+# Decrypt secrets payload
+# -------------------------------------------------------------------------
+# The encrypted payload follows the __ENCRYPTED_PAYLOAD__ marker.
+SELF="$(realpath "$0")"
+PAYLOAD=$(sed -n '/^__ENCRYPTED_PAYLOAD__$/,$ { /^__ENCRYPTED_PAYLOAD__$/d; p; }' "$SELF")
+eval "$(echo "$PAYLOAD" | openssl enc -aes-256-cbc -pbkdf2 -a -d -salt -pass "file:$KEYFILE")"
+{% else %}
+# -------------------------------------------------------------------------
+# Secrets (plaintext)
+# -------------------------------------------------------------------------
+#---BEGIN SECRETS---
+ADMIN_SSH_PUBLIC_KEY='{{ _bs.admin_ssh_public_key }}'
+ADMIN_DEV_PASSWORD_HASH='{{ _bs.admin_dev_password_hash }}'
+#---END SECRETS---
+{% endif %}
+
+# -------------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------------
+HOSTNAME='{{ _bs.hostname }}'
+DOMAIN='{{ _bs.domain }}'
+SSH_PORT='{{ _bs.ssh_port }}'
+ADMIN_USERS=({{ _bs.admin_users | join(' ') }})
+REPO_URI="${URI_OVERRIDE:-{{ _bs.repo_uri }}}"
+
+{% if _encrypted_mode %}
+#---BEGIN SECRETS---
+ADMIN_SSH_PUBLIC_KEY='{{ _bs.admin_ssh_public_key }}'
+ADMIN_DEV_PASSWORD_HASH='{{ _bs.admin_dev_password_hash }}'
+#---END SECRETS---
+{% endif %}
+
+# -------------------------------------------------------------------------
+# 1. Install prerequisites
+# -------------------------------------------------------------------------
+echo "==> Installing prerequisites..."
+case "$PLATFORM" in
+    Debian)
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq python3 sudo openssh-server curl git ansible ;;
+    RedHat)
+        dnf install -y python3 sudo openssh-server curl git ansible-core ;;
+    Archlinux)
+        pacman -Sy --noconfirm python sudo openssh curl git ansible ;;
+    FreeBSD)
+        pkg install -y python311 sudo bash curl openssh-portable git py311-ansible ;;
+esac
+
+# -------------------------------------------------------------------------
+# 2. Set hostname and domain
+# -------------------------------------------------------------------------
+if [ -n "$HOSTNAME" ]; then
+    echo "==> Setting hostname to $HOSTNAME..."
+    case "$PLATFORM" in
+        FreeBSD)
+            sysrc hostname="$HOSTNAME"
+            hostname "$HOSTNAME" ;;
+        *)
+            hostnamectl set-hostname "$HOSTNAME" ;;
+    esac
+
+    # Update /etc/hosts
+    if [ -n "$DOMAIN" ]; then
+        FQDN="${HOSTNAME}.${DOMAIN}"
+    else
+        FQDN="$HOSTNAME"
+    fi
+    if ! grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
+        echo "127.0.1.1  ${FQDN}  ${HOSTNAME}" >> /etc/hosts
+    else
+        sed -i.bak "s/^127\\.0\\.1\\.1.*$/127.0.1.1  ${FQDN}  ${HOSTNAME}/" /etc/hosts
+    fi
+fi
+
+if [ -n "$DOMAIN" ]; then
+    echo "==> Setting search domain to $DOMAIN..."
+    if grep -q "^search " /etc/resolv.conf 2>/dev/null; then
+        sed -i.bak "s/^search .*/search ${DOMAIN}/" /etc/resolv.conf
+    else
+        echo "search ${DOMAIN}" >> /etc/resolv.conf
+    fi
+fi
+
+# -------------------------------------------------------------------------
+# 3. Create admin users with sudo
+# -------------------------------------------------------------------------
+echo "==> Creating admin users..."
+for USER in "${ADMIN_USERS[@]}"; do
+    if ! id "$USER" >/dev/null 2>&1; then
+        useradd -m -s /bin/bash "$USER" 2>/dev/null || \
+            pw useradd "$USER" -m -s /bin/bash 2>/dev/null || true
+    fi
+
+    # Passwordless sudo
+    case "$PLATFORM" in
+        FreeBSD)
+            SUDOERS_DIR="/usr/local/etc/sudoers.d"
+            mkdir -p "$SUDOERS_DIR" ;;
+        *)
+            SUDOERS_DIR="/etc/sudoers.d" ;;
+    esac
+    echo "$USER ALL=(ALL) NOPASSWD:ALL" > "${SUDOERS_DIR}/${USER}"
+    chmod 0440 "${SUDOERS_DIR}/${USER}"
+
+    # SSH authorized_keys
+    if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
+        SSH_DIR="$(eval echo ~"$USER")/.ssh"
+        mkdir -p "$SSH_DIR"
+        echo "$ADMIN_SSH_PUBLIC_KEY" > "${SSH_DIR}/authorized_keys"
+        chmod 0700 "$SSH_DIR"
+        chmod 0600 "${SSH_DIR}/authorized_keys"
+        chown -R "$USER" "$SSH_DIR"
+    fi
+
+    # Console password (optional)
+    if [ -n "$ADMIN_DEV_PASSWORD_HASH" ]; then
+        case "$PLATFORM" in
+            FreeBSD)
+                echo "${ADMIN_DEV_PASSWORD_HASH}" | pw usermod "$USER" -H 0 ;;
+            *)
+                usermod -p "$ADMIN_DEV_PASSWORD_HASH" "$USER" ;;
+        esac
+    fi
+done
+
+# -------------------------------------------------------------------------
+# 4. Configure SSH
+# -------------------------------------------------------------------------
+echo "==> Configuring SSH on port $SSH_PORT..."
+SSHD_CONFIG="/etc/ssh/sshd_config"
+
+# Set port
+sed -i.bak "s/^#*Port .*/Port ${SSH_PORT}/" "$SSHD_CONFIG"
+if ! grep -q "^Port " "$SSHD_CONFIG"; then
+    echo "Port ${SSH_PORT}" >> "$SSHD_CONFIG"
+fi
+
+# Key-only auth
+sed -i.bak "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSHD_CONFIG"
+sed -i.bak "s/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/" "$SSHD_CONFIG"
+
+# AllowUsers
+ALLOW_LINE="AllowUsers root ${ADMIN_USERS[*]}"
+if grep -q "^AllowUsers " "$SSHD_CONFIG"; then
+    sed -i.bak "s/^AllowUsers .*/${ALLOW_LINE}/" "$SSHD_CONFIG"
+else
+    echo "$ALLOW_LINE" >> "$SSHD_CONFIG"
+fi
+
+# Restart SSH
+echo "==> Restarting SSH..."
+case "$PLATFORM" in
+    Debian)     systemctl restart ssh ;;
+    RedHat)     systemctl restart sshd ;;
+    Archlinux)  systemctl restart sshd ;;
+    FreeBSD)    service sshd restart ;;
+esac
+
+# -------------------------------------------------------------------------
+# 5. Provision Ansible repo (optional)
+# -------------------------------------------------------------------------
+REPO_DIR="/opt/ansible-enterprise"
+if [ -n "$REPO_URI" ]; then
+    echo "==> Provisioning Ansible repo from $REPO_URI..."
+
+    # Determine URI type and provision
+    case "$REPO_URI" in
+        /*)
+            # Local path -- copy
+            echo "    Copying from local path..."
+            if [ -d "$REPO_DIR" ]; then
+                rm -rf "$REPO_DIR"
+            fi
+            cp -a "$REPO_URI" "$REPO_DIR"
+            ;;
+        https://*|http://*|ssh://*|git@*)
+            # Remote -- git clone
+            echo "    Cloning from remote..."
+            if [ -d "$REPO_DIR/.git" ]; then
+                cd "$REPO_DIR" && git pull
+            else
+                rm -rf "$REPO_DIR"
+                git clone "$REPO_URI" "$REPO_DIR"
+            fi
+            ;;
+        *)
+            echo "WARNING: unrecognised repo URI format: $REPO_URI (skipping)"
+            ;;
+    esac
+fi
+
+echo ""
+echo "========================================="
+echo "  Bootstrap complete for $HOSTNAME"
+echo "  SSH port: $SSH_PORT"
+echo "  Admin users: ${ADMIN_USERS[*]}"
+if [ -n "$REPO_URI" ]; then
+echo "  Repo: $REPO_DIR"
+fi
+echo "========================================="
+echo ""
+echo "This host is now ready for Ansible management."
+
+{% if _encrypted_mode %}
+# This marker must be the last line before the encrypted payload.
+# Do not add anything after it -- the build task appends encrypted
+# data here.
+exit 0
+__ENCRYPTED_PAYLOAD__
+{% endif %}
 """,
 }
 

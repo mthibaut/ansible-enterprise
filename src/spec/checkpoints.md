@@ -3143,3 +3143,17 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      Inline restarts replace handler-based restarts for per-instance
      granularity.  New files: tasks/server_instance.yml,
      tasks/client_instance.yml.
+
+201. `checkpoint-201-bootstrap-scripts`
+     New role: bootstrap_scripts. Generates per-host shell scripts on
+     the Ansible controller (delegate_to: localhost) that bootstrap a
+     fresh server for Ansible management. Two versions per host:
+     plaintext (all secrets visible) and encrypted (secrets in an
+     openssl AES-256-CBC payload, decrypted at runtime with a key file
+     argument). The key is generated once in build/bootstrap/.bootstrap_key.
+     Scripts auto-detect platform (Debian/RedHat/Arch/FreeBSD) at
+     runtime and install Python3, sudo, openssh; create admin users with
+     SSH keys and passwordless sudo; set hostname/domain; configure SSH
+     port and key-only auth. Tagged [bootstrap, never] so it only runs
+     with --tags bootstrap. Usage:
+       ansible-playbook site.yml --tags bootstrap -l <host>

@@ -17,7 +17,7 @@ modes.
 **Remote git repository:**
 `git@github.com:mthibaut/ansible-enterprise-test.git`
 
-**Current HEAD:** checkpoint-200 — `feat: checkpoint-200-openvpn-multi-instance`
+**Current HEAD:** checkpoint-201 — `feat: checkpoint-201-bootstrap-scripts`
 
 **PROMPT.md version:** 1.4.0 (PROMPT.md is a validation anchor only — it is
 not a real specification. The FILE_MANIFEST in `src/generate_ansible_enterprise.py`
@@ -193,11 +193,13 @@ key warning and shallow-merge data loss. Use the flat `geoip_*` variables.
 | users | generated | Service owner accounts and web roots |
 | nextcloud | **PROTECTED** | Nextcloud + MariaDB |
 | mailserver | **PROTECTED** | Postfix + Dovecot + OpenDKIM |
+| bootstrap_scripts | generated | Per-host bootstrap shell scripts (tags: bootstrap, never) |
 
 **Role ordering in site.yml:**
 ```
 preflight → common → ssh_hardening → geoip → firewall_geo →
 dns → certbot → nginx → users → nextcloud → mailserver
+bootstrap_scripts (only with --tags bootstrap)
 ```
 
 ---
@@ -478,8 +480,9 @@ Tracked future work (from `src/spec/architecture.md`):
 | **198** | **fix: sshd sftp-server path for RedHat — /usr/libexec/openssh/sftp-server** |
 | **199** | **feat: set_hostname and set_domain_name variables in common role** |
 | **200** | **feat: openvpn multi-instance refactor -- openvpn_instances list, per-instance PKI/config/service** |
+| **201** | **feat: bootstrap_scripts role -- per-host bootstrap shell scripts (plaintext + encrypted)** |
 
-Next checkpoint will be **201**.
+Next checkpoint will be **202**.
 
 ## Generator format note (checkpoint-042)
 FILE_MANIFEST now uses triple-quoted multiline strings. To add or edit content:
