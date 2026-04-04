@@ -3649,8 +3649,8 @@ services:
 
 # Normalize upstream: prefer web.upstream_host/port; fall back to
 # 127.0.0.1:port when a service defines port: but no web: block.
-# This lets Docker-managed services (grafana, prometheus) use the
-# short form without duplicating the upstream address.
+# For apache2 services, derive the port from app.port or the base port
+# plus the service's index in the apache2 services list.
 - name: Normalize upstream for {{ service.key }}
   set_fact:
     _upstream_host: >-
@@ -3658,9 +3658,13 @@ services:
          if service.value.web is defined
          else '127.0.0.1' }}
     _upstream_port: >-
-      {{ service.value.web.upstream_port
-         if service.value.web is defined
-         else service.value.port | default('') }}
+      {%- if service.value.web is defined -%}
+        {{ service.value.web.upstream_port }}
+      {%- elif (service.value.app | default({})).type | default('') == 'apache2' -%}
+        {{ service.value.app.port | default(apache2_base_port | default(8080)) }}
+      {%- else -%}
+        {{ service.value.port | default('') }}
+      {%- endif -%}
   when: service.value.enabled | default(false) | bool
 
 # Determine serving mode: proxy (port defined) or static (no port).
@@ -5574,6 +5578,11 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
         | selectattr('security.tls', 'defined')
         | selectattr('security.tls')
         | list | length > 0
+    # apache2 before nginx: Apache2 must be listening before nginx
+    # starts proxying to it. The role is a no-op when no service has
+    # app.type: apache2.
+    - role: apache2
+      tags: [apache2, web]
     - role: nginx
       tags: [nginx, web]
       when: nginx_enabled | default(false) | bool
@@ -5637,18 +5646,16 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
     # file_copy runs on every host but is a no-op when file_copy_items is empty.
     - role: file_copy
       tags: [file_copy, files]
-
-# -----------------------------------------------------------------------
-# Bootstrap play -- runs entirely on localhost, no remote connection needed.
-# Generates per-host bootstrap shell scripts using inventory variables.
-# Invoked with: ansible-playbook site.yml --tags bootstrap -l <host>
-# -----------------------------------------------------------------------
+""",
+    # Separate playbook for bootstrap -- no SSH connection to target hosts.
+    # Usage: ansible-playbook bootstrap.yml -l <host>
+    'bootstrap.yml': """\
+---
 - name: Generate bootstrap scripts
   hosts: all
   gather_facts: false
   connection: local
   become: false
-  tags: [bootstrap, never]
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
 
@@ -5994,6 +6001,276 @@ grafana_org_name: "Ansible Enterprise"
     enabled: true
     state: started
     daemon_reload: true
+""",
+
+    # apache2 role
+    # Backend application server behind nginx. Listens on 127.0.0.1 only.
+    # Activated per-service when app.type is 'apache2'.
+    'roles/apache2/defaults/main.yml': """\
+---
+# Apache2 defaults. The role is activated when any service has
+# app.type: apache2. Apache2 listens on 127.0.0.1 only -- nginx
+# handles TLS termination, geoip, and access control in front.
+
+# Base port for Apache2 vhosts. Each apache2 service gets its own port
+# starting from this value. Override per-service with app.port.
+apache2_base_port: 8080
+
+# Enable mod_rewrite globally.
+apache2_mod_rewrite: true
+""",
+    'roles/apache2/handlers/main.yml': """\
+---
+- name: Reload apache2
+  service:
+    name: >-
+      {{ 'httpd' if ansible_facts.os_family == 'RedHat'
+         else 'apache24' if ansible_facts.os_family == 'FreeBSD'
+         else 'apache2' }}
+    state: reloaded
+
+- name: Restart apache2
+  service:
+    name: >-
+      {{ 'httpd' if ansible_facts.os_family == 'RedHat'
+         else 'apache24' if ansible_facts.os_family == 'FreeBSD'
+         else 'apache2' }}
+    state: restarted
+""",
+    'roles/apache2/tasks/main.yml': """\
+---
+# Collect services that use apache2 as backend.
+- name: Identify apache2 services
+  set_fact:
+    _apache2_services: >-
+      {{ services | dict2items
+         | selectattr('value.enabled', 'defined')
+         | selectattr('value.enabled')
+         | selectattr('value.app', 'defined')
+         | selectattr('value.app.type', 'equalto', 'apache2')
+         | list }}
+
+# Skip entirely when no service needs apache2.
+- name: Skip apache2 role when no services need it
+  meta: end_role
+  when: _apache2_services | length == 0
+
+- name: Install Apache2
+  package:
+    name: >-
+      {{
+        ['httpd', 'mod_ssl']
+        if ansible_facts.os_family == 'RedHat' else
+        ['apache24']
+        if ansible_facts.os_family == 'FreeBSD' else
+        ['apache2']
+      }}
+    state: present
+
+- name: Install PHP for Apache2 (Debian)
+  package:
+    name:
+      - libapache2-mod-php
+      - php-common
+    state: present
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - _apache2_services | selectattr('value.app.php', 'defined')
+      | selectattr('value.app.php') | list | length > 0
+
+- name: Install PHP for Apache2 (RedHat)
+  package:
+    name:
+      - php
+      - php-common
+    state: present
+  when:
+    - ansible_facts.os_family == 'RedHat'
+    - _apache2_services | selectattr('value.app.php', 'defined')
+      | selectattr('value.app.php') | list | length > 0
+
+- name: Install PHP for Apache2 (Archlinux)
+  package:
+    name:
+      - php
+      - php-apache
+    state: present
+  when:
+    - ansible_facts.os_family == 'Archlinux'
+    - _apache2_services | selectattr('value.app.php', 'defined')
+      | selectattr('value.app.php') | list | length > 0
+
+- name: Install PHP for Apache2 (FreeBSD)
+  package:
+    name:
+      - php83
+      - mod_php83
+    state: present
+  when:
+    - ansible_facts.os_family == 'FreeBSD'
+    - _apache2_services | selectattr('value.app.php', 'defined')
+      | selectattr('value.app.php') | list | length > 0
+
+# Set platform-specific paths.
+- name: Set Apache2 paths
+  set_fact:
+    _apache2_conf_dir: >-
+      {{ '/etc/httpd/conf.d' if ansible_facts.os_family == 'RedHat'
+         else '/usr/local/etc/apache24/Includes' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc/apache2/sites-enabled' }}
+    _apache2_service_name: >-
+      {{ 'httpd' if ansible_facts.os_family == 'RedHat'
+         else 'apache24' if ansible_facts.os_family == 'FreeBSD'
+         else 'apache2' }}
+
+# Configure Apache2 to listen only on 127.0.0.1.
+- name: Deploy Apache2 ports config (Debian)
+  copy:
+    content: |
+      # Managed by Ansible -- do not edit.
+      # Apache2 listens on loopback only; nginx handles public traffic.
+      {% for _svc in _apache2_services %}
+      {% set _port = _svc.value.app.port | default(apache2_base_port + loop.index0) %}
+      Listen 127.0.0.1:{{ _port }}
+      {% endfor %}
+    dest: /etc/apache2/ports.conf
+    mode: "0644"
+  when: ansible_facts.os_family == 'Debian'
+  notify: Restart apache2
+
+- name: Deploy Apache2 ports config (RedHat)
+  copy:
+    content: |
+      # Managed by Ansible -- do not edit.
+      {% for _svc in _apache2_services %}
+      {% set _port = _svc.value.app.port | default(apache2_base_port + loop.index0) %}
+      Listen 127.0.0.1:{{ _port }}
+      {% endfor %}
+    dest: /etc/httpd/conf.d/00-ports.conf
+    mode: "0644"
+  when: ansible_facts.os_family == 'RedHat'
+  notify: Restart apache2
+
+- name: Deploy Apache2 listen config (FreeBSD)
+  copy:
+    content: |
+      # Managed by Ansible -- do not edit.
+      {% for _svc in _apache2_services %}
+      {% set _port = _svc.value.app.port | default(apache2_base_port + loop.index0) %}
+      Listen 127.0.0.1:{{ _port }}
+      {% endfor %}
+    dest: /usr/local/etc/apache24/Includes/00-ports.conf
+    mode: "0644"
+  when: ansible_facts.os_family == 'FreeBSD'
+  notify: Restart apache2
+
+# Remove default Listen 80 on Debian to avoid conflict with nginx.
+- name: Disable default Listen 80 in apache2.conf (Debian)
+  lineinfile:
+    path: /etc/apache2/apache2.conf
+    regexp: '^Listen '
+    state: absent
+  when: ansible_facts.os_family == 'Debian'
+  notify: Restart apache2
+
+# Remove default Listen 80 on RedHat.
+- name: Remove default listen.conf (RedHat)
+  lineinfile:
+    path: /etc/httpd/conf/httpd.conf
+    regexp: '^Listen '
+    state: absent
+  when: ansible_facts.os_family == 'RedHat'
+  notify: Restart apache2
+
+# Enable mod_rewrite on Debian.
+- name: Enable mod_rewrite (Debian)
+  command: a2enmod rewrite
+  args:
+    creates: /etc/apache2/mods-enabled/rewrite.load
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - apache2_mod_rewrite | default(true) | bool
+  notify: Restart apache2
+
+# Deploy per-service vhosts.
+- name: Deploy Apache2 vhost for each service
+  template:
+    src: apache2_vhost.conf.j2
+    dest: "{{ _apache2_conf_dir }}/{{ _svc.key }}.conf"
+    mode: "0644"
+  vars:
+    _svc: "{{ item }}"
+    _port: "{{ item.value.app.port | default(apache2_base_port + _apache2_services.index(item)) }}"
+  loop: "{{ _apache2_services }}"
+  loop_control:
+    loop_var: item
+    label: "{{ item.key }}"
+  notify: Reload apache2
+
+# Disable default site on Debian.
+- name: Disable default site (Debian)
+  command: a2dissite 000-default
+  args:
+    removes: /etc/apache2/sites-enabled/000-default.conf
+  when: ansible_facts.os_family == 'Debian'
+  notify: Reload apache2
+
+- name: Enable and start Apache2
+  systemd:
+    name: "{{ _apache2_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: Enable and start Apache2 (FreeBSD)
+  command: sysrc apache24_enable=YES
+  changed_when: false
+  when: ansible_facts.os_family == 'FreeBSD'
+
+- name: Start Apache2 (FreeBSD)
+  command: service apache24 onestart
+  register: _apache2_start
+  changed_when: "'already running' not in _apache2_start.stderr"
+  failed_when: "_apache2_start.rc != 0 and 'already running' not in _apache2_start.stderr"
+  when: ansible_facts.os_family == 'FreeBSD'
+""",
+    'roles/apache2/templates/apache2_vhost.conf.j2': """\
+<VirtualHost 127.0.0.1:{{ _port }}>
+    ServerName {{ _svc.value.domain }}
+    DocumentRoot {{ _svc.value.app.document_root | default('/var/www/' + _svc.value.domain) }}
+
+    <Directory {{ _svc.value.app.document_root | default('/var/www/' + _svc.value.domain) }}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+{% if _svc.value.app.php | default(false) | bool %}
+    <FilesMatch "\\.php$">
+{% if ansible_facts.os_family == 'Debian' %}
+        SetHandler application/x-httpd-php
+{% elif ansible_facts.os_family == 'RedHat' %}
+        SetHandler application/x-httpd-php
+{% elif ansible_facts.os_family == 'Archlinux' %}
+        SetHandler application/x-httpd-php
+{% elif ansible_facts.os_family == 'FreeBSD' %}
+        SetHandler application/x-httpd-php
+{% endif %}
+    </FilesMatch>
+    DirectoryIndex index.php index.html
+{% else %}
+    DirectoryIndex index.html index.htm
+{% endif %}
+
+{% if _svc.value.app.extra_config | default('') | length > 0 %}
+    # Extra configuration from app.extra_config
+{{ _svc.value.app.extra_config | indent(4, true) }}
+{% endif %}
+
+    ErrorLog {{ '/var/log/httpd/' if ansible_facts.os_family == 'RedHat' else '/var/log/apache2/' if ansible_facts.os_family == 'Debian' else '/var/log/' }}{{ _svc.key }}-error.log
+    CustomLog {{ '/var/log/httpd/' if ansible_facts.os_family == 'RedHat' else '/var/log/apache2/' if ansible_facts.os_family == 'Debian' else '/var/log/' }}{{ _svc.key }}-access.log combined
+</VirtualHost>
 """,
 
     # bootstrap_scripts role

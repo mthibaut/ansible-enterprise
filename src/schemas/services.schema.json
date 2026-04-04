@@ -115,8 +115,28 @@
               "type": "string",
               "enum": [
                 "nextcloud",
+                "apache2",
                 "generic"
               ]
+            },
+            "php": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable PHP (mod_php) for this Apache2 vhost."
+            },
+            "document_root": {
+              "type": "string",
+              "description": "DocumentRoot for Apache2 vhost. Defaults to /var/www/<domain>/."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "Port Apache2 listens on for this service. Defaults to apache2_base_port + index."
+            },
+            "extra_config": {
+              "type": "string",
+              "description": "Extra Apache2 configuration directives inserted into the vhost block."
             },
             "version": {
               "type": "string"

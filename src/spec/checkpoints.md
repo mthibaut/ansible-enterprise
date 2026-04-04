@@ -3156,4 +3156,25 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      SSH keys and passwordless sudo; set hostname/domain; configure SSH
      port and key-only auth. Tagged [bootstrap, never] so it only runs
      with --tags bootstrap. Usage:
-       ansible-playbook site.yml --tags bootstrap -l <host>
+       ansible-playbook bootstrap.yml -l <host>
+
+202. `checkpoint-202-apache2-role`
+     New role: apache2. Backend application server behind nginx, listening
+     on 127.0.0.1 only. Activated per-service when app.type is 'apache2'.
+     Supports PHP (mod_php), .htaccess (AllowOverride All), custom
+     document_root, and extra_config. nginx auto-detects apache2 services
+     and proxies to the correct port. Port defaults to apache2_base_port
+     (8080) or can be set per-service via app.port.
+     Also: nginx now serves static files when a service has no port:
+     defined. bootstrap_scripts moved to separate bootstrap.yml playbook.
+     Console password (admin_dev_password_hash) set on all environments
+     with update_password: always for VNC/console access.
+     Service config example:
+       services:
+         myapp:
+           domain: myapp.example.com
+           enabled: true
+           owner: myapp
+           app:
+             type: apache2
+             php: true

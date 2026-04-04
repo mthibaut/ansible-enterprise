@@ -17,7 +17,7 @@ modes.
 **Remote git repository:**
 `git@github.com:mthibaut/ansible-enterprise-test.git`
 
-**Current HEAD:** checkpoint-201 — `feat: checkpoint-201-bootstrap-scripts`
+**Current HEAD:** checkpoint-202 — `feat: checkpoint-202-apache2-role`
 
 **PROMPT.md version:** 1.4.0 (PROMPT.md is a validation anchor only — it is
 not a real specification. The FILE_MANIFEST in `src/generate_ansible_enterprise.py`
@@ -193,13 +193,14 @@ key warning and shallow-merge data loss. Use the flat `geoip_*` variables.
 | users | generated | Service owner accounts and web roots |
 | nextcloud | **PROTECTED** | Nextcloud + MariaDB |
 | mailserver | **PROTECTED** | Postfix + Dovecot + OpenDKIM |
-| bootstrap_scripts | generated | Per-host bootstrap shell scripts (tags: bootstrap, never) |
+| apache2 | generated | Backend app server behind nginx (PHP, .htaccess); opt-in per service |
+| bootstrap_scripts | generated | Per-host bootstrap shell scripts (separate bootstrap.yml playbook) |
 
 **Role ordering in site.yml:**
 ```
 preflight → common → ssh_hardening → geoip → firewall_geo →
-dns → certbot → nginx → users → nextcloud → mailserver
-bootstrap_scripts (only with --tags bootstrap)
+dns → certbot → apache2 → nginx → users → nextcloud → mailserver
+bootstrap_scripts (separate bootstrap.yml playbook)
 ```
 
 ---
@@ -481,8 +482,9 @@ Tracked future work (from `src/spec/architecture.md`):
 | **199** | **feat: set_hostname and set_domain_name variables in common role** |
 | **200** | **feat: openvpn multi-instance refactor -- openvpn_instances list, per-instance PKI/config/service** |
 | **201** | **feat: bootstrap_scripts role -- per-host bootstrap shell scripts (plaintext + encrypted)** |
+| **202** | **feat: apache2 backend role, nginx static site mode, bootstrap.yml separation** |
 
-Next checkpoint will be **202**.
+Next checkpoint will be **203**.
 
 ## Generator format note (checkpoint-042)
 FILE_MANIFEST now uses triple-quoted multiline strings. To add or edit content:

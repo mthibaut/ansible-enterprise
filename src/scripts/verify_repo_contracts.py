@@ -295,8 +295,12 @@ def verify_vhost_template_coverage() -> None:
     except KeyError:
         fail("Cannot read app.type enum from services.schema.json")
 
+    # App types that are backend servers (not nginx-specific templates).
+    # These use the standard proxy vhost template via upstream port.
+    backend_types = {"apache2"}
+
     for app_type in app_type_enum:
-        if app_type == "generic":
+        if app_type == "generic" or app_type in backend_types:
             continue
         tmpl = BUILD / "roles" / "nginx" / "templates" / f"{app_type}.conf.j2"
         if not tmpl.exists():
@@ -309,7 +313,7 @@ def verify_vhost_template_coverage() -> None:
     if render.exists():
         render_text = render.read_text(encoding="utf-8")
         for app_type in app_type_enum:
-            if app_type == "generic":
+            if app_type == "generic" or app_type in backend_types:
                 continue
             if app_type not in render_text:
                 fail(
