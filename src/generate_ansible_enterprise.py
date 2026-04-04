@@ -3663,24 +3663,12 @@ services:
          else service.value.port | default('') }}
   when: service.value.enabled | default(false) | bool
 
-# Catch services with neither web: nor port: before the template renders.
-# Nextcloud uses app: not web: so it is excluded from this check.
-- name: Assert web upstream defined for {{ service.key }}
-  assert:
-    that:
-      - _upstream_port | string | length > 0
-    fail_msg: >
-      Service '{{ service.key }}' uses template {{ _vhost_template }} which
-      proxies to an upstream, but neither web.upstream_port nor port is
-      defined. Add a 'web:' block or a 'port:' key:
-        web:
-          upstream_host: 127.0.0.1
-          upstream_port: 8080
-      or simply:
-        port: 8080
-  when:
-    - service.value.enabled | default(false) | bool
-    - _vhost_template != 'nextcloud.conf.j2'
+# Determine serving mode: proxy (port defined) or static (no port).
+# Nextcloud is always proxy mode (handled by its own template).
+- name: Set serving mode for {{ service.key }}
+  set_fact:
+    _static_site: "{{ _upstream_port | string | length == 0 }}"
+  when: service.value.enabled | default(false) | bool
 
 # For TLS-enabled services, assert the certificate exists before rendering
 # the vhost config. nginx will fail to start if ssl_certificate points to
@@ -3733,6 +3721,14 @@ server {
   listen 80;  # fallback: no listen directive declared
   {% endif %}
   server_name {{ svc.domain }};
+{% if _static_site | default(false) | bool %}
+  root /var/www/{{ svc.domain }};
+  index index.html index.htm;
+  location / {
+    if ($ssl_client_verify != SUCCESS) { return 403; }
+    try_files $uri $uri/ =404;
+  }
+{% else %}
   location / {
     if ($ssl_client_verify != SUCCESS) { return 403; }
     proxy_pass http://{{ _upstream_host }}:{{ _upstream_port }};
@@ -3740,6 +3736,7 @@ server {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
   }
+{% endif %}
 }
 """,
     'roles/nginx/templates/restricted_site.conf.j2': """\
@@ -3765,12 +3762,20 @@ server {
   {% endfor %}
   deny all;
 
+{% if _static_site | default(false) | bool %}
+  root /var/www/{{ svc.domain }};
+  index index.html index.htm;
+  location / {
+    try_files $uri $uri/ =404;
+  }
+{% else %}
   location / {
     proxy_pass http://{{ _upstream_host }}:{{ _upstream_port }};
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
   }
+{% endif %}
 }
 """,
     'roles/nginx/templates/nextcloud.conf.j2': """\
@@ -3851,12 +3856,20 @@ server {
   listen 80;  # fallback: no listen directive declared
   {% endif %}
   server_name {{ svc.domain }};
+{% if _static_site | default(false) | bool %}
+  root /var/www/{{ svc.domain }};
+  index index.html index.htm;
+  location / {
+    try_files $uri $uri/ =404;
+  }
+{% else %}
   location / {
     proxy_pass http://{{ _upstream_host }}:{{ _upstream_port }};
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
   }
+{% endif %}
 }
 """,
     'roles/nfs/defaults/main.yml': """\
@@ -5411,7 +5424,7 @@ verb 3
   user:
     name: "{{ item }}"
     password: "{{ admin_dev_password_hash }}"
-    update_password: on_create
+    update_password: always
   loop: "{{ admin_users | list }}"
   when: admin_dev_password_hash | default('') | length > 0
 
@@ -5419,7 +5432,7 @@ verb 3
   user:
     name: root
     password: "{{ admin_dev_password_hash }}"
-    update_password: on_create
+    update_password: always
   when: admin_dev_password_hash | default('') | length > 0
 
 - name: Deploy admin SSH keys
@@ -6079,9 +6092,12 @@ bootstrap_repo_uri: ""
     mode: "0700"
   vars:
     _encrypted_mode: true
+  register: _enc_template
 
 # Encrypt the secrets section: extract everything between the BEGIN/END
 # markers, encrypt it, and produce the final self-decrypting script.
+# Only re-encrypt when the template changed to keep the task idempotent
+# (openssl random salt produces different ciphertext on every run).
 - name: Build self-decrypting bootstrap script
   shell: |
     set -euo pipefail
@@ -6101,6 +6117,7 @@ bootstrap_repo_uri: ""
     rm -f "$TMPFILE"
   args:
     executable: /bin/bash
+  when: _enc_template is changed
 
 - name: Bootstrap scripts generated
   debug:

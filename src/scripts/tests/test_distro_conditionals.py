@@ -207,31 +207,26 @@ class TestNginxDistro(unittest.TestCase):
     RENDER_SVC    = "roles/nginx/tasks/render_service.yml"
 
     def test_render_service_resolves_template_first(self):
-        """_vhost_template must be resolved before the assert that uses it."""
+        """_vhost_template must be resolved before the serving mode and render."""
         text = _read(self.RENDER_SVC)
         resolve_pos = text.index("Resolve vhost template")
-        assert_pos  = text.index("Assert web upstream defined")
+        mode_pos    = text.index("Set serving mode")
         render_pos  = text.index("Render service vhost")
-        self.assertLess(resolve_pos, assert_pos)
-        self.assertLess(assert_pos, render_pos)
+        self.assertLess(resolve_pos, mode_pos)
+        self.assertLess(mode_pos, render_pos)
 
-    def test_render_service_asserts_web_upstream_for_proxy_vhosts(self):
-        """Proxy templates must be guarded by an assert; port: is accepted as fallback."""
+    def test_render_service_sets_static_site_mode(self):
+        """Static vs proxy mode must be determined from _upstream_port."""
         text = _read(self.RENDER_SVC)
-        self.assertIn("_upstream_port | string | length > 0", text)
+        self.assertIn("_static_site", text)
+        self.assertIn("_upstream_port | string | length == 0", text)
         self.assertIn("Normalize upstream for", text)
         self.assertIn("service.value.port | default", text)
 
-    def test_render_service_skips_assert_for_nextcloud(self):
-        """Nextcloud uses app: not web:; assert must be skipped for it."""
+    def test_render_service_static_site_nextcloud_excluded(self):
+        """Nextcloud is always proxy mode (handled by its own template)."""
         text = _read(self.RENDER_SVC)
-        self.assertIn("_vhost_template != 'nextcloud.conf.j2'", text)
-
-    def test_render_service_fail_msg_includes_example(self):
-        """Assert fail_msg must include an example web: block for the operator."""
-        text = _read(self.RENDER_SVC)
-        self.assertIn("upstream_host: 127.0.0.1", text)
-        self.assertIn("upstream_port: 8080", text)
+        self.assertIn("Nextcloud is always proxy mode", text)
 
     def test_render_service_checks_cert_exists_before_render(self):
         """TLS cert stat must precede the render task, not follow it."""
@@ -528,11 +523,11 @@ class TestUpdatePasswordIdempotence(unittest.TestCase):
 
     TASKS = "roles/ssh_hardening/tasks/main.yml"
 
-    def test_update_password_is_on_create(self):
-        """update_password: always causes tasks to report changed every run."""
+    def test_update_password_is_always(self):
+        """update_password: always ensures console password can be rotated."""
         text = _read(self.TASKS)
-        self.assertNotIn("update_password: always", text)
-        self.assertIn("update_password: on_create", text)
+        self.assertIn("update_password: always", text)
+        self.assertNotIn("update_password: on_create", text)
 
 
 class TestNftablesIdempotence(unittest.TestCase):
