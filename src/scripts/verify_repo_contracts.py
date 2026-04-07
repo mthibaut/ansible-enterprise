@@ -71,7 +71,7 @@ REQUIRED_SRC_FILES = [
 # test file. The mapping is: script_path (relative to src/) -> test file name.
 REQUIRED_TEST_COVERAGE = {
     "../build/roles/geoip/files/geoip_ingest.py":    "test_geoip_ingest.py",
-    "../build/roles/dns/files/update_dns_serial.py":  "test_update_dns_serial.py",
+    "../build/roles/dns/files/dns-bump-serial":        "test_dns_bump_serial.py",
     "scripts/resolve_service_order.py":               "test_resolve_service_order.py",
     "scripts/validate_services_schema.py":            "test_services_schema.py",
     "scripts/resolve_capabilities.py":                "test_resolve_capabilities.py",

@@ -160,6 +160,7 @@ FILE_MANIFEST: Dict[str, str] = {
 #   myapp:
 #     enabled: true
 #     domain: myapp.example.com
+#     aliases: [www.myapp.example.com]  # SNI aliases -> same backend
 #     owner: myapp         # Unix user for web root ownership
 #     security:
 #       tls: true
@@ -189,7 +190,7 @@ FILE_MANIFEST: Dict[str, str] = {
 # -- DNS (defaults in roles/dns/defaults/main.yml) ---------------------------
 # dns_hidden_primary_zones: [example.com]
 # dns_secondaries: []
-# dns_admin_ip: ""
+# dns_admin_ips: []    # IPs allowed to reach port 53 (e.g. nsupdate sources)
 # dns_public: false    # set true to open port 53 to all sources
 #                      # (public resolver / authoritative server mode)
 
@@ -329,7 +330,7 @@ provisioner:
         geoip_allowlist_entries: []
         dns_hidden_primary_zones: []
         dns_secondaries: []
-        dns_admin_ip: ""
+        dns_admin_ips: []
         mailserver:
           enabled: false
           domain: mail.example.com
@@ -585,9 +586,17 @@ grafana_enabled: false
 # Leave empty to keep the current hostname unchanged.
 set_hostname: ''
 
-# Domain name (search domain) written to /etc/resolv.conf via resolvconf
-# or directly. Leave empty to keep the current domain unchanged.
+# Domain name (search domain). This is managed through the active resolver
+# backend rather than by writing /etc/resolv.conf directly when a higher-level
+# manager is present.
 set_domain_name: ''
+
+# Which backend should manage set_domain_name.
+# Valid values:
+#   auto, networkmanager, systemd-resolved, resolvconf, dhclient, static
+# auto prefers the active host manager in this order:
+#   NetworkManager -> systemd-resolved -> resolvconf -> dhclient -> static
+set_domain_backend: auto
 
 # Services dict. Declare application services in inventory group_vars
 # or host_vars. Each entry drives nginx, DNS, TLS, and firewall config.
@@ -857,12 +866,27 @@ certbot_selfsigned_days: 365
         {{- (_zones[0].allow_update | first).key | default(certbot_tsig_key_name) -}}
       {%- else -%}{{ certbot_tsig_key_name }}{%- endif %}
     _certbot_nsupdate_secret: >-
+      {%- set _hvars = hostvars[inventory_hostname] -%}
       {%- set _zones = dns.zones | default([])
           | selectattr('allow_update', 'defined') | list -%}
       {%- if _zones | length > 0 -%}
         {%- set _key = (_zones[0].allow_update | first).key | default('') -%}
-        {{- lookup('vars', 'dns_tsig_' + (_key | replace('-', '_')) + '_secret', default='') or certbot_tsig_secret | default('') -}}
-      {%- else -%}{{ certbot_tsig_secret | default('') }}{%- endif %}
+        {%- set _varname = 'dns_tsig_' + (_key | replace('-', '_')) + '_secret' -%}
+        {{- _hvars[_varname] | default(certbot_tsig_secret | default('')) -}}
+      {%- else -%}
+        {%- set _varname = 'dns_tsig_' + (certbot_tsig_key_name | replace('-', '_')) + '_secret' -%}
+        {{- _hvars[_varname] | default(certbot_tsig_secret | default('')) -}}
+      {%- endif %}
+  when: _certbot_dns_method in ['local', 'nsupdate']
+
+- name: Debug certbot nsupdate resolution
+  debug:
+    msg: |
+      method={{ _certbot_dns_method }}
+      key={{ _certbot_nsupdate_key | default('UNSET') }}
+      secret_length={{ _certbot_nsupdate_secret | default('') | length }}
+      zones_with_allow_update={{ dns.zones | default([]) | selectattr('allow_update', 'defined') | list | length }}
+      certbot_tsig_key_name={{ certbot_tsig_key_name | default('UNSET') }}
   when: _certbot_dns_method in ['local', 'nsupdate']
 
 - name: Assert certbot tsig secret is set when using nsupdate
@@ -969,6 +993,7 @@ certbot_selfsigned_days: 365
         --manual-cleanup-hook {{ certbot_hook_dir }}/dns-cleanup.sh
         {{ '--staging' if certbot_staging | bool else '' }}
         -d {{ item.value.domain }}
+        {% for _alias in item.value.aliases | default([]) %}-d {{ _alias }} {% endfor %}
       args:
         creates: "{{ _le_dir }}/live/{{ item.value.domain }}/fullchain.pem"
       loop: "{{ services | dict2items | sort(attribute='key') }}"
@@ -1027,7 +1052,7 @@ certbot_selfsigned_days: 365
     -keyout {{ _le_dir }}/live/{{ item.value.domain }}/privkey.pem
     -out {{ _le_dir }}/live/{{ item.value.domain }}/fullchain.pem
     -subj "/CN={{ item.value.domain }}"
-    -addext "subjectAltName=DNS:{{ item.value.domain }}"
+    -addext "subjectAltName=DNS:{{ item.value.domain }}{% for _alias in item.value.aliases | default([]) %},DNS:{{ _alias }}{% endfor %}"
   args:
     creates: "{{ _le_dir }}/live/{{ item.value.domain }}/fullchain.pem"
   loop: "{{ services | dict2items | sort(attribute='key') }}"
@@ -1139,22 +1164,324 @@ fi
     name: "{{ set_hostname }}"
   when: set_hostname | default('') | length > 0
 
-- name: Update /etc/hosts with hostname
+# Map the FQDN to the real IP rather than 127.0.1.1. The 127.0.1.1
+# convention is a Debian-ism for DHCP desktops; on servers with a
+# static IP it causes problems (e.g. BIND cannot bind to 127.0.1.1
+# because it is not assigned to any interface).
+- name: Resolve primary host IP for /etc/hosts
+  set_fact:
+    _primary_host_ip: >-
+      {{
+        ansible_facts.default_ipv4.address
+        | default((ansible_facts.all_ipv4_addresses | default([]) | first), true)
+        | default(ansible_facts.default_ipv6.address | default(''), true)
+      }}
+  when: set_hostname | default('') | length > 0
+
+- name: Remove legacy 127.0.1.1 hosts entry
   lineinfile:
     path: /etc/hosts
     regexp: '^127\\.0\\.1\\.1\\s'
-    line: "127.0.1.1  {{ set_hostname + '.' + set_domain_name if set_domain_name | default('') | length > 0 else set_hostname }}  {{ set_hostname }}"
-    state: present
+    state: absent
   when: set_hostname | default('') | length > 0
 
+- name: Update /etc/hosts with hostname
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^{{ _primary_host_ip | regex_escape }}[ \\t]+'
+    line: "{{ _primary_host_ip }}  {{ set_hostname + '.' + set_domain_name if set_domain_name | default('') | length > 0 else set_hostname }}  {{ set_hostname }}"
+    state: present
+  when:
+    - set_hostname | default('') | length > 0
+    - _primary_host_ip | default('') | length > 0
+
 # -- Set domain name ----------------------------------------
+- name: Assert set_domain_backend is valid
+  assert:
+    that:
+      - set_domain_backend | default('auto') in ['auto', 'networkmanager', 'systemd-resolved', 'resolvconf', 'dhclient', 'static']
+    fail_msg: "set_domain_backend must be one of: auto, networkmanager, systemd-resolved, resolvconf, dhclient, static"
+  when: set_domain_name | default('') | length > 0
+
+- name: Set preferred interface for search-domain management
+  set_fact:
+    _domain_iface: >-
+      {{
+        ansible_facts.default_ipv4.interface
+        | default(ansible_facts.default_ipv6.interface | default(''), true)
+      }}
+  when: set_domain_name | default('') | length > 0
+
+- name: Gather service facts for resolver management
+  service_facts:
+  when:
+    - set_domain_name | default('') | length > 0
+    - ansible_service_mgr | default('') == 'systemd'
+
+- name: Check resolver-manager paths
+  stat:
+    path: "{{ item.path }}"
+  loop:
+    - { key: nmcli, path: /usr/bin/nmcli }
+    - { key: resolvconf_sbin, path: /sbin/resolvconf }
+    - { key: resolvconf_usr_sbin, path: /usr/sbin/resolvconf }
+    - { key: resolvconf_local_sbin, path: /usr/local/sbin/resolvconf }
+    - { key: dhclient_conf, path: /etc/dhcp/dhclient.conf }
+  loop_control:
+    label: "{{ item.path }}"
+  register: _resolver_manager_stats
+  when: set_domain_name | default('') | length > 0
+
+- name: Derive resolver-manager facts
+  set_fact:
+    _has_nmcli: >-
+      {{
+        (_resolver_manager_stats.results | default([])
+          | selectattr('item.key', 'equalto', 'nmcli')
+          | map(attribute='stat.exists') | first | default(false))
+      }}
+    _resolvconf_cmd: >-
+      {{
+        (_resolver_manager_stats.results | default([])
+          | selectattr('stat.exists')
+          | selectattr('item.key', 'match', '^resolvconf_')
+          | map(attribute='item.path') | first | default(''))
+      }}
+    _has_dhclient_conf: >-
+      {{
+        (_resolver_manager_stats.results | default([])
+          | selectattr('item.key', 'equalto', 'dhclient_conf')
+          | map(attribute='stat.exists') | first | default(false))
+      }}
+    _has_networkmanager_service: >-
+      {{
+        ansible_service_mgr | default('') == 'systemd'
+        and ('NetworkManager.service' in (ansible_facts.services | default({})))
+      }}
+    _has_systemd_resolved_service: >-
+      {{
+        ansible_service_mgr | default('') == 'systemd'
+        and ('systemd-resolved.service' in (ansible_facts.services | default({})))
+      }}
+  when: set_domain_name | default('') | length > 0
+
+- name: Resolve active NetworkManager connection
+  shell: |
+    set -eu
+    if [ -n "{{ _domain_iface | default('') }}" ]; then
+        nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v iface="{{ _domain_iface | default('') }}" '$2 == iface { print $1; exit }'
+    fi
+    nmcli -t -f NAME connection show --active | head -n1
+  register: _nm_active_connection
+  changed_when: false
+  failed_when: false
+  when:
+    - set_domain_name | default('') | length > 0
+    - _has_networkmanager_service | default(false) | bool
+    - _has_nmcli | default(false) | bool
+
+- name: Select search-domain backend
+  set_fact:
+    _set_domain_backend_effective: >-
+      {{
+        set_domain_backend
+        if (set_domain_backend | default('auto')) != 'auto'
+        else (
+          'networkmanager'
+          if (_has_networkmanager_service | default(false) | bool)
+             and (_has_nmcli | default(false) | bool)
+             and ((_nm_active_connection.stdout | default('') | trim) | length > 0)
+          else 'systemd-resolved'
+          if (_has_systemd_resolved_service | default(false) | bool)
+          else 'resolvconf'
+          if ((_resolvconf_cmd | default('')) | length > 0)
+          else 'dhclient'
+          if (_has_dhclient_conf | default(false) | bool)
+          else 'static'
+        )
+      }}
+  when: set_domain_name | default('') | length > 0
+
+- name: Assert requested NetworkManager backend is usable
+  assert:
+    that:
+      - _has_nmcli | default(false) | bool
+      - (_nm_active_connection.stdout | default('') | trim) | length > 0
+    fail_msg: "set_domain_backend=networkmanager requires nmcli and an active NetworkManager connection"
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'networkmanager'"
+
+- name: Read current NetworkManager DNS search domains
+  command:
+    argv:
+      - nmcli
+      - -g
+      - ipv4.dns-search,ipv6.dns-search
+      - connection
+      - show
+      - "{{ _nm_active_connection.stdout | trim }}"
+  register: _nm_dns_search
+  changed_when: false
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'networkmanager'"
+
+- name: Check whether NetworkManager already has the desired search domains
+  set_fact:
+    _nm_dns_search_matches: >-
+      {{
+        (_nm_dns_search.stdout_lines | default([])) == [set_domain_name, set_domain_name]
+      }}
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'networkmanager'"
+
+- name: Configure search domain via NetworkManager
+  command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ _nm_active_connection.stdout | trim }}"
+      - ipv4.dns-search
+      - "{{ set_domain_name }}"
+      - ipv6.dns-search
+      - "{{ set_domain_name }}"
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'networkmanager'"
+    - not (_nm_dns_search_matches | default(false) | bool)
+
+- name: Reapply NetworkManager connection after DNS search change
+  command:
+    argv:
+      - nmcli
+      - device
+      - reapply
+      - "{{ _domain_iface }}"
+  changed_when: false
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'networkmanager'"
+    - _domain_iface | default('') | length > 0
+    - not (_nm_dns_search_matches | default(false) | bool)
+
+- name: Ensure systemd-resolved drop-in directory exists
+  file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'systemd-resolved'"
+
+- name: Configure search domain via systemd-resolved
+  copy:
+    dest: /etc/systemd/resolved.conf.d/ansible-enterprise.conf
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+    content: |
+      [Resolve]
+      Domains={{ set_domain_name }}
+  register: _resolved_search_domain
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'systemd-resolved'"
+
+- name: Restart systemd-resolved when search domain changed
+  systemd:
+    name: systemd-resolved
+    state: restarted
+    daemon_reload: true
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'systemd-resolved'"
+    - _resolved_search_domain is changed
+
+- name: Ensure resolvconf base directory exists
+  file:
+    path: /etc/resolvconf/resolv.conf.d
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'resolvconf'"
+
+- name: Configure search domain via resolvconf base file
+  lineinfile:
+    path: /etc/resolvconf/resolv.conf.d/base
+    regexp: '^search[ \\t]+'
+    line: "search {{ set_domain_name }}"
+    create: true
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  register: _resolvconf_search_domain
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'resolvconf'"
+
+- name: Regenerate resolv.conf through resolvconf
+  command:
+    argv:
+      - "{{ _resolvconf_cmd }}"
+      - -u
+  changed_when: false
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'resolvconf'"
+    - _resolvconf_search_domain is changed
+
+- name: Configure search domain via dhclient
+  lineinfile:
+    path: /etc/dhcp/dhclient.conf
+    regexp: '^supersede domain-search '
+    line: 'supersede domain-search "{{ set_domain_name }}";'
+    create: true
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'dhclient'"
+
+- name: Read resolv.conf
+  slurp:
+    src: /etc/resolv.conf
+  register: _resolv_conf
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'static'"
+
+- name: Check whether resolv.conf already has the desired search domain
+  set_fact:
+    _resolv_conf_has_desired_search: >-
+      {{
+        (_resolv_conf.content | b64decode)
+        is search('(?m)^search[ \t]+'
+                  + (set_domain_name | regex_escape)
+                  + '[ \t]*$')
+      }}
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'static'"
+
 - name: Set search domain in resolv.conf
   lineinfile:
     path: /etc/resolv.conf
-    regexp: '^search\\s'
+    regexp: '^search[ \\t]+'
     line: "search {{ set_domain_name }}"
     state: present
-  when: set_domain_name | default('') | length > 0
+  when:
+    - set_domain_name | default('') | length > 0
+    - "_set_domain_backend_effective | default('') == 'static'"
+    - not (_resolv_conf_has_desired_search | default(false) | bool)
 
 # FreeBSD: the Ansible package must be installed on the managed host
 # for Python-based modules to function. Package name includes the Python
@@ -1221,29 +1548,14 @@ fi
 # DNS role configuration. Override in inventory group_vars.
 #
 # Precedence for TTL and SOA fields (highest wins):
-#   record-level -> zone-level -> dns.defaults -> role defaults below
+#   record-level -> zone-level -> dns_defaults -> role defaults below
 dns:
   enabled: false
 
-  # BIND listen addresses. Add the public IP when serving external zones.
-  listen_on: ["127.0.0.1", "::1"]
-
-  # Recursive resolver mode. false = authoritative only (recommended).
-  recursion: false
-
-  # Upstream resolvers used when recursion: true.
-  forwarders: []
-
-  # Top-level defaults inherited by all zones (overridable per zone).
-  defaults:
-    ttl: 3600
-    soa:
-      refresh: 3600
-      retry: 900
-      expire: 604800
-      minimum: 300
-      # primary_ns: derived from inventory_hostname if unset
-      # email: derived from admin_users[0] if unset
+  # Per-host overrides. If unset, dns_defaults values are used.
+  # listen_on: ["127.0.0.1", "::1"]
+  # recursion: false
+  # forwarders: []
 
   # TSIG keys for nsupdate (certbot DNS-01 and zone transfers).
   # Secrets must be set in vault as dns_tsig_<name>_secret.
@@ -1260,10 +1572,18 @@ dns:
   #   secondaries: list of IPs allowed to AXFR
   #   allow_update: list of TSIG key names permitted to nsupdate
   #   services_auto_derive: auto-add A records from services[] (default true)
+  #   overwrite: regenerate the zone file from inventory on every run while
+  #              preserving the current serial for a later bump (default false)
   #   public: open port 53 to world for this zone (default false)
   #   records: explicit DNS records (A, MX, TXT, CNAME etc.)
-  #   ttl: zone default TTL (overrides dns.defaults.ttl)
-  #   soa: zone SOA overrides (merged with dns.defaults.soa)
+  #   ttl: zone default TTL (overrides dns_defaults.ttl)
+  #   soa: zone SOA overrides (merged with dns_defaults.soa)
+  # dns_debug_overwrite: when true, emit debug/assert output for overwrite-
+  # managed primary zones so operators can verify effective vars and rendered
+  # SOA values during troubleshooting.
+  #
+  # Settings like listen_on, recursion, forwarders can be set per-host
+  # under dns: to override dns_defaults values.
   #
   # secondary: BIND on this host, pulls zone transfer from upstream.
   #   primaries: list of IPs to AXFR from
@@ -1319,6 +1639,33 @@ dns:
   #         # ksk_file: /path/to/Ktest.gregoriusgild.be.+013+12345.key
   #         # zsk_file: /path/to/Ktest.gregoriusgild.be.+013+67890.key
   zones: []
+
+# DNS defaults - separate from dns dict to avoid Ansible hash overwrite.
+# Precedence for TTL and SOA fields (highest wins):
+#   record-level -> zone-level -> dns_defaults -> role defaults below
+dns_defaults:
+  # BIND listen addresses. Add the public IP when serving external zones.
+  listen_on: ["127.0.0.1", "::1"]
+
+  # Recursive resolver mode. false = authoritative only (recommended).
+  recursion: false
+
+  # Upstream resolvers used when recursion: true.
+  forwarders: []
+
+  # Zone TTL and SOA defaults (overridable per zone).
+  ttl: 3600
+  soa:
+    refresh: 3600
+    retry: 900
+    expire: 604800
+    minimum: 300
+    # primary_ns: derived from inventory_hostname if unset
+    # email: derived from admin_users[0] if unset
+
+  # IPs of secondary nameservers. Merged into every primary zone's
+  # allow-transfer and also-notify (zone-level secondaries are additive).
+  secondaries: []
 """,
     'roles/dns/files/sync_dns_records.py': '''\
 #!/usr/bin/env python3
@@ -1408,30 +1755,276 @@ def main():
 if __name__ == "__main__":
     main()
 ''',
-    'roles/dns/files/update_dns_serial.py': """\
+    'roles/dns/files/normalize_zone_soa.py': '''\
 #!/usr/bin/env python3
-# Updates the SOA serial in a BIND zone file using a deterministic SHA-256 value.
-# Usage: python3 update_dns_serial.py --zone-file /etc/bind/zones/example.com.zone
+# Normalize SOA fields in a BIND zone file.
+# Converts mailbox-form SOA RNAME values into DNS mailbox syntax:
+#   user@example.com. -> user.example.com.
+#   first.last@example.com. -> first\\.last.example.com.
+#
+# Prints "CHANGED ..." when a rewrite happened so Ansible can mark the task.
 import argparse
-import hashlib
 import pathlib
 import re
+import sys
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--zone-file", required=True)
-args = ap.parse_args()
 
-path = pathlib.Path(args.zone_file)
-text = path.read_text(encoding="utf-8")
-normalized = re.sub(r"^\\s*\\d{10}\\s*$", "", text, flags=re.MULTILINE)
-digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-serial = str(int(digest[:8], 16)).rjust(10, "0")[:10]
-new_text = re.sub(
-    r"(^\\s*)\\d{10}(\\s*$)", r"\\g<1>" + serial + r"\\g<2>",
-    text, count=1, flags=re.MULTILINE
+SOA_RE = re.compile(
+    r"(?m)^(@\\s+(?:\\d+\\s+)?(?:IN\\s+)?SOA\\s+)(\\S+)(\\s+)(\\S+)(\\s*\\()$"
 )
-if new_text != text:
-    path.write_text(new_text, encoding="utf-8")
+
+
+def normalize_rname(value):
+    value = value.strip()
+    if value.endswith("."):
+        value = value[:-1]
+    if "@" not in value:
+        return value + "."
+    local, domain = value.split("@", 1)
+    local = local.replace(".", r"\\.")
+    return "{}.{}.".format(local, domain)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--zone-file", required=True)
+    args = ap.parse_args()
+
+    zone_path = pathlib.Path(args.zone_file)
+    if not zone_path.exists():
+        print("error: zone file not found: {}".format(zone_path), file=sys.stderr)
+        sys.exit(1)
+
+    text = zone_path.read_text(encoding="utf-8")
+    changed = False
+
+    def _replace(match):
+        nonlocal changed
+        email = match.group(4)
+        normalized = normalize_rname(email)
+        if normalized != email:
+            changed = True
+        return "{}{}{}{}{}".format(
+            match.group(1), match.group(2), match.group(3), normalized, match.group(5)
+        )
+
+    new_text = SOA_RE.sub(_replace, text, count=1)
+
+    if changed:
+        zone_path.write_text(new_text, encoding="utf-8")
+        print("CHANGED {}".format(zone_path))
+
+
+if __name__ == "__main__":
+    main()
+''',
+    'roles/dns/files/dns-bump-serial': """\
+#!/usr/bin/env python3
+# Bump SOA serial numbers in BIND zones via rndc freeze/thaw.
+#
+# Usage:
+#   dns-bump-serial                          # all zones in --zone-dir
+#   dns-bump-serial example.com foo.org      # specific zones only
+#   dns-bump-serial --zone-dir /var/lib/bind # override zone directory
+#   dns-bump-serial --allow-direct-edit      # allow static/test fallback
+#
+# Serial format: YYYYMMDDNN, where YYYYMMDD is today's date and NN is a
+# two-digit counter for multiple same-day bumps.
+#
+# The script uses rndc freeze / file edit / rndc thaw by default. Direct file
+# edits without rndc are only allowed when --allow-direct-edit is passed.
+#
+# Exit codes:
+#   0 - success (may or may not have changed serials)
+#   1 - error (missing files, rndc failure, bad arguments)
+import argparse
+import datetime
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+
+# Match the 10-digit SOA serial in both legacy zone files and newer
+# generator-managed files that annotate it with "; serial".
+SERIAL_RE = re.compile(r"(\\s)(\\d{10})(\\s*(?:;\\s*serial)?)")
+
+
+def detect_zone_dir():
+    \"\"\"Auto-detect the BIND zone directory based on OS.\"\"\"
+    if os.path.isdir("/var/lib/bind"):
+        return "/var/lib/bind"
+    if os.path.isdir("/usr/local/etc/namedb"):
+        return "/usr/local/etc/namedb"
+    return "/var/named"
+
+
+def compute_serial(old_serial):
+    \"\"\"Compute the next YYYYMMDDNN serial.\"\"\"
+    today = datetime.date.today().strftime("%Y%m%d")
+    old_int = int(old_serial)
+    today_first = int(today + "01")
+
+    if old_int > 4294967295:
+        raise ValueError("serial {} exceeds the DNS SOA serial range".format(old_serial))
+
+    if old_serial.startswith(today):
+        suffix = int(old_serial[8:])
+        if suffix >= 99:
+            raise ValueError(
+                "serial {} already reached the YYYYMMDD99 ceiling for today".format(old_serial)
+            )
+        return "{}{:02d}".format(today, suffix + 1)
+
+    # Preserve monotonicity if the existing serial is already ahead of today.
+    if old_int >= today_first:
+        if old_int >= 4294967295:
+            raise ValueError("serial {} exceeds the DNS SOA serial range".format(old_serial))
+        return "{:010d}".format(old_int + 1)
+
+    return today + "01"
+
+
+def rndc(action, zone_name, allow_direct_edit=False):
+    \"\"\"Run rndc freeze/thaw for a zone. Returns True on success.\"\"\"
+    try:
+        subprocess.run(
+            ["rndc", action, zone_name],
+            capture_output=True, text=True, check=True,
+        )
+        return True
+    except FileNotFoundError:
+        if allow_direct_edit:
+            return True
+        print(
+            "ERROR: rndc is required for zone '{}' but is not installed. "
+            "Pass --allow-direct-edit only for static/test zones.".format(zone_name),
+            file=sys.stderr,
+        )
+        return False
+    except subprocess.CalledProcessError as e:
+        stderr_lower = e.stderr.lower()
+        # On first run, or for static zones, allow direct edits when the caller
+        # explicitly opted in. Typical safe fallback cases:
+        # - zone is static ("not dynamic")
+        # - zone file exists but named has not loaded it yet ("no matching zone")
+        if action == "freeze" and allow_direct_edit and (
+            "not dynamic" in stderr_lower or "no matching zone" in stderr_lower
+        ):
+            return True
+        if action == "thaw" and allow_direct_edit and (
+            "not frozen" in stderr_lower or "no matching zone" in stderr_lower
+        ):
+            return True
+        print("ERROR: rndc {} {} failed: {}".format(
+            action, zone_name, e.stderr.strip()), file=sys.stderr)
+        return False
+
+
+def bump_serial(zone_path, zone_name, allow_direct_edit=False):
+    \"\"\"Bump the SOA serial via rndc freeze / edit / thaw.\"\"\"
+    text = zone_path.read_text(encoding="utf-8")
+    m = SERIAL_RE.search(text)
+    if not m:
+        print("WARNING {}: no serial found, skipping".format(zone_name),
+              file=sys.stderr)
+        return None, None
+
+    old_serial = m.group(2)
+    try:
+        new_serial = compute_serial(old_serial)
+    except ValueError as exc:
+        print("ERROR {}: {}".format(zone_name, exc), file=sys.stderr)
+        return None, old_serial
+
+    # Freeze zone to safely edit the file
+    if not rndc("freeze", zone_name, allow_direct_edit=allow_direct_edit):
+        return None, old_serial
+
+    # Re-read after freeze (BIND may have written journal back to file)
+    text = zone_path.read_text(encoding="utf-8")
+    m = SERIAL_RE.search(text)
+    if not m:
+        print("WARNING {}: no serial found after freeze, skipping".format(zone_name),
+              file=sys.stderr)
+        rndc("thaw", zone_name, allow_direct_edit=allow_direct_edit)
+        return None, None
+    old_serial = m.group(2)
+    try:
+        new_serial = compute_serial(old_serial)
+    except ValueError as exc:
+        print("ERROR {}: {}".format(zone_name, exc), file=sys.stderr)
+        rndc("thaw", zone_name, allow_direct_edit=allow_direct_edit)
+        return None, old_serial
+    new_text = SERIAL_RE.sub(
+        r"\\g<1>" + new_serial + r"\\g<3>", text, count=1)
+    zone_path.write_text(new_text, encoding="utf-8")
+
+    # Thaw zone to let BIND pick up the change and resume dynamic updates
+    if not rndc("thaw", zone_name, allow_direct_edit=allow_direct_edit):
+        return None, new_serial
+
+    return True, new_serial
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Bump SOA serial numbers in BIND zones.")
+    ap.add_argument("zones", nargs="*",
+                    help="Zone names to bump (default: all .zone files)")
+    ap.add_argument("--zone-dir", default=None,
+                    help="Zone file directory (auto-detected if omitted)")
+    ap.add_argument("--allow-direct-edit", action="store_true",
+                    help="Allow fallback direct file edits when rndc is unavailable or the zone is static")
+    args = ap.parse_args()
+
+    zone_dir = pathlib.Path(args.zone_dir or detect_zone_dir())
+    if not zone_dir.is_dir():
+        print("ERROR: zone directory not found: {}".format(zone_dir),
+              file=sys.stderr)
+        sys.exit(1)
+
+    if args.zones:
+        paths = []
+        for name in args.zones:
+            p = zone_dir / (name + ".zone")
+            if not p.exists():
+                print("ERROR: zone file not found: {}".format(p),
+                      file=sys.stderr)
+                sys.exit(1)
+            paths.append((name, p))
+    else:
+        paths = [(p.stem, p) for p in sorted(zone_dir.glob("*.zone"))]
+        if not paths:
+            print("No zone files found in {}".format(zone_dir))
+            sys.exit(0)
+
+    changed_any = False
+    error_any = False
+    for zone_name, p in paths:
+        changed, serial = bump_serial(
+            p, zone_name, allow_direct_edit=args.allow_direct_edit
+        )
+        if changed is None:
+            error_any = True
+            continue
+        if serial is None:
+            continue
+        if changed:
+            changed_any = True
+            print("CHANGED {}: serial={}".format(zone_name, serial))
+        else:
+            print("ok {}: serial={}".format(zone_name, serial))
+
+    if error_any:
+        sys.exit(1)
+    if changed_any:
+        print("CHANGED")
+
+
+if __name__ == "__main__":
+    main()
 """,
     'roles/dns/handlers/main.yml': """\
 ---
@@ -1458,6 +2051,10 @@ if new_text != text:
       {{ '/etc/bind/named.conf.local' if ansible_facts.os_family == 'Debian'
          else '/usr/local/etc/namedb/named.conf' if ansible_facts.os_family == 'FreeBSD'
          else '/etc/named.conf' }}
+    _bind_conf_dir: >-
+      {{ '/etc/bind'             if ansible_facts.os_family == 'Debian'
+         else '/usr/local/etc/namedb' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc' }}
     _bind_zone_group: >-
       {{ 'bind'  if ansible_facts.os_family in ['Debian', 'FreeBSD']
          else 'named' }}
@@ -1490,17 +2087,29 @@ if new_text != text:
     - _dns_local_zones | length > 0
     - ansible_facts.os_family != 'Debian'
 
-- name: Install DNS serial update helper
+- name: Install dns-bump-serial helper
   copy:
-    src: update_dns_serial.py
-    dest: /usr/local/sbin/update_dns_serial.py
+    src: dns-bump-serial
+    dest: /usr/local/sbin/dns-bump-serial
     mode: "0755"
   when: _dns_local_zones | length > 0
+
+- name: Remove old update_dns_serial.py helper
+  file:
+    path: /usr/local/sbin/update_dns_serial.py
+    state: absent
 
 - name: Install DNS record sync helper
   copy:
     src: sync_dns_records.py
     dest: /usr/local/sbin/sync_dns_records.py
+    mode: "0755"
+  when: _dns_local_zones | length > 0
+
+- name: Install SOA normalization helper
+  copy:
+    src: normalize_zone_soa.py
+    dest: /usr/local/sbin/normalize_zone_soa.py
     mode: "0755"
   when: _dns_local_zones | length > 0
 
@@ -1521,11 +2130,26 @@ if new_text != text:
          | selectattr('type', 'equalto', 'primary')
          | rejectattr('services_auto_derive', 'defined') | list }}
 
+- name: Debug overwrite-managed primary zones
+  debug:
+    msg:
+      zone: "{{ item.name }}"
+      overwrite: "{{ item.overwrite | default(false) | bool }}"
+      soa_primary_ns: "{{ item.soa.primary_ns | default('UNSET') if item.soa is defined else 'UNSET' }}"
+      soa_email: "{{ item.soa.email | default('UNSET') if item.soa is defined else 'UNSET' }}"
+  loop: >-
+    {{ _dns_primary_zones
+       | selectattr('overwrite', 'defined')
+       | selectattr('overwrite') | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  when: dns_debug_overwrite | default(false) | bool
+
 # Deploy TSIG key files for zones that use allow_update.
 # One key file per unique key name referenced across all zones.
 - name: Deploy TSIG key configurations
   copy:
-    dest: "/etc/named-{{ item.name }}.key"
+    dest: "{{ _bind_conf_dir }}/{{ item.name }}.key"
     mode: "0640"
     owner: root
     group: "{{ _bind_zone_group }}"
@@ -1546,20 +2170,102 @@ if new_text != text:
   notify: Validate and Restart DNS
   when: _dns_local_zones | length > 0
 
-# Create zone files for primary zones only if not already present.
-# force: false preserves hand-edited records and serial numbers.
-- name: Create primary zone files (if absent)
+# On Debian, named.conf includes named.conf.options separately.
+# Render it so listen-on and other options are managed consistently.
+- name: Render named.conf.options (Debian)
+  template:
+    src: named.conf.options.j2
+    dest: "{{ _bind_conf_dir }}/named.conf.options"
+    mode: "0644"
+  notify: Validate and Restart DNS
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - _dns_local_zones | length > 0
+
+# Read current serials for primary zones that opt into overwrite mode.
+- name: Stat overwrite-managed primary zone files
+  stat:
+    path: "{{ _bind_zone_dir }}/{{ item.name }}.zone"
+  loop: >-
+    {{ _dns_primary_zones
+       | selectattr('overwrite', 'defined')
+       | selectattr('overwrite') | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  register: _dns_zone_overwrite_stats
+
+- name: Slurp current serial source for overwrite-managed primary zone files
+  slurp:
+    src: "{{ _bind_zone_dir }}/{{ item.item.name }}.zone"
+  loop: "{{ _dns_zone_overwrite_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: item.stat.exists
+  register: _dns_zone_overwrite_contents
+
+- name: Build preserved serial map for overwrite-managed primary zone files
+  set_fact:
+    _dns_existing_zone_serials: >-
+      {{
+        _dns_existing_zone_serials | default({}) | combine({
+          item.item.item.name: (
+            item.content | b64decode
+            | regex_findall('(?m)^\\s*(\\d{10})(?:\\s*;\\s*serial(?:\\b.*)?)?\\s*$')
+            | first | default('')
+          )
+        })
+      }}
+  loop: "{{ _dns_zone_overwrite_contents.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.item.name }}"
+  when:
+    - not (item.skipped | default(false))
+    - not (item.failed | default(false))
+
+# Create zone files for primary zones.
+# Default behavior preserves hand-edited files; overwrite:true regenerates the
+# file from inventory while preserving the current serial for a later bump.
+- name: Render primary zone files
   template:
     src: zone.db.j2
     dest: "{{ _bind_zone_dir }}/{{ item.name }}.zone"
     owner: root
     group: "{{ _bind_zone_group }}"
     mode: "0640"
-    force: false
+    force: "{{ item.overwrite | default(false) | bool }}"
   loop: "{{ _dns_primary_zones }}"
   loop_control:
     label: "{{ item.name }}"
+  register: _render_primary_zones
   notify: Validate and Restart DNS
+
+- name: Inspect rendered overwrite-managed primary zone files
+  slurp:
+    src: "{{ _bind_zone_dir }}/{{ item.name }}.zone"
+  loop: >-
+    {{ _dns_primary_zones
+       | selectattr('overwrite', 'defined')
+       | selectattr('overwrite') | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  register: _dns_rendered_overwrite_zones
+  when: dns_debug_overwrite | default(false) | bool
+
+- name: Assert rendered SOA names are absolute for overwrite-managed zones
+  assert:
+    that:
+      - '(item.content | b64decode) is search("(?m)^@\\s+(?:\\d+\\s+)?(?:IN\\s+)?SOA\\s+\\S+\\.\\s+\\S+\\.\\s*\\($")'
+    fail_msg: >-
+      Overwrite-managed zone {{ item.item.name }} did not render an absolute
+      SOA primary_ns/email line. Enable dns_debug_overwrite and inspect the
+      preceding debug output for the effective zone values.
+  loop: "{{ _dns_rendered_overwrite_zones.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - dns_debug_overwrite | default(false) | bool
+    - not (item.skipped | default(false))
+    - not (item.failed | default(false))
 
 # Repair zone files that have an NS record without a trailing dot.
 # This can happen when a zone file was created (force: false) before the
@@ -1574,6 +2280,40 @@ if new_text != text:
   loop: "{{ _dns_primary_zones }}"
   loop_control:
     label: "{{ item.name }}"
+  register: _repair_ns_trailing_dot
+  notify: Validate and Restart DNS
+
+- name: Ensure SOA primary_ns has trailing dot in primary zone files
+  replace:
+    path: "{{ _bind_zone_dir }}/{{ item.name }}.zone"
+    regexp: '^(@\\s+(?:\\d+\\s+)?(?:IN\\s+)?SOA\\s+)(\\S+(?<!\\.))(\\s+\\S+\\s*\\()$'
+    replace: '\\1\\2.\\3'
+  loop: "{{ _dns_primary_zones }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _repair_soa_primary_ns_trailing_dot
+  notify: Validate and Restart DNS
+
+- name: Ensure SOA email has trailing dot in primary zone files
+  replace:
+    path: "{{ _bind_zone_dir }}/{{ item.name }}.zone"
+    regexp: '^(@\\s+(?:\\d+\\s+)?(?:IN\\s+)?SOA\\s+\\S+\\s+)(\\S+(?<!\\.))(\\s*\\()$'
+    replace: '\\1\\2.\\3'
+  loop: "{{ _dns_primary_zones }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _repair_soa_email_trailing_dot
+  notify: Validate and Restart DNS
+
+- name: Normalize SOA email to DNS RNAME form in primary zone files
+  command: >
+    python3 /usr/local/sbin/normalize_zone_soa.py
+    --zone-file {{ _bind_zone_dir }}/{{ item.name }}.zone
+  loop: "{{ _dns_primary_zones }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _repair_soa_email_rname
+  changed_when: "'CHANGED' in _repair_soa_email_rname.stdout"
   notify: Validate and Restart DNS
 
 # Sync explicit records declared in zones[].records into zone files.
@@ -1607,6 +2347,14 @@ if new_text != text:
     {%-       set _label = _svc.domain[0:(_svc.domain | length - item.name | length - 1)] %}
     --record {{ _label }} A {{ ansible_facts.default_ipv4.address }}
     {%-     endif %}
+    {%-     for _alias in _svc.aliases | default([]) %}
+    {%-       if _alias == item.name %}
+    --record @ A {{ ansible_facts.default_ipv4.address }}
+    {%-       elif _alias.endswith('.' + item.name) %}
+    {%-         set _alabel = _alias[0:(_alias | length - item.name | length - 1)] %}
+    --record {{ _alabel }} A {{ ansible_facts.default_ipv4.address }}
+    {%-       endif %}
+    {%-     endfor %}
     {%-   endif %}
     {%- endfor %}
   loop: "{{ _dns_auto_derive_zones }}"
@@ -1616,14 +2364,51 @@ if new_text != text:
   changed_when: "'added' in _sync_svc.stdout"
   notify: Validate and Restart DNS
 
-- name: Update zone serials
+- name: Derive zones that need serial bumps
+  set_fact:
+    _dns_zones_to_bump: >-
+      {{
+        (
+          (_render_primary_zones.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.name') | list)
+          +
+          (_repair_ns_trailing_dot.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.name') | list)
+          +
+          (_repair_soa_primary_ns_trailing_dot.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.name') | list)
+          +
+          (_repair_soa_email_trailing_dot.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.name') | list)
+          +
+          (_repair_soa_email_rname.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.name') | list)
+          +
+          (_sync_explicit.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.0.name') | list)
+          +
+          (_sync_svc.results | default([])
+            | selectattr('changed')
+            | map(attribute='item.name') | list)
+        ) | unique | sort
+      }}
+
+- name: Bump zone serials
   command: >
-    python3 /usr/local/sbin/update_dns_serial.py
-    --zone-file {{ _bind_zone_dir }}/{{ item.name }}.zone
-  loop: "{{ _dns_primary_zones }}"
-  loop_control:
-    label: "{{ item.name }}"
-  changed_when: false
+    /usr/local/sbin/dns-bump-serial
+    --zone-dir {{ _bind_zone_dir }}
+    --allow-direct-edit
+    {{ _dns_zones_to_bump | join(' ') }}
+  register: _serial_update
+  changed_when: "'CHANGED' in _serial_update.stdout"
+  notify: Validate and Restart DNS
+  when: _dns_zones_to_bump | default([]) | length > 0
 
 # Push records to remote_primary zones via nsupdate.
 - name: Push records to remote_primary zones via nsupdate
@@ -1645,8 +2430,8 @@ if new_text != text:
       {% if item.1.state | default('present') == 'absent' %}
       update delete {{ item.1.name }}.{{ item.0.name }}. {{ item.1.type }}
       {% else %}
-      update delete {{ item.1.name }}.{{ item.0.name }}. {{ item.1.ttl | default(item.0.ttl | default(dns.defaults.ttl | default(3600))) }} {{ item.1.type }} {{ item.1.value }}
-      update add    {{ item.1.name }}.{{ item.0.name }}. {{ item.1.ttl | default(item.0.ttl | default(dns.defaults.ttl | default(3600))) }} {{ item.1.type }} {{ item.1.value }}
+      update delete {{ item.1.name }}.{{ item.0.name }}. {{ item.1.ttl | default(item.0.ttl | default(dns_defaults.ttl | default(3600))) }} {{ item.1.type }} {{ item.1.value }}
+      update add    {{ item.1.name }}.{{ item.0.name }}. {{ item.1.ttl | default(item.0.ttl | default(dns_defaults.ttl | default(3600))) }} {{ item.1.type }} {{ item.1.value }}
       {% endif %}
       send
   loop: >-
@@ -1749,19 +2534,46 @@ if new_text != text:
     port: 53
     timeout: 30
   when: _dns_local_zones | length > 0
+
+# Flush handlers now so that dependent roles (certbot, etc.) see a
+# restarted BIND with all zone and config changes applied.
+- name: Flush DNS handlers
+  meta: flush_handlers
+""",
+    'roles/dns/templates/named.conf.options.j2': """\
+// Managed by Ansible -- do not edit.
+// On Debian this file is /etc/bind/named.conf.options.
+options {
+    directory "/var/cache/bind";
+    recursion {{ 'yes' if dns.recursion | default(dns_defaults.recursion | default(false)) | bool else 'no' }};
+    allow-query { any; };
+    listen-on { {{ dns.listen_on | default(dns_defaults.listen_on | default(['any'])) | join('; ') }}; };
+    listen-on-v6 { any; };
+{% set _fwds = dns.forwarders | default(dns_defaults.forwarders | default([])) %}
+{% set _rec  = dns.recursion  | default(dns_defaults.recursion  | default(false)) | bool %}
+{% if _rec and _fwds | length > 0 %}
+    forwarders {
+{% for _fwd in _fwds %}
+        {{ _fwd }};
+{% endfor %}
+    };
+{% endif %}
+};
 """,
     'roles/dns/templates/named.conf.local.j2': """\
 {% if ansible_facts.os_family != 'Debian' %}
 // On non-Debian systems this file IS the complete named.conf.
 options {
     directory "{{ '/usr/local/etc/namedb' if ansible_facts.os_family == 'FreeBSD' else '/var/named' }}";
-    recursion {{ 'yes' if dns.recursion | default(false) | bool else 'no' }};
+    recursion {{ 'yes' if dns.recursion | default(dns_defaults.recursion | default(false)) | bool else 'no' }};
     allow-query { any; };
-    listen-on { {{ dns.listen_on | default(['any']) | join('; ') }}; };
+    listen-on { {{ dns.listen_on | default(dns_defaults.listen_on | default(['any'])) | join('; ') }}; };
     listen-on-v6 { any; };
-{% if dns.recursion | default(false) | bool and dns.forwarders | default([]) | length > 0 %}
+{% set _fwds = dns.forwarders | default(dns_defaults.forwarders | default([])) %}
+{% set _rec  = dns.recursion  | default(dns_defaults.recursion  | default(false)) | bool %}
+{% if _rec and _fwds | length > 0 %}
     forwarders {
-{% for _fwd in dns.forwarders %}
+{% for _fwd in _fwds %}
         {{ _fwd }};
 {% endfor %}
     };
@@ -1780,7 +2592,7 @@ key "{{ _key.name }}" {
 {% if _zone.type != 'remote_primary' %}
 
 {% if _zone.type == 'primary' %}
-{% set _sec_ips = _zone.secondaries | default([]) %}
+{% set _sec_ips = ((dns_defaults.secondaries | default([])) + (_zone.secondaries | default([]))) | unique | list %}
 {% if _sec_ips | length > 0 %}
 acl "secondaries_{{ _zone.name | replace('.', '_') }}" {
 {% for _ip in _sec_ips %}
@@ -1792,13 +2604,22 @@ acl "secondaries_{{ _zone.name | replace('.', '_') }}" {
 
 zone "{{ _zone.name }}" {
 {% if _zone.type == 'primary' %}
+{% set _sec_ips = ((dns_defaults.secondaries | default([])) + (_zone.secondaries | default([]))) | unique | list %}
+{% set _sec_hosts = _sec_ips | reject('search', '/') | list %}
     type master;
     file "{{ _bind_zone_dir }}/{{ _zone.name }}.zone";
     allow-transfer {
-{% for _ip in _zone.secondaries | default([]) %}
+{% for _ip in _sec_ips %}
         {{ _ip }};
 {% endfor %}
     };
+{% if _sec_hosts | length > 0 %}
+    also-notify {
+{% for _ip in _sec_hosts %}
+        {{ _ip }};
+{% endfor %}
+    };
+{% endif %}
     notify {{ 'yes' if _zone.notify | default(true) | bool else 'no' }};
 {% if _zone.dnssec.enabled | default(false) | bool %}
     dnssec-policy default;
@@ -1846,17 +2667,26 @@ zone "{{ _zone.name }}" {
 {% endfor %}
 """,
     'roles/dns/templates/zone.db.j2': """\
-{% set _zone_ttl    = item.ttl    | default(dns.defaults.ttl    | default(3600)) %}
-{% set _soa_refresh = item.soa.refresh | default(dns.defaults.soa.refresh | default(3600)) if item.soa is defined else dns.defaults.soa.refresh | default(3600) %}
-{% set _soa_retry   = item.soa.retry   | default(dns.defaults.soa.retry   | default(900))  if item.soa is defined else dns.defaults.soa.retry   | default(900)  %}
-{% set _soa_expire  = item.soa.expire  | default(dns.defaults.soa.expire  | default(604800)) if item.soa is defined else dns.defaults.soa.expire  | default(604800) %}
-{% set _soa_minimum = item.soa.minimum | default(dns.defaults.soa.minimum | default(300))  if item.soa is defined else dns.defaults.soa.minimum | default(300)  %}
+{% set _zone_ttl    = item.ttl    | default(dns_defaults.ttl    | default(3600)) %}
+{% set _soa_refresh = item.soa.refresh | default(dns_defaults.soa.refresh | default(3600)) if item.soa is defined else dns_defaults.soa.refresh | default(3600) %}
+{% set _soa_retry   = item.soa.retry   | default(dns_defaults.soa.retry   | default(900))  if item.soa is defined else dns_defaults.soa.retry   | default(900)  %}
+{% set _soa_expire  = item.soa.expire  | default(dns_defaults.soa.expire  | default(604800)) if item.soa is defined else dns_defaults.soa.expire  | default(604800) %}
+{% set _soa_minimum = item.soa.minimum | default(dns_defaults.soa.minimum | default(300))  if item.soa is defined else dns_defaults.soa.minimum | default(300)  %}
 {% set _primary_ns  = item.soa.primary_ns | default(inventory_hostname + '.') if item.soa is defined else inventory_hostname + '.' %}
 {% set _primary_ns  = _primary_ns if _primary_ns.endswith('.') else _primary_ns + '.' %}
-{% set _email       = item.soa.email | default('hostmaster.' + item.name + '.') if item.soa is defined else 'hostmaster.' + item.name + '.' %}
+{% set _email_raw   = item.soa.email | default('hostmaster@' + item.name) if item.soa is defined else 'hostmaster@' + item.name %}
+{% if '@' in _email_raw %}
+{%   set _email_local = (_email_raw.split('@', 1)[0] | replace('.', '\\.')) %}
+{%   set _email_domain = _email_raw.split('@', 1)[1] %}
+{%   set _email = _email_local + '.' + _email_domain %}
+{% else %}
+{%   set _email = _email_raw %}
+{% endif %}
+{% set _email       = _email if _email.endswith('.') else _email + '.' %}
+{% set _serial      = (_dns_existing_zone_serials | default({})).get(item.name, '2026010101') %}
 $TTL {{ _zone_ttl }}
 @   IN  SOA {{ _primary_ns }} {{ _email }} (
-        2026010101  ; serial - managed by update_dns_serial.py
+        {{ _serial }}  ; serial - managed by dns-bump-serial
         {{ _soa_refresh }}        ; refresh
         {{ _soa_retry }}          ; retry
         {{ _soa_expire }}      ; expire
@@ -1878,15 +2708,37 @@ $TTL {{ _zone_ttl }}
 {% endif %}
 
 {% if item.services_auto_derive | default(true) | bool %}
+{% set _explicit_a = item.records | default([])
+       | selectattr('type', 'equalto', 'A')
+       | map(attribute='name') | list %}
+{% set _seen = [] %}
 ; Service-derived A records from services dict
 {% for svc_name, svc in services.items() | sort %}
 {%   if svc.enabled | default(false) | bool %}
 {%     if svc.domain == item.name %}
-@       IN  A   {{ ansible_facts.default_ipv4.address }}
+{%       set _lbl = '@' %}
 {%     elif svc.domain.endswith('.' + item.name) %}
-{%       set _label = svc.domain[0:(svc.domain | length - item.name | length - 1)] %}
-{{ _label }}  IN  A   {{ ansible_facts.default_ipv4.address }}
+{%       set _lbl = svc.domain[0:(svc.domain | length - item.name | length - 1)] %}
+{%     else %}
+{%       set _lbl = '' %}
 {%     endif %}
+{%     if _lbl and _lbl not in _explicit_a and _lbl not in _seen %}
+{%       set _ = _seen.append(_lbl) %}
+{{ '@' if _lbl == '@' else _lbl }}       IN  A   {{ ansible_facts.default_ipv4.address }}
+{%     endif %}
+{%     for _alias in svc.aliases | default([]) %}
+{%       if _alias == item.name %}
+{%         set _albl = '@' %}
+{%       elif _alias.endswith('.' + item.name) %}
+{%         set _albl = _alias[0:(_alias | length - item.name | length - 1)] %}
+{%       else %}
+{%         set _albl = '' %}
+{%       endif %}
+{%       if _albl and _albl not in _explicit_a and _albl not in _seen %}
+{%         set _ = _seen.append(_albl) %}
+{{ '@' if _albl == '@' else _albl }}       IN  A   {{ ansible_facts.default_ipv4.address }}
+{%       endif %}
+{%     endfor %}
 {%   endif %}
 {% endfor %}
 {% endif %}
@@ -2075,16 +2927,24 @@ pass in proto { tcp, udp } to any port 53 keep state
 {% else %}
 pass in proto { tcp, udp } from 127.0.0.1 to any port 53 keep state
 pass in proto { tcp, udp } from ::1        to any port 53 keep state
-{% for _sec in dns_secondaries | default([]) %}
+{% for _sec in ((dns_secondaries | default([])) + (dns_defaults.secondaries | default([]))) | unique %}
 pass in proto { tcp, udp } from {{ _sec }} to any port 53 keep state
+{% endfor %}
+{% for _adm in dns_admin_ips | default([]) %}
+pass in proto { tcp, udp } from {{ _adm }} to any port 53 keep state
 {% endfor %}
 {% endif %}
 {% endif %}
 
 # OpenVPN port
-{% if openvpn.enabled | default(false) | bool %}
-pass in proto {{ openvpn.proto | default('udp') }} to any port {{ openvpn.port | default(1194) }} keep state
+{% for _vpn in openvpn_instances | default([]) %}
+{% if _vpn.mode | default('server') == 'server' %}
+pass in proto {{ _vpn.proto | default('udp') }} to any port {{ _vpn.port | default(1194) }} keep state
 {% endif %}
+{% endfor %}
+{% for _wg in wireguard_instances | default([]) %}
+pass in proto udp to any port {{ _wg.listen_port | default(51820) }} keep state
+{% endfor %}
 
 # Step CA ACME port 9000
 {% if step_ca.enabled | default(false) | bool %}
@@ -2256,10 +3116,9 @@ table inet filter {
     tcp dport 53 accept
     udp dport 53 accept
     {% else %}
-    # dns_public: false (default) - port 53 restricted to secondaries and
-    # any addresses in geoip_allowlist.
-    {% if dns_secondaries | default([]) | length > 0 %}
-    {% for _sec in dns_secondaries %}
+    # dns_public: false (default) - port 53 restricted to secondaries,
+    # dns_admin_ips (nsupdate sources), and localhost.
+    {% for _sec in ((dns_secondaries | default([])) + (dns_defaults.secondaries | default([]))) | unique %}
     {% if ':' in _sec %}
     ip6 saddr {{ _sec }} tcp dport 53 accept
     ip6 saddr {{ _sec }} udp dport 53 accept
@@ -2268,7 +3127,15 @@ table inet filter {
     ip  saddr {{ _sec }} udp dport 53 accept
     {% endif %}
     {% endfor %}
+    {% for _adm in dns_admin_ips | default([]) %}
+    {% if ':' in _adm %}
+    ip6 saddr {{ _adm }} tcp dport 53 accept
+    ip6 saddr {{ _adm }} udp dport 53 accept
+    {% else %}
+    ip  saddr {{ _adm }} tcp dport 53 accept
+    ip  saddr {{ _adm }} udp dport 53 accept
     {% endif %}
+    {% endfor %}
     ip  saddr 127.0.0.1 tcp dport 53 accept
     ip  saddr 127.0.0.1 udp dport 53 accept
     ip6 saddr ::1       tcp dport 53 accept
@@ -2286,14 +3153,16 @@ table inet filter {
     {% endif %}
     {% endfor %}
 
-    # OpenVPN port
-    {% if openvpn.enabled | default(false) | bool %}
-    {% if openvpn.proto | default('udp') == 'udp' %}
-    udp dport {{ openvpn.port | default(1194) }} accept
-    {% else %}
-    tcp dport {{ openvpn.port | default(1194) }} accept
+    # OpenVPN ports
+    {% for _vpn in openvpn_instances | default([]) %}
+    {% if _vpn.mode | default('server') == 'server' %}
+    {{ _vpn.proto | default('udp') }} dport {{ _vpn.port | default(1194) }} accept
     {% endif %}
-    {% endif %}
+    {% endfor %}
+    # WireGuard ports
+    {% for _wg in wireguard_instances | default([]) %}
+    udp dport {{ _wg.listen_port | default(51820) }} accept
+    {% endfor %}
 
     # Step CA ACME port 9000
     {% if step_ca.enabled | default(false) | bool %}
@@ -3724,7 +4593,7 @@ server {
   {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
   listen 80;  # fallback: no listen directive declared
   {% endif %}
-  server_name {{ svc.domain }};
+  server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
 {% if _static_site | default(false) | bool %}
   root /var/www/{{ svc.domain }};
   index index.html index.htm;
@@ -3756,7 +4625,7 @@ server {
   {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
   listen 80;  # fallback: no listen directive declared
   {% endif %}
-  server_name {{ svc.domain }};
+  server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
 
   # IP access restriction: only the listed addresses may reach this service.
   # All other sources receive 403. Enforced at the nginx layer, independent
@@ -3795,7 +4664,7 @@ server {
   {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
   listen 80;  # fallback: no TLS configured
   {% endif %}
-  server_name {{ svc.domain }};
+  server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
   # Nextcloud webroot is bind-mounted from the app container.
   root {{ nextcloud_install_dir }};
   index index.php index.html;
@@ -3859,7 +4728,7 @@ server {
   {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
   listen 80;  # fallback: no listen directive declared
   {% endif %}
-  server_name {{ svc.domain }};
+  server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
 {% if _static_site | default(false) | bool %}
   root /var/www/{{ svc.domain }};
   index index.html index.htm;
@@ -5366,6 +6235,199 @@ group {{ 'nogroup' if ansible_facts.os_family == 'Debian' else 'nobody' }}
 log {{ _ovpn_conf_dir }}/openvpn-{{ _inst.name }}.log
 verb 3
 """,
+    # ------------------------------------------------------------------ #
+    #  WireGuard role -- multi-instance, same pattern as OpenVPN          #
+    # ------------------------------------------------------------------ #
+    'roles/wireguard/defaults/main.yml': """\
+---
+# WireGuard role -- supports multiple tunnel instances.
+#
+# wireguard_instances is a list of dicts.  Each entry creates an
+# independent WireGuard interface with its own config and systemd
+# service (wg-quick@<name>).
+#
+# Keys (all instances):
+#   name:         (required) interface name, e.g. wg0, wg1
+#   listen_port:  UDP listen port           (default 51820)
+#   address:      interface CIDR addresses  (list, required)
+#                 e.g. ["10.0.0.1/24", "fd00::1/64"]
+#   private_key:  WireGuard private key     (required, use vault)
+#   mtu:          interface MTU             (optional)
+#   dns:          DNS servers               (optional list)
+#   table:        routing table             (optional, e.g. 'off', '1234')
+#   pre_up:       PreUp commands            (optional list)
+#   post_up:      PostUp commands           (optional list)
+#   pre_down:     PreDown commands          (optional list)
+#   post_down:    PostDown commands         (optional list)
+#   save_config:  SaveConfig (default false)
+#   fw_mark:      FwMark                    (optional)
+#
+#   peers:        list of peer dicts:
+#     public_key:            (required) peer public key
+#     preshared_key:         (optional, use vault)
+#     endpoint:              host:port of remote peer (optional)
+#     allowed_ips:           (required) list of CIDRs
+#     persistent_keepalive:  seconds (optional, e.g. 25)
+#
+# Example:
+#   wireguard_instances:
+#     - name: wg0
+#       listen_port: 51820
+#       address: ["10.10.0.1/24"]
+#       private_key: "{{ vault_wg0_private_key }}"
+#       post_up:
+#         - iptables -A FORWARD -i wg0 -j ACCEPT
+#         - iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+#       post_down:
+#         - iptables -D FORWARD -i wg0 -j ACCEPT
+#         - iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+#       peers:
+#         - public_key: "abc123..."
+#           allowed_ips: ["10.10.0.2/32"]
+#           endpoint: "203.0.113.5:51820"
+#           persistent_keepalive: 25
+#     - name: wg1
+#       listen_port: 51821
+#       address: ["10.20.0.1/24"]
+#       private_key: "{{ vault_wg1_private_key }}"
+#       peers:
+#         - public_key: "def456..."
+#           allowed_ips: ["10.20.0.0/24"]
+wireguard_instances: []
+""",
+    'roles/wireguard/handlers/main.yml': """\
+---
+- name: Restart WireGuard (FreeBSD)
+  command: service wireguard restart
+  changed_when: false
+  when: ansible_facts.os_family == 'FreeBSD'
+""",
+    'roles/wireguard/tasks/main.yml': """\
+---
+# Platform-specific paths and package names.
+- name: Set WireGuard platform facts
+  set_fact:
+    _wg_conf_dir: >-
+      {{ '/usr/local/etc/wireguard' if ansible_facts.os_family == 'FreeBSD'
+         else '/etc/wireguard' }}
+    _wg_package: >-
+      {{ 'wireguard-tools' if ansible_facts.os_family in ['Debian', 'Archlinux']
+         else 'wireguard-tools' if ansible_facts.os_family == 'RedHat'
+         else 'wireguard' }}
+  when: wireguard_instances | default([]) | length > 0
+
+- name: Install WireGuard
+  package:
+    name: "{{ _wg_package }}"
+    state: present
+  when: wireguard_instances | default([]) | length > 0
+
+- name: Ensure WireGuard config directory
+  file:
+    path: "{{ _wg_conf_dir }}"
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0700"
+  when: wireguard_instances | default([]) | length > 0
+
+# -- Per-instance configuration --
+- name: Configure WireGuard instances
+  include_tasks: instance.yml
+  loop: "{{ wireguard_instances | default([]) }}"
+  loop_control:
+    loop_var: _inst
+
+# -- FreeBSD: enable and start via rc.d --
+- name: Enable WireGuard at boot (FreeBSD)
+  command: >-
+    sysrc wireguard_interfaces="{{ wireguard_instances | default([]) | map(attribute='name') | join(' ') }}"
+  changed_when: false
+  when:
+    - wireguard_instances | default([]) | length > 0
+    - ansible_facts.os_family == 'FreeBSD'
+
+- name: Start WireGuard (FreeBSD)
+  command: service wireguard restart
+  register: _wg_fbsd_start
+  changed_when: "'already running' not in _wg_fbsd_start.stderr"
+  failed_when: "_wg_fbsd_start.rc != 0 and 'already running' not in _wg_fbsd_start.stderr"
+  when:
+    - wireguard_instances | default([]) | length > 0
+    - ansible_facts.os_family == 'FreeBSD'
+""",
+    'roles/wireguard/tasks/instance.yml': """\
+---
+# Per-instance tasks -- called via include_tasks with loop_var: _inst
+- name: "Deploy WireGuard config [{{ _inst.name }}]"
+  template:
+    src: wg.conf.j2
+    dest: "{{ _wg_conf_dir }}/{{ _inst.name }}.conf"
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0600"
+  register: _wg_cfg
+  no_log: true
+
+- name: "Enable and start wg-quick [{{ _inst.name }}]"
+  systemd:
+    name: "wg-quick@{{ _inst.name }}"
+    enabled: true
+    state: "{{ 'restarted' if _wg_cfg is changed else 'started' }}"
+    daemon_reload: true
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    'roles/wireguard/templates/wg.conf.j2': """\
+# {{ _inst.name }} - managed by Ansible
+[Interface]
+PrivateKey = {{ _inst.private_key }}
+{% for _addr in _inst.address %}
+Address = {{ _addr }}
+{% endfor %}
+ListenPort = {{ _inst.listen_port | default(51820) }}
+{% if _inst.dns | default([]) | length > 0 %}
+DNS = {{ _inst.dns | join(', ') }}
+{% endif %}
+{% if _inst.mtu is defined %}
+MTU = {{ _inst.mtu }}
+{% endif %}
+{% if _inst.table is defined %}
+Table = {{ _inst.table }}
+{% endif %}
+{% if _inst.fw_mark is defined %}
+FwMark = {{ _inst.fw_mark }}
+{% endif %}
+{% if _inst.save_config | default(false) | bool %}
+SaveConfig = true
+{% endif %}
+{% for _cmd in _inst.pre_up | default([]) %}
+PreUp = {{ _cmd }}
+{% endfor %}
+{% for _cmd in _inst.post_up | default([]) %}
+PostUp = {{ _cmd }}
+{% endfor %}
+{% for _cmd in _inst.pre_down | default([]) %}
+PreDown = {{ _cmd }}
+{% endfor %}
+{% for _cmd in _inst.post_down | default([]) %}
+PostDown = {{ _cmd }}
+{% endfor %}
+{% for _peer in _inst.peers | default([]) %}
+
+[Peer]
+PublicKey = {{ _peer.public_key }}
+{% if _peer.preshared_key is defined %}
+PresharedKey = {{ _peer.preshared_key }}
+{% endif %}
+AllowedIPs = {{ _peer.allowed_ips | join(', ') }}
+{% if _peer.endpoint is defined %}
+Endpoint = {{ _peer.endpoint }}
+{% endif %}
+{% if _peer.persistent_keepalive is defined %}
+PersistentKeepalive = {{ _peer.persistent_keepalive }}
+{% endif %}
+{% endfor %}
+""",
     'roles/ssh_hardening/handlers/main.yml': """\
 ---
 - name: Restart SSH
@@ -5628,7 +6690,10 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
         and ansible_facts.os_family != 'FreeBSD'
     - role: openvpn
       tags: [openvpn, vpn]
-      when: openvpn.enabled | default(false) | bool
+      when: openvpn_instances | default([]) | length > 0
+    - role: wireguard
+      tags: [wireguard, vpn]
+      when: wireguard_instances | default([]) | length > 0
     - role: step_ca
       tags: [step_ca, pki]
       when: step_ca.enabled | default(false) | bool
@@ -6018,6 +7083,22 @@ apache2_base_port: 8080
 
 # Enable mod_rewrite globally.
 apache2_mod_rewrite: true
+
+# PHP modules to install when any service has app.php: true.
+# Platform-specific defaults; override to add extensions like php-mysql.
+apache2_php_modules:
+  Debian:
+    - libapache2-mod-php
+    - php-common
+  RedHat:
+    - php
+    - php-common
+  Archlinux:
+    - php
+    - php-apache
+  FreeBSD:
+    - php83
+    - mod_php83
 """,
     'roles/apache2/handlers/main.yml': """\
 ---
@@ -6067,47 +7148,12 @@ apache2_mod_rewrite: true
       }}
     state: present
 
-- name: Install PHP for Apache2 (Debian)
+- name: Install PHP modules for Apache2
   package:
-    name:
-      - libapache2-mod-php
-      - php-common
+    name: "{{ apache2_php_modules[ansible_facts.os_family] }}"
     state: present
   when:
-    - ansible_facts.os_family == 'Debian'
-    - _apache2_services | selectattr('value.app.php', 'defined')
-      | selectattr('value.app.php') | list | length > 0
-
-- name: Install PHP for Apache2 (RedHat)
-  package:
-    name:
-      - php
-      - php-common
-    state: present
-  when:
-    - ansible_facts.os_family == 'RedHat'
-    - _apache2_services | selectattr('value.app.php', 'defined')
-      | selectattr('value.app.php') | list | length > 0
-
-- name: Install PHP for Apache2 (Archlinux)
-  package:
-    name:
-      - php
-      - php-apache
-    state: present
-  when:
-    - ansible_facts.os_family == 'Archlinux'
-    - _apache2_services | selectattr('value.app.php', 'defined')
-      | selectattr('value.app.php') | list | length > 0
-
-- name: Install PHP for Apache2 (FreeBSD)
-  package:
-    name:
-      - php83
-      - mod_php83
-    state: present
-  when:
-    - ansible_facts.os_family == 'FreeBSD'
+    - ansible_facts.os_family in apache2_php_modules
     - _apache2_services | selectattr('value.app.php', 'defined')
       | selectattr('value.app.php') | list | length > 0
 
@@ -6238,6 +7284,9 @@ apache2_mod_rewrite: true
     'roles/apache2/templates/apache2_vhost.conf.j2': """\
 <VirtualHost 127.0.0.1:{{ _port }}>
     ServerName {{ _svc.value.domain }}
+{% for _alias in _svc.value.aliases | default([]) %}
+    ServerAlias {{ _alias }}
+{% endfor %}
     DocumentRoot {{ _svc.value.app.document_root | default('/var/www/' + _svc.value.domain) }}
 
     <Directory {{ _svc.value.app.document_root | default('/var/www/' + _svc.value.domain) }}>
@@ -6574,19 +7623,75 @@ if [ -n "$HOSTNAME" ]; then
     else
         FQDN="$HOSTNAME"
     fi
-    if ! grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
-        echo "127.0.1.1  ${FQDN}  ${HOSTNAME}" >> /etc/hosts
-    else
-        sed -i.bak "s/^127\\.0\\.1\\.1.*$/127.0.1.1  ${FQDN}  ${HOSTNAME}/" /etc/hosts
+    # Use the real IP instead of 127.0.1.1 (which is not an interface
+    # address and causes problems with BIND and other services).
+    PRIMARY_IP=$(ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    [ -z "$PRIMARY_IP" ] && PRIMARY_IP=$(ifconfig 2>/dev/null | awk '/inet / && !/127\\.0\\.0\\.1/ {print $2; exit}')
+    # Remove any legacy 127.0.1.1 entry
+    sed -i.bak '/^127\\.0\\.1\\.1[[:space:]]/d' /etc/hosts 2>/dev/null || true
+    if [ -n "$PRIMARY_IP" ]; then
+        if grep -q "^${PRIMARY_IP}[[:space:]]" /etc/hosts 2>/dev/null; then
+            sed -i.bak "s/^${PRIMARY_IP}[[:space:]].*$/${PRIMARY_IP}  ${FQDN}  ${HOSTNAME}/" /etc/hosts
+        else
+            echo "${PRIMARY_IP}  ${FQDN}  ${HOSTNAME}" >> /etc/hosts
+        fi
     fi
 fi
 
 if [ -n "$DOMAIN" ]; then
     echo "==> Setting search domain to $DOMAIN..."
-    if grep -q "^search " /etc/resolv.conf 2>/dev/null; then
+    DOMAIN_IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    DOMAIN_BACKEND=""
+    if command -v nmcli >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
+        ACTIVE_CONN=""
+        if [ -n "$DOMAIN_IFACE" ]; then
+            ACTIVE_CONN=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | awk -F: -v iface="$DOMAIN_IFACE" '$2 == iface { print $1; exit }')
+        fi
+        [ -z "$ACTIVE_CONN" ] && ACTIVE_CONN=$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n1)
+        if [ -n "$ACTIVE_CONN" ]; then
+            nmcli connection modify "$ACTIVE_CONN" ipv4.dns-search "$DOMAIN" ipv6.dns-search "$DOMAIN" || true
+            if [ -n "$DOMAIN_IFACE" ]; then
+                nmcli device reapply "$DOMAIN_IFACE" || nmcli connection up "$ACTIVE_CONN" || true
+            else
+                nmcli connection up "$ACTIVE_CONN" || true
+            fi
+            DOMAIN_BACKEND="networkmanager"
+        fi
+    fi
+    if [ -z "$DOMAIN_BACKEND" ] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        cat > /etc/systemd/resolved.conf.d/ansible-enterprise.conf <<EOF
+[Resolve]
+Domains=${DOMAIN}
+EOF
+        systemctl restart systemd-resolved || true
+        DOMAIN_BACKEND="systemd-resolved"
+    fi
+    if [ -z "$DOMAIN_BACKEND" ] && command -v resolvconf >/dev/null 2>&1; then
+        mkdir -p /etc/resolvconf/resolv.conf.d
+        if grep -q "^search " /etc/resolvconf/resolv.conf.d/base 2>/dev/null; then
+            sed -i.bak "s/^search .*/search ${DOMAIN}/" /etc/resolvconf/resolv.conf.d/base
+        else
+            echo "search ${DOMAIN}" >> /etc/resolvconf/resolv.conf.d/base
+        fi
+        resolvconf -u || true
+        DOMAIN_BACKEND="resolvconf"
+    fi
+    if [ -z "$DOMAIN_BACKEND" ] && [ -f /etc/dhcp/dhclient.conf ]; then
+        if grep -q '^supersede domain-search ' /etc/dhcp/dhclient.conf 2>/dev/null; then
+            sed -i.bak "s/^supersede domain-search .*/supersede domain-search \\"${DOMAIN}\\";/" /etc/dhcp/dhclient.conf
+        else
+            echo "supersede domain-search \\"${DOMAIN}\\";" >> /etc/dhcp/dhclient.conf
+        fi
+        DOMAIN_BACKEND="dhclient"
+    fi
+    if [ -z "$DOMAIN_BACKEND" ] && grep -q "^search " /etc/resolv.conf 2>/dev/null; then
         sed -i.bak "s/^search .*/search ${DOMAIN}/" /etc/resolv.conf
-    else
+        DOMAIN_BACKEND="static"
+    fi
+    if [ -z "$DOMAIN_BACKEND" ]; then
         echo "search ${DOMAIN}" >> /etc/resolv.conf
+        DOMAIN_BACKEND="static"
     fi
 fi
 
@@ -6631,6 +7736,23 @@ for USER in "${ADMIN_USERS[@]}"; do
         esac
     fi
 done
+
+# Deploy SSH key and console password for root as well.
+if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
+    mkdir -p /root/.ssh
+    echo "$ADMIN_SSH_PUBLIC_KEY" > /root/.ssh/authorized_keys
+    chmod 0700 /root/.ssh
+    chmod 0600 /root/.ssh/authorized_keys
+    chown -R root /root/.ssh
+fi
+if [ -n "$ADMIN_DEV_PASSWORD_HASH" ]; then
+    case "$PLATFORM" in
+        FreeBSD)
+            echo "${ADMIN_DEV_PASSWORD_HASH}" | pw usermod root -H 0 ;;
+        *)
+            usermod -p "$ADMIN_DEV_PASSWORD_HASH" root ;;
+    esac
+fi
 
 # -------------------------------------------------------------------------
 # 4. Configure SSH

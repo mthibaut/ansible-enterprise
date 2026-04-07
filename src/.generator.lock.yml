@@ -1,5 +1,5 @@
-source_hash: b526281f52848d42e091cf89fb8825f329f446d309d6781edf1f62dcf6c8420c
-output_hash: 7c971f7f8ae08380134d7e6e7f3881a1b130367453a0456efc9e995a3bb4b83a
+source_hash: 0f8d53b4bc7ee96e7b02d416812fcd45859eef6724228a0ef88d29992d66f1b2
+output_hash: 33fac2005a2a596f7f03266a667773e64549d0d8280ba8ffdbb98284bb544132
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -29,11 +29,13 @@ generated_files:
   - roles/common/defaults/main.yml
   - roles/common/tasks/main.yml
   - roles/dns/defaults/main.yml
+  - roles/dns/files/dns-bump-serial
+  - roles/dns/files/normalize_zone_soa.py
   - roles/dns/files/sync_dns_records.py
-  - roles/dns/files/update_dns_serial.py
   - roles/dns/handlers/main.yml
   - roles/dns/tasks/main.yml
   - roles/dns/templates/named.conf.local.j2
+  - roles/dns/templates/named.conf.options.j2
   - roles/dns/templates/zone.db.j2
   - roles/docker/tasks/main.yml
   - roles/file_copy/defaults/main.yml
@@ -107,6 +109,11 @@ generated_files:
   - roles/step_ca/handlers/main.yml
   - roles/step_ca/tasks/main.yml
   - roles/users/tasks/main.yml
+  - roles/wireguard/defaults/main.yml
+  - roles/wireguard/handlers/main.yml
+  - roles/wireguard/tasks/instance.yml
+  - roles/wireguard/tasks/main.yml
+  - roles/wireguard/templates/wg.conf.j2
   - site.yml
   - templates/bind/.gitkeep
   - templates/dovecot/.gitkeep

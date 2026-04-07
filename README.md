@@ -64,10 +64,39 @@ bash scripts/bootstrap_pull_host.sh
 
 ```bash
 make validate        # all contract checks
+make test            # unit tests
 make checkpoints     # checkpoint ordering
 make services        # services schema
 make order           # service dependency order
 ```
+
+## DNS notes
+
+- Edit DNS behavior in `src/`, not `build/`.
+- Primary zones support `overwrite: true` to let Ansible rewrite the zone file from inventory content.
+- When overwriting, the role preserves the current SOA serial and only bumps it if the zone actually changed.
+- SOA serials use `YYYYMMDDNN` and must stay within the DNS 32-bit serial range.
+- Out-of-range legacy serials fail hard and must be repaired manually; they are not silently reset downward.
+- SOA mailbox values are emitted in DNS RNAME form, not mailbox form. For example,
+  `hostmaster@example.com` becomes `hostmaster.example.com.`
+- Service entries support `aliases:`; aliases feed nginx `server_name`, DNS A-record derivation, and TLS SAN handling.
+
+## Search domain management
+
+`set_domain_name` is backend-aware. The common role now routes search-domain
+configuration through the active manager instead of assuming `/etc/resolv.conf`
+is authoritative.
+
+Available backends:
+
+- `auto`
+- `networkmanager`
+- `systemd-resolved`
+- `resolvconf`
+- `dhclient`
+- `static`
+
+`auto` prefers: NetworkManager -> systemd-resolved -> resolvconf -> dhclient -> direct `/etc/resolv.conf`.
 
 ## Generator workflow
 

@@ -17,9 +17,10 @@ modes.
 **Remote git repository:**
 `git@github.com:mthibaut/ansible-enterprise-test.git`
 
-**Current HEAD:** checkpoint-202 — `feat: checkpoint-202-apache2-role`
+**Current HEAD:** `7c6f38a` (dirty worktree; handoff prepared for the next
+checkpoint, see section 11)
 
-**PROMPT.md version:** 1.4.0 (PROMPT.md is a validation anchor only — it is
+**PROMPT.md version:** 656 (PROMPT.md is a validation anchor only — it is
 not a real specification. The FILE_MANIFEST in `src/generate_ansible_enterprise.py`
 is the single source of truth for all generated content.)
 
@@ -94,6 +95,7 @@ Everything else in the repo is committed: `src/`, `HANDOFF.md`, `README.md`, `Ma
 ```bash
 make generate    # run src/generate_ansible_enterprise.py → populates build/
 make validate    # run src/scripts/verify_repo_contracts.py
+make test        # run unit tests in src/scripts/tests
 make all         # generate + validate (what CI runs)
 make checkpoints # validate checkpoint ordering
 make services    # validate services schema against group_vars
@@ -143,12 +145,19 @@ admin_dev_password_hash: ""      # SHA-512 hash for Unix console access (all env
 nextcloud_admin_password: ""     # plaintext, set in vault
 nextcloud_db_password: ""        # plaintext, set in vault
 deployment_environment: production
+set_domain_name: ""
+set_domain_backend: auto
 geoip:
   enabled: false
   license_key: "{{ geoip_license_key | default('') }}"
   allowed_countries: "{{ geoip_allowed_countries | default([]) }}"
   ssh_allowed_countries: "{{ geoip_ssh_allowed_countries | default(geoip_allowed_countries | default([])) }}"
 ```
+
+`set_domain_backend` controls which resolver manager owns `set_domain_name`.
+Valid values: `auto`, `networkmanager`, `systemd-resolved`, `resolvconf`,
+`dhclient`, `static`. `auto` prefers:
+`NetworkManager -> systemd-resolved -> resolvconf -> dhclient -> static`.
 
 ### vault.yml flat variables (no nested keys — avoids duplicate mapping errors):
 ```yaml
@@ -298,7 +307,35 @@ ports (see section 7).
 
 ## 11. Known open issues / future work
 
-**No blocking gaps** (`known_gaps.yml` is empty at checkpoint-024).
+**No blocking gaps** (`known_gaps.yml` is empty).
+
+Current work in the dirty tree that the next bot should preserve:
+
+1. DNS zone management overhaul:
+   - `services.aliases` is supported in the schema and DNS/nginx/TLS derivation.
+   - Primary zones support `overwrite: true`.
+   - `dns-bump-serial` now uses `YYYYMMDDNN`, only bumps changed zones, and
+     fails hard on out-of-range serials instead of silently resetting them.
+   - Existing primary zone files are normalized in-place for SOA RNAME format
+     (`user@example.com` -> `user.example.com.`) and trailing-dot repairs.
+
+2. Search-domain backend routing:
+   - `set_domain_name` no longer assumes `/etc/resolv.conf` is authoritative.
+   - `set_domain_backend` was added with `auto`, `networkmanager`,
+     `systemd-resolved`, `resolvconf`, `dhclient`, and `static`.
+   - The bootstrap script mirrors the same backend preference order.
+
+3. Uncommitted files currently carrying this work:
+   - `src/generate_ansible_enterprise.py`
+   - `src/schemas/services.schema.json`
+   - `src/scripts/generation_contracts.yml`
+   - `src/scripts/tests/test_distro_conditionals.py`
+   - `src/scripts/tests/test_services_schema.py`
+   - `src/scripts/tests/test_dns_bump_serial.py`
+   - `src/scripts/verify_repo_contracts.py`
+   - `src/.generator.lock.yml`
+   - `src/.prompt.version`
+   - deletion of `src/scripts/tests/test_update_dns_serial.py`
 
 Tracked future work (from `src/spec/architecture.md`):
 
@@ -306,6 +343,12 @@ Tracked future work (from `src/spec/architecture.md`):
    converge.yml but internet-requiring tasks are guarded with
    `molecule_testing | default(false)`. A real integration test path
    (local HTTP mirror or pre-downloaded archive) is not yet implemented.
+
+2. **Resolver backend application hooks** — the `dhclient` backend currently
+   writes `dhclient.conf` but does not force a lease renew, and `auto`
+   intentionally chooses the first active NetworkManager connection for the
+   default interface. If hosts with unusual multi-homing show edge cases,
+   harden the detection before broad rollout.
 
 ---
 
@@ -458,6 +501,7 @@ Tracked future work (from `src/spec/architecture.md`):
 | **152** | **fix: nfs client create parent directories before mountpoints** |
 | **153** | **fix: nfs client skip chown/chmod on already-mounted paths** |
 | **154** | **fix: nfs mountpoint file: task uses failed_when: false for active mounts** |
+| **203** | **DNS serial/overwrite fixes + backend-aware search-domain management (planned next checkpoint)** |
 | **155** | **feat: step_ca role -- ACME-compatible internal CA on all four platforms** |
 | **180** | **fix: step-ca Arch install step-cli; revert to step ca init everywhere** |
 | **181** | **fix: step-ca Arch step-cli installs as step-cli not step** |

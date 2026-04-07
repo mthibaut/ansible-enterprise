@@ -79,6 +79,12 @@ class TestServicesSchema(unittest.TestCase):
             "depends_on": ["db"],
         }})
 
+    def test_aliases_valid(self):
+        self._ok({"app": {
+            "enabled": True, "domain": "app.example.com", "owner": "www",
+            "aliases": ["www.app.example.com", "app.internal.example.com"],
+        }})
+
     # ── invalid cases ─────────────────────────────────────────────────────────
 
     def test_missing_enabled_invalid(self):
@@ -97,6 +103,12 @@ class TestServicesSchema(unittest.TestCase):
 
     def test_empty_domain_invalid(self):
         self._fail({"app": {"enabled": True, "domain": "", "owner": "www"}})
+
+    def test_aliases_non_string_invalid(self):
+        self._fail({"app": {
+            "enabled": True, "domain": "app.example.com", "owner": "www",
+            "aliases": ["www.app.example.com", 123],
+        }})
 
     def test_extra_top_level_field_invalid(self):
         self._fail({"app": {

@@ -21,6 +21,15 @@
           "type": "string",
           "minLength": 1
         },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": [],
+          "description": "Additional domain names (SNI aliases) that nginx routes to the same backend. Each alias is added to server_name, DNS A records, and TLS certificate SANs."
+        },
         "owner": {
           "type": "string",
           "minLength": 1

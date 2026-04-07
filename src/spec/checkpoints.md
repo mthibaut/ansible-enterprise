@@ -3178,3 +3178,21 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
            app:
              type: apache2
              php: true
+
+203. `checkpoint-203-dns-serial-and-domain-backends`
+     DNS and common-role behavior were hardened around the real operator
+     control planes. The services schema now supports `aliases`, which feed
+     nginx server_name, DNS A-record derivation, and certificate SANs.
+     Primary zones support `overwrite: true`; when used, existing serials are
+     preserved, zones are rewritten from inventory content, and serials are
+     bumped only for zones that actually changed. `dns-bump-serial` now uses
+     the conventional `YYYYMMDDNN` format, fails hard on out-of-range serials,
+     and distinguishes safer direct-edit fallback from rndc-based freeze/thaw.
+     Existing primary zone files are normalized in-place for trailing dots and
+     SOA RNAME format (`user@example.com` -> `user.example.com.`).
+     Separately, `set_domain_name` is now backend-aware via the new
+     `set_domain_backend` variable with supported values:
+     `auto`, `networkmanager`, `systemd-resolved`, `resolvconf`, `dhclient`,
+     and `static`. `auto` prefers the active manager instead of assuming
+     `/etc/resolv.conf` is authoritative, and the bootstrap script mirrors the
+     same preference order.

@@ -135,6 +135,97 @@ class TestDnsDistro(unittest.TestCase):
         self.assertIn("Enable and start BIND", text)
         self.assertIn("state: started", text)
 
+    def test_overwrite_managed_zones_preserve_existing_serials(self):
+        text = _read(self.TASKS)
+        self.assertIn("Stat overwrite-managed primary zone files", text)
+        self.assertIn("_dns_existing_zone_serials", text)
+        self.assertIn("force: \"{{ item.overwrite | default(false) | bool }}\"", text)
+        self.assertIn("Debug overwrite-managed primary zones", text)
+        self.assertIn("Assert rendered SOA names are absolute for overwrite-managed zones", text)
+
+    def test_zone_template_uses_preserved_serial_when_present(self):
+        tmpl = _read("roles/dns/templates/zone.db.j2")
+        self.assertIn("_dns_existing_zone_serials", tmpl)
+        self.assertIn("{{ _serial }}  ; serial - managed by dns-bump-serial", tmpl)
+        self.assertIn("_primary_ns.endswith('.')", tmpl)
+        self.assertIn("_email.endswith('.')", tmpl)
+        self.assertIn("'hostmaster@' + item.name", tmpl)
+        self.assertIn("split('@', 1)", tmpl)
+
+    def test_existing_zone_files_repair_soa_trailing_dots(self):
+        text = _read(self.TASKS)
+        self.assertIn("Ensure SOA primary_ns has trailing dot in primary zone files", text)
+        self.assertIn("Ensure SOA email has trailing dot in primary zone files", text)
+        self.assertIn("_repair_soa_primary_ns_trailing_dot", text)
+        self.assertIn("_repair_soa_email_trailing_dot", text)
+
+    def test_existing_zone_files_normalize_soa_email_rname(self):
+        text = _read(self.TASKS)
+        helper = _read("roles/dns/files/normalize_zone_soa.py")
+        self.assertIn("Install SOA normalization helper", text)
+        self.assertIn("Normalize SOA email to DNS RNAME form in primary zone files", text)
+        self.assertIn("_repair_soa_email_rname", text)
+        self.assertIn("Normalize SOA fields in a BIND zone file.", helper)
+        self.assertIn('if "@" not in value', helper)
+        self.assertIn('local, domain = value.split("@", 1)', helper)
+        self.assertIn('local = local.replace(".", r"\\.")', helper)
+
+    def test_only_changed_zones_get_serial_bumps(self):
+        text = _read(self.TASKS)
+        self.assertIn("Derive zones that need serial bumps", text)
+        self.assertIn("_dns_zones_to_bump", text)
+        self.assertIn("{{ _dns_zones_to_bump | join(' ') }}", text)
+        self.assertIn("_dns_zones_to_bump | default([]) | length > 0", text)
+
+
+class TestHostnameBootstrapRegression(unittest.TestCase):
+
+    COMMON_TASKS = "roles/common/tasks/main.yml"
+    BOOTSTRAP_TEMPLATE = "roles/bootstrap_scripts/templates/bootstrap.sh.j2"
+
+    def test_hosts_update_falls_back_when_default_ipv4_missing(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("Resolve primary host IP for /etc/hosts", text)
+        self.assertIn("all_ipv4_addresses", text)
+        self.assertIn("default_ipv6.address", text)
+        self.assertIn("_primary_host_ip", text)
+
+    def test_hosts_update_skips_when_no_primary_ip_found(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("_primary_host_ip | default('') | length > 0", text)
+
+    def test_bootstrap_uses_portable_whitespace_regexes(self):
+        text = _read(self.BOOTSTRAP_TEMPLATE)
+        self.assertIn("[[:space:]]", text)
+        self.assertNotIn("\\s", text)
+
+    def test_resolv_conf_search_update_is_gated_on_actual_content(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("Assert set_domain_backend is valid", text)
+        self.assertIn("set_domain_backend", _read("roles/common/defaults/main.yml"))
+        self.assertIn("Select search-domain backend", text)
+        self.assertIn("_set_domain_backend_effective", text)
+        self.assertIn("Configure search domain via NetworkManager", text)
+        self.assertIn("Gather service facts for resolver management", text)
+        self.assertIn("Configure search domain via resolvconf base file", text)
+        self.assertIn("Configure search domain via dhclient", text)
+        self.assertIn("Configure search domain via systemd-resolved", text)
+        self.assertIn("Read resolv.conf", text)
+        self.assertIn("_resolv_conf_has_desired_search", text)
+        self.assertIn("^search[ \\t]+", text)
+        self.assertIn("not (_resolv_conf_has_desired_search | default(false) | bool)", text)
+        self.assertIn("_set_domain_backend_effective | default('') == 'static'", text)
+
+    def test_bootstrap_prefers_manager_specific_search_domain_configuration(self):
+        text = _read(self.BOOTSTRAP_TEMPLATE)
+        self.assertIn("nmcli connection modify", text)
+        self.assertIn("systemctl is-active NetworkManager", text)
+        self.assertIn("systemctl list-unit-files systemd-resolved.service", text)
+        self.assertIn("resolvconf -u", text)
+        self.assertIn('supersede domain-search \\"${DOMAIN}\\";', text)
+        self.assertIn("/etc/systemd/resolved.conf.d/ansible-enterprise.conf", text)
+        self.assertIn("Domains=${DOMAIN}", text)
+
 
 # ---------------------------------------------------------------------------
 # certbot role

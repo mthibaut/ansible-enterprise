@@ -111,7 +111,11 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
-  roles/dns/files/update_dns_serial.py:
+  roles/dns/files/normalize_zone_soa.py:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/files/dns-bump-serial:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -120,6 +124,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/dns/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/dns/templates/named.conf.options.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -336,6 +344,26 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/openvpn/templates/server.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/wireguard/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/wireguard/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/wireguard/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/wireguard/tasks/instance.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/wireguard/templates/wg.conf.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
