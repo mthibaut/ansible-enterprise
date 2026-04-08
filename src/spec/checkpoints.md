@@ -3196,3 +3196,22 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      and `static`. `auto` prefers the active manager instead of assuming
      `/etc/resolv.conf` is authoritative, and the bootstrap script mirrors the
      same preference order.
+
+204. `checkpoint-204-rich-admin-users-nfs-workloads-file-copy`
+     Multiple in-flight infrastructure features were stabilized and folded into
+     the generator. `admin_users` now accepts either plain usernames or rich
+     dict entries with per-user `ssh_keys`, `shell`, `password`, and optional
+     supplementary `groups`, while `admin_ssh_public_key` and
+     `admin_dev_password_hash` remain the shared fallbacks. The bootstrap and
+     ssh_hardening paths normalize this richer shape before creating users,
+     deploying keys, and rendering `AllowUsers`.
+     The NFS role was expanded with protocol-version controls (`3`, `4`, `4.0`,
+     `4.1`, `4.2`), idmap domain settings, generic mounts activation, and a
+     first-run-safe export application path that flushes handlers and runs
+     `exportfs -ra` before same-play client mounts. The capabilities dispatch
+     layer now resolves `id_mapping` to the `nfs` provider.
+     Finally, `file_copy_items` now supports inline `content` in addition to
+     `src`, validates that exactly one content source is provided, and creates
+     parent directories automatically. This enables persistent config injection
+     for external inventory use cases such as the Time Machine Samba workload
+     without introducing repo-specific one-off tasks.

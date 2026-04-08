@@ -367,6 +367,58 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/container_engine/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/container_engine/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/container_engine/tasks/podman.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/container_engine/tasks/docker.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/tasks/remove_podman.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/tasks/remove_docker.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/tasks/podman/instance.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/tasks/docker/instance.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/templates/quadlet.container.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/templates/docker.service.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/ssh_hardening/handlers/main.yml:
     source_of_truth:
       - PROMPT.md
@@ -376,6 +428,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/ssh_hardening/templates/sshd_config.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/users/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py

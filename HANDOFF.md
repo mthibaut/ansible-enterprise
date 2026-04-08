@@ -15,12 +15,14 @@ Rocky Linux 9, Arch Linux, FreeBSD (firewall_enabled: false required). Supports 
 modes.
 
 **Remote git repository:**
-`git@github.com:mthibaut/ansible-enterprise-test.git`
+`git@github.com:mthibaut/ansible-enterprise.git`
 
-**Current HEAD:** `7c6f38a` (dirty worktree; handoff prepared for the next
-checkpoint, see section 11)
+**Current HEAD:** checkpoint-203 is the last committed baseline in this
+document. The repo has since been advanced with post-203 generator changes
+covering rich `admin_users`, NFS/workloads improvements, and inline
+`file_copy` content support; see section 11 and the checkpoint trail below.
 
-**PROMPT.md version:** 656 (PROMPT.md is a validation anchor only — it is
+**PROMPT.md version:** 734 (PROMPT.md is a validation anchor only — it is
 not a real specification. The FILE_MANIFEST in `src/generate_ansible_enterprise.py`
 is the single source of truth for all generated content.)
 
@@ -307,6 +309,22 @@ ports (see section 7).
 
 ## 11. Known open issues / future work
 
+1. The post-203 generator work is valid and ready to commit, but this handoff
+   previously lagged behind the actual repo state. The new checkpoint entry
+   below reflects the intended committed shape.
+
+2. Time Machine persistence work is intentionally still in progress outside
+   this git repo in local inventory under
+   `/Users/mthibaut/install/chat-gpt-out/gilde/host_vars/nfsclient/main.yml`.
+   The Ansible repo now supports the needed inline `file_copy_items.content`
+   path, but the local inventory/runtime change must remain uncommitted here
+   and should only be applied when it is safe to restart the `timemachine`
+   workload.
+
+3. The capabilities dispatch layer now includes `id_mapping -> nfs`, but there
+   are still no concrete `proxmox` or `pfsense` provider roles in `site.yml`.
+   Do not add those capability mappings until the corresponding roles exist.
+
 **No blocking gaps** (`known_gaps.yml` is empty).
 
 Current work in the dirty tree that the next bot should preserve:
@@ -501,7 +519,8 @@ Tracked future work (from `src/spec/architecture.md`):
 | **152** | **fix: nfs client create parent directories before mountpoints** |
 | **153** | **fix: nfs client skip chown/chmod on already-mounted paths** |
 | **154** | **fix: nfs mountpoint file: task uses failed_when: false for active mounts** |
-| **203** | **DNS serial/overwrite fixes + backend-aware search-domain management (planned next checkpoint)** |
+| **203** | **DNS serial/overwrite fixes + backend-aware search-domain management** |
+| **204** | **Rich admin_users, NFS/workloads improvements, and inline file_copy content support** |
 | **155** | **feat: step_ca role -- ACME-compatible internal CA on all four platforms** |
 | **180** | **fix: step-ca Arch install step-cli; revert to step ca init everywhere** |
 | **181** | **fix: step-ca Arch step-cli installs as step-cli not step** |
@@ -528,7 +547,7 @@ Tracked future work (from `src/spec/architecture.md`):
 | **201** | **feat: bootstrap_scripts role -- per-host bootstrap shell scripts (plaintext + encrypted)** |
 | **202** | **feat: apache2 backend role, nginx static site mode, bootstrap.yml separation** |
 
-Next checkpoint will be **203**.
+Next checkpoint will be **205**.
 
 ## Generator format note (checkpoint-042)
 FILE_MANIFEST now uses triple-quoted multiline strings. To add or edit content:

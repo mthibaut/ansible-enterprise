@@ -227,6 +227,145 @@ class TestHostnameBootstrapRegression(unittest.TestCase):
         self.assertIn("Domains=${DOMAIN}", text)
 
 
+class TestAdminUsersRegression(unittest.TestCase):
+
+    COMMON_DEFAULTS = "roles/common/defaults/main.yml"
+    SSH_TASKS = "roles/ssh_hardening/tasks/main.yml"
+    SSHD_TEMPLATE = "roles/ssh_hardening/templates/sshd_config.j2"
+    BOOTSTRAP_TEMPLATE = "roles/bootstrap_scripts/templates/bootstrap.sh.j2"
+    BOOTSTRAP_TASKS = "roles/bootstrap_scripts/tasks/main.yml"
+
+    def test_common_defaults_document_rich_admin_users(self):
+        text = _read(self.COMMON_DEFAULTS)
+        self.assertIn("Supports simple strings (backwards compatible) or dicts", text)
+        self.assertIn("ssh_keys:", text)
+        self.assertIn("shell:", text)
+        self.assertIn("password:", text)
+
+    def test_ssh_role_normalizes_admin_users(self):
+        text = _read(self.SSH_TASKS)
+        self.assertIn("Assert admin_users entries are strings or named mappings", text)
+        self.assertIn("Normalize admin_users", text)
+        self.assertIn("_admin_users", text)
+        self.assertIn("_admin_user_names", text)
+        self.assertIn("item.password is defined", text)
+        self.assertIn("selectattr('ssh_keys', 'defined')", text)
+
+    def test_sshd_config_uses_normalized_admin_user_names(self):
+        text = _read(self.SSHD_TEMPLATE)
+        self.assertIn("AllowUsers root {{ _admin_user_names | default(admin_users) | join(\" \") }}", text)
+        self.assertNotIn("AllowUsers root {{ admin_users | join(\" \") }}", text)
+
+    def test_bootstrap_normalizes_rich_admin_users(self):
+        tasks = _read(self.BOOTSTRAP_TASKS)
+        text = _read(self.BOOTSTRAP_TEMPLATE)
+        self.assertIn("Normalize bootstrap admin_users", tasks)
+        self.assertIn("_bootstrap_admin_users", tasks)
+        self.assertIn("_bootstrap_admin_user_names", tasks)
+        self.assertIn("ADMIN_USERS=({{ _bs.admin_user_names | join(' ') }})", text)
+        self.assertIn("USER_SHELL=", text)
+        self.assertIn("USER_PASSWORD_HASH=", text)
+        self.assertIn("printf", text)
+        self.assertIn("_key | quote", text)
+
+
+# ---------------------------------------------------------------------------
+# nfs role
+# ---------------------------------------------------------------------------
+
+class TestNfsRoleRegression(unittest.TestCase):
+
+    NFS_DEFAULTS = "roles/nfs/defaults/main.yml"
+    NFS_TASKS = "roles/nfs/tasks/main.yml"
+    NFS_HANDLERS = "roles/nfs/handlers/main.yml"
+    SITE = "site.yml"
+
+    def test_nfs_defaults_document_versions_threads_idmap_and_generic_mounts(self):
+        text = _read(self.NFS_DEFAULTS)
+        self.assertIn("versions: list like [3, 4.0] or [4]", text)
+        self.assertIn("4.0  -> only NFSv4.0", text)
+        self.assertIn("versions: [4]", text)
+        self.assertIn("threads: 8", text)
+        self.assertIn("idmap_domain", text)
+        self.assertIn("fstype: nfs | nfs4", text)
+        self.assertIn("Use vers=4.0 or minorversion=0", text)
+        self.assertIn("# -- Generic filesystem mounts", text)
+        self.assertIn("fstype: cifs", text)
+        self.assertIn("opts: bind", text)
+
+    def test_nfs_tasks_manage_server_versions_and_threads(self):
+        text = _read(self.NFS_TASKS)
+        self.assertIn("_nfs_versions", text)
+        self.assertIn("_nfs_version_tokens", text)
+        self.assertIn("Enable and start rpcbind (NFSv3)", text)
+        self.assertIn("RPCNFSDCOUNT={{ nfs.server.threads | default(8) }}", text)
+        self.assertIn("RPCNFSDOPTS=", text)
+        self.assertIn("-N 4.1", text)
+        self.assertIn("-N 4.2", text)
+        self.assertIn("vers3={{ 'y' if 3 in _nfs_versions else 'n' }}", text)
+        self.assertIn("vers4={{ 'y' if '4' in _nfs_version_tokens or '4.0' in _nfs_version_tokens or '4.1' in _nfs_version_tokens or '4.2' in _nfs_version_tokens else 'n' }}", text)
+        self.assertIn("vers4.1={{ 'y' if '4' in _nfs_version_tokens or '4.1' in _nfs_version_tokens or '4.2' in _nfs_version_tokens else 'n' }}", text)
+        self.assertIn("vers4.2={{ 'y' if '4' in _nfs_version_tokens or '4.2' in _nfs_version_tokens else 'n' }}", text)
+        self.assertIn("threads={{ nfs.server.threads | default(8) }}", text)
+
+    def test_nfs_tasks_manage_idmap_and_client_fstype(self):
+        text = _read(self.NFS_TASKS)
+        self.assertIn("Configure idmapd domain (server)", text)
+        self.assertIn("Configure idmapd domain (client)", text)
+        self.assertIn("Domain = {{ nfs.server.idmap_domain }}", text)
+        self.assertIn("Domain = {{ nfs.client.idmap_domain }}", text)
+        self.assertIn("fstype: \"{{ item.fstype | default('nfs') }}\"", text)
+        self.assertIn("state: \"{{ item.state | default('mounted') }}\"", text)
+
+    def test_nfs_role_supports_generic_mounts_and_role_activation(self):
+        tasks = _read(self.NFS_TASKS)
+        site = _read(self.SITE)
+        self.assertIn("Ensure generic mountpoint directories exist", tasks)
+        self.assertIn("Configure generic mounts via fstab", tasks)
+        self.assertIn("- meta: flush_handlers", tasks)
+        self.assertIn("Apply server-side export and daemon changes before any client mount tasks", tasks)
+        self.assertIn("Apply NFS exports immediately", tasks)
+        self.assertIn("command: exportfs -ra", tasks)
+        self.assertIn("tags: [nfs, mounts]", site)
+        self.assertIn("or mounts | default([]) | length > 0", site)
+        self.assertIn("or 'nfs' in (_required_providers | default([]))", site)
+
+    def test_nfs_handlers_restart_server_and_idmapd(self):
+        text = _read(self.NFS_HANDLERS)
+        self.assertIn("Reload NFS exports", text)
+        self.assertIn("Restart NFS server", text)
+        self.assertIn("Restart NFS idmapd", text)
+        self.assertIn("rpc-idmapd", text)
+        self.assertIn("nfsuserd", text)
+
+
+# ---------------------------------------------------------------------------
+# file_copy role
+# ---------------------------------------------------------------------------
+
+class TestFileCopyRegression(unittest.TestCase):
+
+    DEFAULTS = "roles/file_copy/defaults/main.yml"
+    TASKS = "roles/file_copy/tasks/main.yml"
+
+    def test_file_copy_defaults_document_inline_content(self):
+        text = _read(self.DEFAULTS)
+        self.assertIn("content - inline file content to write instead of copying src", text)
+        self.assertIn("dest: /etc/myapp/generated.conf", text)
+
+    def test_file_copy_supports_inline_content_and_parent_directories(self):
+        text = _read(self.TASKS)
+        self.assertIn("Validate file_copy items", text)
+        self.assertIn("exactly one of src or content", text)
+        self.assertIn("Ensure parent directories for copied files exist", text)
+        self.assertIn("path: \"{{ item.dest | dirname }}\"", text)
+        self.assertIn("Copy files from contrib to remote host", text)
+        self.assertIn("- item.src is defined", text)
+        self.assertIn("Write inline file content to remote host", text)
+        self.assertIn("content: \"{{ item.content }}\"", text)
+        self.assertIn("- item.content is defined", text)
+
+
 # ---------------------------------------------------------------------------
 # certbot role
 # ---------------------------------------------------------------------------

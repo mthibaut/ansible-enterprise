@@ -555,7 +555,25 @@ collections:
 # SSH port. Override in inventory host_vars for non-standard ports.
 ssh_port: 22
 
-# Unix accounts with sudo access. Override in inventory.
+# Privileged admin accounts with sudo + SSH access.
+# Supports simple strings (backwards compatible) or dicts:
+#   admin_users:
+#     - myadmin                       # simple: name only
+#     - name: alice                   # rich: per-user overrides
+#       ssh_keys:
+#         - ssh-ed25519 AAAA... alice@laptop
+#       shell: /bin/zsh
+#     - name: bob
+#       ssh_keys:
+#         - ssh-ed25519 AAAA... bob@workstation
+#       password: "{{ vault_bob_password_hash }}"
+#
+# Rich keys (all optional):
+#   name:      (required) username
+#   ssh_keys:  list of public SSH key strings (in addition to admin_ssh_public_key)
+#   shell:     login shell (default /bin/bash)
+#   password:  hashed password (overrides admin_dev_password_hash for this user)
+#   groups:    supplementary groups (appended)
 admin_users: [myadmin]
 
 # Deployment environment. Controls safety defaults (certbot_fail_hard,
@@ -614,6 +632,7 @@ capabilities:
   firewall: {provider: nftables}
   geoip: {provider: maxmind_nftables}
   mail: {provider: mailserver}
+  id_mapping: {provider: nfs}
 """,
     'roles/ssh_hardening/defaults/main.yml': """\
 ---
@@ -679,6 +698,7 @@ mailserver:
 # Each item is a dict with the following keys:
 #
 #   src    - path relative to the playbook root (e.g. contrib/myscript.sh)
+#   content - inline file content to write instead of copying src
 #   dest   - absolute destination path on the remote host
 #   owner  - file owner (default: root)
 #   group  - file group (default: root)
@@ -701,11 +721,35 @@ mailserver:
 #       group: "{{ _root_group }}"
 #       mode: "0755"
 #       setype: bin_t
+#     - content: |
+#         [global]
+#           log level = 1
+#       dest: /etc/myapp/generated.conf
+#       mode: "0644"
 file_copy_items: []
 """,
     'roles/file_copy/tasks/main.yml': """\
 ---
 # Skip the entire role when no items are configured.
+- name: Validate file_copy items
+  assert:
+    that:
+      - item.dest is defined
+      - (item.src is defined) != (item.content is defined)
+    fail_msg: "Each file_copy_items entry must define dest and exactly one of src or content"
+  loop: "{{ file_copy_items | default([]) }}"
+  when: file_copy_items | default([]) | length > 0
+
+- name: Ensure parent directories for copied files exist
+  file:
+    path: "{{ item.dest | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+  loop: "{{ file_copy_items | default([]) }}"
+  when: file_copy_items | default([]) | length > 0
+
 - name: Copy files from contrib to remote host
   copy:
     src: "{{ item.src }}"
@@ -714,7 +758,21 @@ file_copy_items: []
     group: "{{ item.group | default('root') }}"
     mode: "{{ item.mode | default('0644') }}"
   loop: "{{ file_copy_items | default([]) }}"
-  when: file_copy_items | default([]) | length > 0
+  when:
+    - file_copy_items | default([]) | length > 0
+    - item.src is defined
+
+- name: Write inline file content to remote host
+  copy:
+    content: "{{ item.content }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0644') }}"
+  loop: "{{ file_copy_items | default([]) }}"
+  when:
+    - file_copy_items | default([]) | length > 0
+    - item.content is defined
 
 # Restore SELinux file context on RedHat when setype is specified.
 # Uses restorecon -v so Ansible detects context changes correctly.
@@ -1136,6 +1194,16 @@ fi
       - admin_users is iterable
       - services is mapping
     fail_msg: "admin_users must be a list and services must be a mapping"
+
+- name: Assert admin_users entries are strings or named mappings
+  assert:
+    that:
+      - item is string or item is mapping
+      - item is string or (item.name is defined and item.name | string | length > 0)
+    fail_msg: "Each admin_users entry must be either a username string or a mapping with a non-empty name"
+  loop: "{{ admin_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name if item is mapping and item.name is defined else item }}"
 
 - name: Assert admin_ssh_public_key is set
   assert:
@@ -1826,6 +1894,7 @@ if __name__ == "__main__":
 #   dns-bump-serial                          # all zones in --zone-dir
 #   dns-bump-serial example.com foo.org      # specific zones only
 #   dns-bump-serial --zone-dir /var/lib/bind # override zone directory
+#   dns-bump-serial --serial 2026040701      # set exact serial number
 #   dns-bump-serial --allow-direct-edit      # allow static/test fallback
 #
 # Serial format: YYYYMMDDNN, where YYYYMMDD is today's date and NN is a
@@ -1922,7 +1991,7 @@ def rndc(action, zone_name, allow_direct_edit=False):
         return False
 
 
-def bump_serial(zone_path, zone_name, allow_direct_edit=False):
+def bump_serial(zone_path, zone_name, allow_direct_edit=False, forced_serial=None):
     \"\"\"Bump the SOA serial via rndc freeze / edit / thaw.\"\"\"
     text = zone_path.read_text(encoding="utf-8")
     m = SERIAL_RE.search(text)
@@ -1932,11 +2001,14 @@ def bump_serial(zone_path, zone_name, allow_direct_edit=False):
         return None, None
 
     old_serial = m.group(2)
-    try:
-        new_serial = compute_serial(old_serial)
-    except ValueError as exc:
-        print("ERROR {}: {}".format(zone_name, exc), file=sys.stderr)
-        return None, old_serial
+    if forced_serial is not None:
+        new_serial = forced_serial
+    else:
+        try:
+            new_serial = compute_serial(old_serial)
+        except ValueError as exc:
+            print("ERROR {}: {}".format(zone_name, exc), file=sys.stderr)
+            return None, old_serial
 
     # Freeze zone to safely edit the file
     if not rndc("freeze", zone_name, allow_direct_edit=allow_direct_edit):
@@ -1951,12 +2023,20 @@ def bump_serial(zone_path, zone_name, allow_direct_edit=False):
         rndc("thaw", zone_name, allow_direct_edit=allow_direct_edit)
         return None, None
     old_serial = m.group(2)
-    try:
-        new_serial = compute_serial(old_serial)
-    except ValueError as exc:
-        print("ERROR {}: {}".format(zone_name, exc), file=sys.stderr)
+    if forced_serial is not None:
+        new_serial = forced_serial
+    else:
+        try:
+            new_serial = compute_serial(old_serial)
+        except ValueError as exc:
+            print("ERROR {}: {}".format(zone_name, exc), file=sys.stderr)
+            rndc("thaw", zone_name, allow_direct_edit=allow_direct_edit)
+            return None, old_serial
+
+    if new_serial == old_serial:
         rndc("thaw", zone_name, allow_direct_edit=allow_direct_edit)
-        return None, old_serial
+        return False, old_serial
+
     new_text = SERIAL_RE.sub(
         r"\\g<1>" + new_serial + r"\\g<3>", text, count=1)
     zone_path.write_text(new_text, encoding="utf-8")
@@ -1977,7 +2057,15 @@ def main():
                     help="Zone file directory (auto-detected if omitted)")
     ap.add_argument("--allow-direct-edit", action="store_true",
                     help="Allow fallback direct file edits when rndc is unavailable or the zone is static")
+    ap.add_argument("--serial", default=None,
+                    help="Set serial to this exact value (10-digit number) instead of auto-incrementing")
     args = ap.parse_args()
+
+    if args.serial is not None:
+        if not (args.serial.isdigit() and len(args.serial) == 10):
+            print("ERROR: --serial must be a 10-digit number, got '{}'".format(args.serial),
+                  file=sys.stderr)
+            sys.exit(1)
 
     zone_dir = pathlib.Path(args.zone_dir or detect_zone_dir())
     if not zone_dir.is_dir():
@@ -2004,7 +2092,8 @@ def main():
     error_any = False
     for zone_name, p in paths:
         changed, serial = bump_serial(
-            p, zone_name, allow_direct_edit=args.allow_direct_edit
+            p, zone_name, allow_direct_edit=args.allow_direct_edit,
+            forced_serial=args.serial,
         )
         if changed is None:
             error_any = True
@@ -2322,7 +2411,7 @@ if __name__ == "__main__":
   command: >
     python3 /usr/local/sbin/sync_dns_records.py
     --zone-file {{ _bind_zone_dir }}/{{ item.0.name }}.zone
-    --record "{{ item.1.name }}" "{{ item.1.type }}" "{{ item.1.value | default('') }}"
+    --record "{{ item.1.name }}" "{{ item.1.type }}" "{{ (item.1.priority | string + ' ') if item.1.priority is defined else '' }}{{ item.1.value | default('') }}"
     {{ '--ttl ' + (item.1.ttl | string) if item.1.ttl is defined else '' }}
     {{ '--absent' if item.1.state | default('present') == 'absent' else '' }}
   loop: >-
@@ -2702,7 +2791,7 @@ $TTL {{ _zone_ttl }}
 {% for _rec in item.records | default([]) %}
 {%   if _rec.state | default('present') != 'absent' %}
 {%     set _rec_ttl = _rec.ttl | default(_zone_ttl) %}
-{{ _rec.name }}  {{ _rec_ttl }}  IN  {{ _rec.type | upper }}  {{ _rec.value }}
+{{ _rec.name }}  {{ _rec_ttl }}  IN  {{ _rec.type | upper }}  {{ (_rec.priority | string + ' ') if _rec.priority is defined else '' }}{{ _rec.value }}
 {%   endif %}
 {% endfor %}
 {% endif %}
@@ -2945,6 +3034,15 @@ pass in proto {{ _vpn.proto | default('udp') }} to any port {{ _vpn.port | defau
 {% for _wg in wireguard_instances | default([]) %}
 pass in proto udp to any port {{ _wg.listen_port | default(51820) }} keep state
 {% endfor %}
+{% for _wl in workloads | default([]) %}
+{% if _wl.state | default('present') == 'present' %}
+{% for _p in _wl.ports | default([]) %}
+{% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
+{% set _proto = 'udp' if '/udp' in _p else 'tcp' %}
+pass in proto {{ _proto }} to any port {{ _host_port }} keep state
+{% endfor %}
+{% endif %}
+{% endfor %}
 
 # Step CA ACME port 9000
 {% if step_ca.enabled | default(false) | bool %}
@@ -2968,7 +3066,7 @@ pass in proto tcp to any port { 139, 445 } keep state
 {% endif %}
 {% endif %}
 
-# NFS server port 2049
+# NFS server ports (2049 + rpcbind 111 for NFSv3)
 {% if nfs.server.enabled | default(false) | bool %}
 {% set _nfs_clients = [] %}
 {% for _exp in nfs.server.exports | default([]) %}
@@ -2978,6 +3076,9 @@ pass in proto tcp to any port { 139, 445 } keep state
 {% endfor %}
 {% for _host in _nfs_clients %}
 pass in proto { tcp, udp } from {{ _host }} to any port 2049 keep state
+{% if 3 in (nfs.server.versions | default([4])) %}
+pass in proto { tcp, udp } from {{ _host }} to any port 111 keep state
+{% endif %}
 {% endfor %}
 {% endif %}
 
@@ -3163,6 +3264,15 @@ table inet filter {
     {% for _wg in wireguard_instances | default([]) %}
     udp dport {{ _wg.listen_port | default(51820) }} accept
     {% endfor %}
+    # Workload container ports
+    {% for _wl in workloads | default([]) %}
+    {% if _wl.state | default('present') == 'present' %}
+    {% for _p in _wl.ports | default([]) %}
+    {% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
+    {{ 'udp' if '/udp' in _p else 'tcp' }} dport {{ _host_port }} accept
+    {% endfor %}
+    {% endif %}
+    {% endfor %}
 
     # Step CA ACME port 9000
     {% if step_ca.enabled | default(false) | bool %}
@@ -3190,7 +3300,7 @@ table inet filter {
     {% endif %}
     {% endif %}
 
-    # NFS server port 2049 - restricted to configured client hosts.
+    # NFS server ports (2049 + rpcbind 111 for NFSv3).
     {% if nfs.server.enabled | default(false) | bool %}
     {% set _nfs_clients = [] %}
     {% for _exp in nfs.server.exports | default([]) %}
@@ -3202,9 +3312,17 @@ table inet filter {
     {% if ':' in _host %}
     ip6 saddr {{ _host }} tcp dport 2049 accept
     ip6 saddr {{ _host }} udp dport 2049 accept
+    {% if 3 in (nfs.server.versions | default([4])) %}
+    ip6 saddr {{ _host }} tcp dport 111 accept
+    ip6 saddr {{ _host }} udp dport 111 accept
+    {% endif %}
     {% else %}
     ip  saddr {{ _host }} tcp dport 2049 accept
     ip  saddr {{ _host }} udp dport 2049 accept
+    {% if 3 in (nfs.server.versions | default([4])) %}
+    ip  saddr {{ _host }} tcp dport 111 accept
+    ip  saddr {{ _host }} udp dport 111 accept
+    {% endif %}
     {% endif %}
     {% endfor %}
     {% endif %}
@@ -4752,6 +4870,26 @@ nfs:
   # --- Server: export shares to other hosts ---
   server:
     enabled: false
+
+    # NFS protocol versions to enable on the server.
+    # v3 additionally opens rpcbind (port 111) in the firewall.
+    # Supported values:
+    #   3    -> NFSv3
+    #   4    -> enable the whole NFSv4 family (4.0/4.1/4.2)
+    #   4.0  -> only NFSv4.0
+    #   4.1  -> NFSv4.0 + 4.1
+    #   4.2  -> NFSv4.0 + 4.1 + 4.2
+    # versions: list like [3, 4.0] or [4]  (default: [4])
+    versions: [4]
+
+    # Number of NFS server threads (nfsd instances).
+    threads: 8
+
+    # NFSv4 ID mapping domain. Must match on server and clients for
+    # uid/gid name mapping to work. When unset, the system default
+    # (usually the DNS domain) is used.
+    # idmap_domain: example.com
+
     # exports: list of paths to export
     # Each export:
     #   path:    local directory to export
@@ -4760,6 +4898,7 @@ nfs:
     #     options: NFS export options string
     #              NFSv4: rw,sync,no_subtree_check
     #              NFSv3: rw,sync,no_subtree_check,no_root_squash
+    #   fsid:    (optional) filesystem ID for NFSv4 pseudo-root
     # Example:
     #   exports:
     #     - path: /srv/data
@@ -4773,11 +4912,17 @@ nfs:
   # --- Client: mount remote NFS shares ---
   client:
     enabled: false
+
+    # NFSv4 ID mapping domain (must match server).
+    # idmap_domain: example.com
+
     # mounts: list of NFS mounts to configure
     # Each mount:
     #   src:   server:/path  (remote NFS export)
     #   path:  /local/mount  (local mountpoint)
+    #   fstype: nfs | nfs4   (default: nfs)
     #   opts:  mount options (default: rw,nfsvers=4,soft,timeo=30)
+    #          Use vers=4.0 or minorversion=0 if you must pin NFSv4.0
     #   state: mounted|present|unmounted|absent
     #          mounted  = in fstab AND currently mounted (default)
     #          present  = in fstab only (not necessarily mounted)
@@ -4790,9 +4935,31 @@ nfs:
     #   mounts:
     #     - src: 192.168.20.10:/srv/data
     #       path: /mnt/data
-    #       opts: rw,nfsvers=4,soft,timeo=30
+    #       opts: rw,nfsvers=4.1,soft,timeo=30
     #       state: mounted
     mounts: []
+
+# -- Generic filesystem mounts (NFS, CIFS, bind, tmpfs, etc.) ----------------
+# Use this for any mount that is not managed by the NFS role above.
+# Each entry maps directly to the Ansible mount module.
+#
+# mounts:
+#   - src: //fileserver/share
+#     path: /mnt/share
+#     fstype: cifs
+#     opts: "credentials=/etc/samba/creds,uid=1000,gid=1000"
+#     state: mounted
+#   - src: /srv/data
+#     path: /mnt/data-bind
+#     fstype: none
+#     opts: bind
+#     state: mounted
+#   - src: tmpfs
+#     path: /mnt/ramdisk
+#     fstype: tmpfs
+#     opts: "size=2G"
+#     state: mounted
+mounts: []
 """,
     'roles/nfs/tasks/main.yml': """\
 ---
@@ -4813,6 +4980,8 @@ nfs:
          else 'nfs-server'   if ansible_facts.os_family == 'Archlinux'
          else 'nfsd'         if ansible_facts.os_family == 'FreeBSD'
          else 'nfs-server' }}
+    _nfs_versions: "{{ nfs.server.versions | default([4]) }}"
+    _nfs_version_tokens: "{{ (nfs.server.versions | default([4])) | map('string') | list }}"
 
 # -- NFS Server ------------------------------------------------------------
 - name: Install NFS server package
@@ -4823,6 +4992,89 @@ nfs:
     - nfs.server.enabled | default(false) | bool
     - _nfs_server_pkg | length > 0
 
+# NFSv3 requires rpcbind for portmapper.
+- name: Enable and start rpcbind (NFSv3)
+  systemd:
+    name: rpcbind
+    enabled: true
+    state: started
+  when:
+    - nfs.server.enabled | default(false) | bool
+    - 3 in _nfs_versions
+    - ansible_facts.os_family != 'FreeBSD'
+
+# Configure NFS server protocol versions (Debian/Ubuntu).
+- name: Configure NFS server versions (Debian)
+  lineinfile:
+    path: /etc/default/nfs-kernel-server
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - regexp: '^RPCNFSDCOUNT='
+      line: "RPCNFSDCOUNT={{ nfs.server.threads | default(8) }}"
+    - regexp: '^RPCNFSDOPTS='
+      line: >-
+        RPCNFSDOPTS="{{ '-N 3' if 3 not in _nfs_versions else '' }} {{ '-N 4' if not ('4' in _nfs_version_tokens or '4.0' in _nfs_version_tokens or '4.1' in _nfs_version_tokens or '4.2' in _nfs_version_tokens) else '' }} {{ '-N 4.1' if not ('4' in _nfs_version_tokens or '4.1' in _nfs_version_tokens or '4.2' in _nfs_version_tokens) else '' }} {{ '-N 4.2' if not ('4' in _nfs_version_tokens or '4.2' in _nfs_version_tokens) else '' }}"
+  notify: Restart NFS server
+  when:
+    - nfs.server.enabled | default(false) | bool
+    - ansible_facts.os_family == 'Debian'
+
+# Configure NFS server protocol versions (RedHat/Archlinux).
+- name: Configure NFS server versions (RedHat/Arch)
+  lineinfile:
+    path: /etc/nfs.conf
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    insertafter: "{{ item.after | default(omit) }}"
+  loop:
+    - regexp: '^\\s*vers3\\s*='
+      line: "vers3={{ 'y' if 3 in _nfs_versions else 'n' }}"
+      after: '\\[nfsd\\]'
+    - regexp: '^\\s*vers4\\s*='
+      line: "vers4={{ 'y' if '4' in _nfs_version_tokens or '4.0' in _nfs_version_tokens or '4.1' in _nfs_version_tokens or '4.2' in _nfs_version_tokens else 'n' }}"
+      after: '\\[nfsd\\]'
+    - regexp: '^\\s*vers4\\.1\\s*='
+      line: "vers4.1={{ 'y' if '4' in _nfs_version_tokens or '4.1' in _nfs_version_tokens or '4.2' in _nfs_version_tokens else 'n' }}"
+      after: '\\[nfsd\\]'
+    - regexp: '^\\s*vers4\\.2\\s*='
+      line: "vers4.2={{ 'y' if '4' in _nfs_version_tokens or '4.2' in _nfs_version_tokens else 'n' }}"
+      after: '\\[nfsd\\]'
+    - regexp: '^\\s*threads\\s*='
+      line: "threads={{ nfs.server.threads | default(8) }}"
+      after: '\\[nfsd\\]'
+  notify: Restart NFS server
+  when:
+    - nfs.server.enabled | default(false) | bool
+    - ansible_facts.os_family in ['RedHat', 'Archlinux']
+
+# -- NFSv4 ID Mapping (idmapd) -------------------------------------------
+- name: Configure idmapd domain (server)
+  lineinfile:
+    path: /etc/idmapd.conf
+    regexp: '^\\s*#?\\s*Domain\\s*='
+    line: "Domain = {{ nfs.server.idmap_domain }}"
+    insertafter: '\\[General\\]'
+  notify: Restart NFS idmapd
+  when:
+    - nfs.server.enabled | default(false) | bool
+    - nfs.server.idmap_domain is defined
+    - ansible_facts.os_family != 'FreeBSD'
+
+- name: Configure idmapd domain (client)
+  lineinfile:
+    path: /etc/idmapd.conf
+    regexp: '^\\s*#?\\s*Domain\\s*='
+    line: "Domain = {{ nfs.client.idmap_domain }}"
+    insertafter: '\\[General\\]'
+  notify: Restart NFS idmapd
+  when:
+    - nfs.client.enabled | default(false) | bool
+    - nfs.client.idmap_domain is defined
+    - nfs.server.idmap_domain is not defined
+    - ansible_facts.os_family != 'FreeBSD'
+
+# -- Server exports --------------------------------------------------------
 - name: Ensure export directories exist
   file:
     path: "{{ item.path }}"
@@ -4840,24 +5092,10 @@ nfs:
     src: exports.j2
     dest: /etc/exports
     owner: root
-    group: "{{ _root_group }}"
+    group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else _root_group }}"
     mode: "0644"
   notify: Reload NFS exports
-  when:
-    - nfs.server.enabled | default(false) | bool
-    - ansible_facts.os_family != 'FreeBSD'
-
-- name: Deploy /etc/exports (FreeBSD)
-  template:
-    src: exports.j2
-    dest: /etc/exports
-    owner: root
-    group: wheel
-    mode: "0644"
-  notify: Reload NFS exports
-  when:
-    - nfs.server.enabled | default(false) | bool
-    - ansible_facts.os_family == 'FreeBSD'
+  when: nfs.server.enabled | default(false) | bool
 
 - name: Enable and start NFS server
   systemd:
@@ -4884,6 +5122,20 @@ nfs:
   when:
     - nfs.server.enabled | default(false) | bool
     - ansible_facts.os_family == 'FreeBSD'
+
+# Apply server-side export and daemon changes before any client mount tasks
+# in the same play try to use them.
+- meta: flush_handlers
+  when: nfs.server.enabled | default(false) | bool
+
+# Reconcile the active export table immediately so same-play client mounts
+# do not race handler timing on first convergence.
+- name: Apply NFS exports immediately
+  command: exportfs -ra
+  changed_when: false
+  when:
+    - nfs.server.enabled | default(false) | bool
+    - ansible_facts.os_family != 'FreeBSD'
 
 # -- NFS Client ------------------------------------------------------------
 - name: Install NFS client package
@@ -4928,18 +5180,12 @@ nfs:
     - nfs.client.enabled | default(false) | bool
     - item.state | default('mounted') != 'absent'
 
-# Jinja2 macro for platform-appropriate NFS mount options.
-# On FreeBSD: vers=3->nfsv3, vers=4->nfsv4, nolock->nolockd
-# On Linux: options passed through unchanged.
-
 # Write fstab entry only (state: present) for FreeBSD.
-# The Ansible mount module combines write+mount in one step on Linux,
-# but on FreeBSD mount fails after write so we split the steps.
 - name: Write NFS entries to fstab (FreeBSD)
   mount:
     src: "{{ item.src }}"
     path: "{{ item.path }}"
-    fstype: nfs
+    fstype: "{{ item.fstype | default('nfs') }}"
     opts: >-
       {%- set _o = ((item.opts | default('rw'))
                     | regex_replace(',?soft(,|$)', '')
@@ -4993,7 +5239,7 @@ nfs:
   mount:
     src: "{{ item.src }}"
     path: "{{ item.path }}"
-    fstype: nfs
+    fstype: "{{ item.fstype | default('nfs') }}"
     opts: "{{ item.opts | default('rw,nfsvers=4,soft,timeo=30') }}"
     state: "{{ item.state | default('mounted') }}"
     dump: "{{ item.dump | default('0') }}"
@@ -5004,12 +5250,52 @@ nfs:
   when:
     - nfs.client.enabled | default(false) | bool
     - ansible_facts.os_family != 'FreeBSD'
+
+# -- Generic mounts (non-NFS: CIFS, bind, tmpfs, etc.) --------------------
+- name: Ensure generic mountpoint directories exist
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default(_root_group) }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop: "{{ mounts | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  failed_when: false
+  when: item.state | default('mounted') != 'absent'
+
+- name: Configure generic mounts via fstab
+  mount:
+    src: "{{ item.src }}"
+    path: "{{ item.path }}"
+    fstype: "{{ item.fstype }}"
+    opts: "{{ item.opts | default('defaults') }}"
+    state: "{{ item.state | default('mounted') }}"
+    dump: "{{ item.dump | default('0') }}"
+    passno: "{{ item.passno | default('0') }}"
+  loop: "{{ mounts | default([]) }}"
+  loop_control:
+    label: "{{ item.src }} -> {{ item.path }}"
 """,
     'roles/nfs/handlers/main.yml': """\
 ---
 - name: Reload NFS exports
   command: exportfs -ra
   changed_when: false
+
+- name: Restart NFS server
+  service:
+    name: "{{ _nfs_service }}"
+    state: restarted
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: Restart NFS idmapd
+  service:
+    name: "{{ 'nfs-idmapd' if ansible_facts.os_family == 'Debian' else 'rpc-idmapd' if ansible_facts.os_family == 'RedHat' else 'nfsuserd' }}"
+    state: restarted
+  when: ansible_facts.os_family != 'FreeBSD'
+  failed_when: false
 """,
     'roles/nfs/templates/exports.j2': """\
 # /etc/exports - managed by Ansible. Do not edit manually.
@@ -6428,6 +6714,588 @@ PersistentKeepalive = {{ _peer.persistent_keepalive }}
 {% endif %}
 {% endfor %}
 """,
+    # ------------------------------------------------------------------ #
+    #  Container engine role -- installs Docker or Podman                  #
+    # ------------------------------------------------------------------ #
+    'roles/container_engine/defaults/main.yml': """\
+---
+# Container engine role.
+#
+# Installs and configures a container runtime on the target host.
+# The workloads role depends on the engine chosen here.
+#
+# container_engine: podman | docker
+#   podman  - Rootless/rootful, daemonless, Quadlet for systemd integration.
+#   docker  - Docker CE with optional Compose v2 plugin.
+container_engine: podman
+
+# Install Compose v2 plugin (docker only, ignored for podman).
+container_engine_compose: true
+
+# Podman: configure default registries to search when pulling short names.
+container_engine_registries:
+  - docker.io
+  - quay.io
+
+# Docker: edition to install (ce or ee). Only relevant for docker engine.
+container_engine_docker_edition: ce
+""",
+    'roles/container_engine/tasks/main.yml': """\
+---
+- name: Validate container_engine value
+  assert:
+    that:
+      - container_engine in ['podman', 'docker']
+    fail_msg: "container_engine must be 'podman' or 'docker', got '{{ container_engine }}'"
+
+- name: Install container engine
+  include_tasks: "{{ container_engine }}.yml"
+""",
+    'roles/container_engine/tasks/podman.yml': """\
+---
+- name: Install Podman
+  package:
+    name: podman
+    state: present
+
+- name: Install podman-compose (if needed)
+  package:
+    name: podman-compose
+    state: present
+  when: container_engine_compose | default(true) | bool
+  failed_when: false
+
+- name: Ensure Quadlet directory exists
+  file:
+    path: /etc/containers/systemd
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+
+- name: Configure default registries
+  copy:
+    dest: /etc/containers/registries.conf.d/00-default-registries.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible - default search registries (v2 format).
+      unqualified-search-registries = [{% for _r in container_engine_registries | default(['docker.io']) %}"{{ _r }}"{{ ', ' if not loop.last else '' }}{% endfor %}]
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: Enable and start Podman socket (for API consumers)
+  systemd:
+    name: podman.socket
+    enabled: true
+    state: started
+  when: ansible_facts.os_family != 'FreeBSD'
+  failed_when: false
+""",
+    'roles/container_engine/tasks/docker.yml': """\
+---
+# Docker CE installation.
+# On Debian/Ubuntu this uses the official Docker apt repo.
+# On RHEL/Fedora this uses the official Docker yum/dnf repo.
+- name: Install Docker prerequisites (Debian)
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Add Docker GPG key (Debian)
+  apt_key:
+    url: "https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}/gpg"
+    state: present
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Add Docker apt repo (Debian)
+  apt_repository:
+    repo: >-
+      deb [arch={{ ansible_facts.architecture | regex_replace('x86_64', 'amd64') }}]
+      https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}
+      {{ ansible_facts.distribution_release }} stable
+    state: present
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Add Docker yum repo (RedHat)
+  yum_repository:
+    name: docker-ce
+    description: Docker CE Stable
+    baseurl: "https://download.docker.com/linux/centos/$releasever/$basearch/stable"
+    gpgcheck: true
+    gpgkey: "https://download.docker.com/linux/centos/gpg"
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Install Docker CE
+  package:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    state: present
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: Install Docker Compose plugin
+  package:
+    name: docker-compose-plugin
+    state: present
+  when:
+    - container_engine_compose | default(true) | bool
+    - ansible_facts.os_family != 'FreeBSD'
+  failed_when: false
+
+- name: Install Docker (FreeBSD)
+  community.general.pkgng:
+    name: docker
+    state: present
+  when: ansible_facts.os_family == 'FreeBSD'
+
+- name: Enable and start Docker
+  systemd:
+    name: docker
+    enabled: true
+    state: started
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    # ------------------------------------------------------------------ #
+    #  Workloads role -- provider-agnostic container workloads             #
+    # ------------------------------------------------------------------ #
+    'roles/workloads/defaults/main.yml': """\
+---
+# Workloads role -- declares OCI container workloads to run on the host.
+#
+# Each workload is engine-agnostic; the container_engine variable (from
+# the container_engine role) determines how it is realized:
+#   podman -> Quadlet .container systemd units
+#   docker -> systemd units wrapping docker run
+#
+# workloads:
+#   - name:        (required) unique workload name, used for unit/container name
+#     image:       (required unless build is set) OCI image reference
+#     build:       (optional) dict with context + dockerfile keys
+#       context:   path on target to build context
+#       dockerfile: Dockerfile name within context (default Dockerfile)
+#     tag:         image tag when using build (default: latest)
+#     ports:       list of "host:container" or "host:container/proto" mappings
+#     volumes:     list of "host:container[:opts]" bind mounts
+#     env:         dict of environment variables
+#     env_file:    path to an env file on the target host
+#     labels:      dict of container labels
+#     command:     override CMD (string or list)
+#     entrypoint:  override ENTRYPOINT (string)
+#     user:        run as user (e.g. "1000:1000")
+#     network:     network mode (default bridge; host, none, or named network)
+#     cap_add:     list of Linux capabilities to add
+#     cap_drop:    list of Linux capabilities to drop
+#     tmpfs:       list of tmpfs mounts (e.g. ["/tmp", "/run"])
+#     devices:     list of device mappings (e.g. ["/dev/snd:/dev/snd"])
+#     restart:     restart policy: always | unless-stopped | on-failure | no
+#                  (default always)
+#     pull:        pull policy: always | missing | never (default missing)
+#     depends_on:  list of workload names that must start first (ordering only)
+#     healthcheck: dict with cmd, interval, timeout, retries keys
+#       cmd:       health check command string
+#       interval:  check interval (default 30s)
+#       timeout:   check timeout (default 10s)
+#       retries:   consecutive failures (default 3)
+#     engine_opts: dict of engine-specific overrides:
+#       memory:    memory limit (e.g. "2g")
+#       cpus:      CPU limit (e.g. 2)
+#       pid_limit: max PIDs
+#       read_only: mount root filesystem read-only (default false)
+#       security_opt: list of security options
+#     state:       present | absent (default present; absent removes the workload)
+#
+# Example:
+#   workloads:
+#     - name: nginx-proxy
+#       image: nginx:alpine
+#       ports: ["80:80", "443:443"]
+#       volumes:
+#         - /srv/nginx/conf.d:/etc/nginx/conf.d:ro
+#       env:
+#         TZ: Europe/Brussels
+#       restart: always
+#
+#     - name: postgres
+#       image: postgres:16
+#       ports: ["5432:5432"]
+#       volumes:
+#         - /srv/postgres/data:/var/lib/postgresql/data
+#       env:
+#         POSTGRES_PASSWORD: "{{ vault_pg_password }}"
+#       engine_opts:
+#         memory: 2g
+#         cpus: 2
+#
+#     - name: myapp
+#       build:
+#         context: /srv/myapp
+#         dockerfile: Dockerfile
+#       tag: latest
+#       ports: ["8080:8080"]
+#       depends_on: [postgres]
+workloads: []
+""",
+    'roles/workloads/handlers/main.yml': """\
+---
+- name: Reload systemd
+  systemd:
+    daemon_reload: true
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    'roles/workloads/tasks/main.yml': """\
+---
+- name: Validate container engine is set
+  assert:
+    that:
+      - container_engine | default('') in ['podman', 'docker']
+    fail_msg: "workloads role requires container_engine to be 'podman' or 'docker'"
+  when: workloads | default([]) | length > 0
+
+# -- Remove absent workloads --
+- name: Remove absent workloads
+  include_tasks: "remove_{{ container_engine }}.yml"
+  loop: "{{ workloads | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
+  loop_control:
+    loop_var: _wl
+
+# -- Deploy present workloads (in depends_on order) --
+- name: Deploy workloads
+  include_tasks: "{{ container_engine }}/instance.yml"
+  loop: "{{ workloads | default([]) | rejectattr('state', 'defined') | list + workloads | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present') | list }}"
+  loop_control:
+    loop_var: _wl
+""",
+    'roles/workloads/tasks/remove_podman.yml': """\
+---
+- name: "Stop and disable workload [{{ _wl.name }}]"
+  systemd:
+    name: "{{ _wl.name }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: "Remove Quadlet unit [{{ _wl.name }}]"
+  file:
+    path: "/etc/containers/systemd/{{ _wl.name }}.container"
+    state: absent
+  notify: Reload systemd
+
+- name: "Remove container [{{ _wl.name }}]"
+  command: "podman rm -f {{ _wl.name }}"
+  failed_when: false
+  changed_when: false
+""",
+    'roles/workloads/tasks/remove_docker.yml': """\
+---
+- name: "Stop and disable workload [{{ _wl.name }}]"
+  systemd:
+    name: "container-{{ _wl.name }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: "Remove systemd unit [{{ _wl.name }}]"
+  file:
+    path: "/etc/systemd/system/container-{{ _wl.name }}.service"
+    state: absent
+  notify: Reload systemd
+
+- name: "Remove container [{{ _wl.name }}]"
+  command: "docker rm -f {{ _wl.name }}"
+  failed_when: false
+  changed_when: false
+""",
+    'roles/workloads/tasks/podman/instance.yml': """\
+---
+# Deploy a workload as a Podman Quadlet .container systemd unit.
+- name: "Build image [{{ _wl.name }}]"
+  command: >
+    podman build
+    -t {{ _wl.name }}:{{ _wl.tag | default('latest') }}
+    -f {{ _wl.build.dockerfile | default('Dockerfile') }}
+    {{ _wl.build.context }}
+  when: _wl.build is defined
+  register: _wl_build
+  changed_when: "'COMMIT' in _wl_build.stdout"
+
+- name: "Pull image [{{ _wl.name }}]"
+  command: "podman pull {{ _wl.image }}"
+  when:
+    - _wl.image is defined
+    - _wl.build is not defined
+    - _wl.pull | default('missing') != 'never'
+  register: _wl_pull
+  changed_when: "'Copying' in _wl_pull.stdout | default('')"
+
+- name: "Deploy Quadlet unit [{{ _wl.name }}]"
+  template:
+    src: quadlet.container.j2
+    dest: "/etc/containers/systemd/{{ _wl.name }}.container"
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  register: _wl_quadlet
+  notify: Reload systemd
+
+- name: "Reload systemd for Quadlet [{{ _wl.name }}]"
+  systemd:
+    daemon_reload: true
+  when: _wl_quadlet is changed
+
+- name: "Enable and start workload [{{ _wl.name }}]"
+  systemd:
+    name: "{{ _wl.name }}"
+    enabled: true
+    state: "{{ 'restarted' if (_wl_quadlet is changed or _wl_build is changed or _wl_pull is changed) else 'started' }}"
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    'roles/workloads/tasks/docker/instance.yml': """\
+---
+# Deploy a workload as a Docker container with a systemd service unit.
+- name: "Build image [{{ _wl.name }}]"
+  command: >
+    docker build
+    -t {{ _wl.name }}:{{ _wl.tag | default('latest') }}
+    -f {{ _wl.build.dockerfile | default('Dockerfile') }}
+    {{ _wl.build.context }}
+  when: _wl.build is defined
+  register: _wl_build
+  changed_when: "'Successfully built' in _wl_build.stdout | default('')"
+
+- name: "Pull image [{{ _wl.name }}]"
+  command: "docker pull {{ _wl.image }}"
+  when:
+    - _wl.image is defined
+    - _wl.build is not defined
+    - _wl.pull | default('missing') != 'never'
+  register: _wl_pull
+  changed_when: "'Downloaded newer' in _wl_pull.stdout | default('') or 'Pulling from' in _wl_pull.stdout | default('')"
+
+- name: "Deploy systemd unit [{{ _wl.name }}]"
+  template:
+    src: docker.service.j2
+    dest: "/etc/systemd/system/container-{{ _wl.name }}.service"
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  register: _wl_unit
+  notify: Reload systemd
+
+- name: "Reload systemd for Docker unit [{{ _wl.name }}]"
+  systemd:
+    daemon_reload: true
+  when: _wl_unit is changed
+
+- name: "Enable and start workload [{{ _wl.name }}]"
+  systemd:
+    name: "container-{{ _wl.name }}"
+    enabled: true
+    state: "{{ 'restarted' if (_wl_unit is changed or _wl_build is changed or _wl_pull is changed) else 'started' }}"
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    'roles/workloads/templates/quadlet.container.j2': """\
+# {{ _wl.name }} - managed by Ansible (Podman Quadlet)
+[Unit]
+Description={{ _wl.name }} container
+{% for _dep in _wl.depends_on | default([]) %}
+After={{ _dep }}.service
+Requires={{ _dep }}.service
+{% endfor %}
+
+[Container]
+{% if _wl.build is defined %}
+Image=localhost/{{ _wl.name }}:{{ _wl.tag | default('latest') }}
+{% else %}
+Image={{ _wl.image }}
+{% endif %}
+ContainerName={{ _wl.name }}
+{% if _wl.user is defined %}
+User={{ _wl.user }}
+{% endif %}
+{% if _wl.entrypoint is defined %}
+Entrypoint={{ _wl.entrypoint }}
+{% endif %}
+{% if _wl.command is defined %}
+{% if _wl.command is string %}
+Exec={{ _wl.command }}
+{% else %}
+Exec={{ _wl.command | join(' ') }}
+{% endif %}
+{% endif %}
+{% for _p in _wl.ports | default([]) %}
+PublishPort={{ _p }}
+{% endfor %}
+{% for _v in _wl.volumes | default([]) %}
+Volume={{ _v }}
+{% endfor %}
+{% for _k, _val in (_wl.env | default({})).items() %}
+Environment={{ _k }}={{ _val }}
+{% endfor %}
+{% if _wl.env_file is defined %}
+EnvironmentFile={{ _wl.env_file }}
+{% endif %}
+{% for _k, _val in (_wl.labels | default({})).items() %}
+Label={{ _k }}={{ _val }}
+{% endfor %}
+{% if _wl.network is defined %}
+Network={{ _wl.network }}
+{% endif %}
+{% for _cap in _wl.cap_add | default([]) %}
+AddCapability={{ _cap }}
+{% endfor %}
+{% for _cap in _wl.cap_drop | default([]) %}
+DropCapability={{ _cap }}
+{% endfor %}
+{% for _t in _wl.tmpfs | default([]) %}
+Tmpfs={{ _t }}
+{% endfor %}
+{% for _d in _wl.devices | default([]) %}
+AddDevice={{ _d }}
+{% endfor %}
+{% if _wl.pull | default('missing') == 'always' %}
+Pull=always
+{% endif %}
+{% if _wl.healthcheck is defined %}
+HealthCmd={{ _wl.healthcheck.cmd }}
+{% if _wl.healthcheck.interval is defined %}
+HealthInterval={{ _wl.healthcheck.interval }}
+{% endif %}
+{% if _wl.healthcheck.timeout is defined %}
+HealthTimeout={{ _wl.healthcheck.timeout }}
+{% endif %}
+{% if _wl.healthcheck.retries is defined %}
+HealthRetries={{ _wl.healthcheck.retries }}
+{% endif %}
+{% endif %}
+{% if _wl.engine_opts is defined %}
+{% if _wl.engine_opts.memory is defined %}
+PodmanArgs=--memory {{ _wl.engine_opts.memory }}
+{% endif %}
+{% if _wl.engine_opts.cpus is defined %}
+PodmanArgs=--cpus {{ _wl.engine_opts.cpus }}
+{% endif %}
+{% if _wl.engine_opts.pid_limit is defined %}
+PodmanArgs=--pids-limit {{ _wl.engine_opts.pid_limit }}
+{% endif %}
+{% if _wl.engine_opts.read_only | default(false) | bool %}
+ReadOnly=true
+{% endif %}
+{% for _so in _wl.engine_opts.security_opt | default([]) %}
+SecurityLabelType={{ _so }}
+{% endfor %}
+{% endif %}
+
+[Service]
+Restart={{ _wl.restart | default('always') }}
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target
+""",
+    'roles/workloads/templates/docker.service.j2': """\
+# {{ _wl.name }} - managed by Ansible (Docker)
+[Unit]
+Description={{ _wl.name }} container
+Requires=docker.service
+After=docker.service
+{% for _dep in _wl.depends_on | default([]) %}
+After=container-{{ _dep }}.service
+Requires=container-{{ _dep }}.service
+{% endfor %}
+
+[Service]
+Type=simple
+Restart={{ _wl.restart | default('always') }}
+TimeoutStartSec=300
+ExecStartPre=-/usr/bin/docker rm -f {{ _wl.name }}
+ExecStart=/usr/bin/docker run \\
+    --name {{ _wl.name }} \\
+{% for _p in _wl.ports | default([]) %}
+    -p {{ _p }} \\
+{% endfor %}
+{% for _v in _wl.volumes | default([]) %}
+    -v {{ _v }} \\
+{% endfor %}
+{% for _k, _val in (_wl.env | default({})).items() %}
+    -e {{ _k }}={{ _val }} \\
+{% endfor %}
+{% if _wl.env_file is defined %}
+    --env-file {{ _wl.env_file }} \\
+{% endif %}
+{% for _k, _val in (_wl.labels | default({})).items() %}
+    -l {{ _k }}={{ _val }} \\
+{% endfor %}
+{% if _wl.network is defined %}
+    --network {{ _wl.network }} \\
+{% endif %}
+{% if _wl.user is defined %}
+    --user {{ _wl.user }} \\
+{% endif %}
+{% for _cap in _wl.cap_add | default([]) %}
+    --cap-add {{ _cap }} \\
+{% endfor %}
+{% for _cap in _wl.cap_drop | default([]) %}
+    --cap-drop {{ _cap }} \\
+{% endfor %}
+{% for _t in _wl.tmpfs | default([]) %}
+    --tmpfs {{ _t }} \\
+{% endfor %}
+{% for _d in _wl.devices | default([]) %}
+    --device {{ _d }} \\
+{% endfor %}
+{% if _wl.engine_opts is defined %}
+{% if _wl.engine_opts.memory is defined %}
+    --memory {{ _wl.engine_opts.memory }} \\
+{% endif %}
+{% if _wl.engine_opts.cpus is defined %}
+    --cpus {{ _wl.engine_opts.cpus }} \\
+{% endif %}
+{% if _wl.engine_opts.pid_limit is defined %}
+    --pids-limit {{ _wl.engine_opts.pid_limit }} \\
+{% endif %}
+{% if _wl.engine_opts.read_only | default(false) | bool %}
+    --read-only \\
+{% endif %}
+{% for _so in _wl.engine_opts.security_opt | default([]) %}
+    --security-opt {{ _so }} \\
+{% endfor %}
+{% endif %}
+{% if _wl.healthcheck is defined %}
+    --health-cmd '{{ _wl.healthcheck.cmd }}' \\
+{% if _wl.healthcheck.interval is defined %}
+    --health-interval {{ _wl.healthcheck.interval }} \\
+{% endif %}
+{% if _wl.healthcheck.timeout is defined %}
+    --health-timeout {{ _wl.healthcheck.timeout }} \\
+{% endif %}
+{% if _wl.healthcheck.retries is defined %}
+    --health-retries {{ _wl.healthcheck.retries }} \\
+{% endif %}
+{% endif %}
+{% if _wl.entrypoint is defined %}
+    --entrypoint {{ _wl.entrypoint }} \\
+{% endif %}
+{% if _wl.build is defined %}
+    {{ _wl.name }}:{{ _wl.tag | default('latest') }}{% if _wl.command is defined %} \\
+    {{ _wl.command if _wl.command is string else _wl.command | join(' ') }}{% endif %}
+
+{% else %}
+    {{ _wl.image }}{% if _wl.command is defined %} \\
+    {{ _wl.command if _wl.command is string else _wl.command | join(' ') }}{% endif %}
+
+{% endif %}
+ExecStop=/usr/bin/docker stop {{ _wl.name }}
+
+[Install]
+WantedBy=multi-user.target
+""",
     'roles/ssh_hardening/handlers/main.yml': """\
 ---
 - name: Restart SSH
@@ -6449,12 +7317,47 @@ PersistentKeepalive = {{ _peer.persistent_keepalive }}
       }}
     state: present
 
+- name: Assert admin_users entries are strings or named mappings
+  assert:
+    that:
+      - item is string or item is mapping
+      - item is string or (item.name is defined and item.name | string | length > 0)
+    fail_msg: "Each admin_users entry must be either a username string or a mapping with a non-empty name"
+  loop: "{{ admin_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name if item is mapping and item.name is defined else item }}"
+
+# Normalize admin_users: accept both plain strings and dicts.
+# _admin_users is a list of dicts with at least a 'name' key.
+# _admin_user_names is a flat list of usernames for templates.
+- name: Normalize admin_users
+  set_fact:
+    _admin_users: >-
+      {%- set normalized = [] -%}
+      {%- for item in admin_users | default([]) -%}
+      {%-   if item is string -%}
+      {%-     set _ = normalized.append({'name': item}) -%}
+      {%-   else -%}
+      {%-     set _ = normalized.append(item) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ normalized }}
+
+- name: Derive normalized admin user names
+  set_fact:
+    _admin_user_names: >-
+      {{ _admin_users | map(attribute='name') | list }}
+
 - name: Ensure admin users exist
   user:
-    name: "{{ item }}"
-    shell: /bin/bash
+    name: "{{ item.name }}"
+    shell: "{{ item.shell | default('/bin/bash') }}"
+    groups: "{{ item.groups | default(omit) }}"
+    append: "{{ item.groups is defined }}"
     state: present
-  loop: "{{ admin_users | list }}"
+  loop: "{{ _admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
 
 # On FreeBSD, sudo installed from ports uses /usr/local/etc/sudoers.d/.
 # On Linux distros, sudo ships with /etc/sudoers.d/.
@@ -6469,12 +7372,13 @@ PersistentKeepalive = {{ _peer.persistent_keepalive }}
 
 - name: Grant admin users passwordless sudo
   copy:
-    content: "{{ item }} ALL=(ALL) NOPASSWD:ALL
-"
-    dest: "{{ '/usr/local/etc/sudoers.d/' if ansible_facts.os_family == 'FreeBSD' else '/etc/sudoers.d/' }}{{ item }}"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
+    dest: "{{ '/usr/local/etc/sudoers.d/' if ansible_facts.os_family == 'FreeBSD' else '/etc/sudoers.d/' }}{{ item.name }}"
     mode: "0440"
     validate: "visudo -cf %s"
-  loop: "{{ admin_users | list }}"
+  loop: "{{ _admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
 
 - name: Deploy sshd_config
   template:
@@ -6488,11 +7392,13 @@ PersistentKeepalive = {{ _peer.persistent_keepalive }}
 
 - name: Set Unix password for admin users
   user:
-    name: "{{ item }}"
-    password: "{{ admin_dev_password_hash }}"
+    name: "{{ item.name }}"
+    password: "{{ item.password | default(admin_dev_password_hash) }}"
     update_password: always
-  loop: "{{ admin_users | list }}"
-  when: admin_dev_password_hash | default('') | length > 0
+  loop: "{{ _admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.password is defined or admin_dev_password_hash | default('') | length > 0
 
 - name: Set Unix password for root
   user:
@@ -6501,12 +7407,25 @@ PersistentKeepalive = {{ _peer.persistent_keepalive }}
     update_password: always
   when: admin_dev_password_hash | default('') | length > 0
 
-- name: Deploy admin SSH keys
+# Deploy the shared admin SSH key to all admin users.
+- name: Deploy shared admin SSH key
   ansible.posix.authorized_key:
-    user: "{{ item }}"
+    user: "{{ item.name }}"
     key: "{{ admin_ssh_public_key }}"
-  loop: "{{ admin_users | list }}"
-  when: admin_ssh_public_key | length > 0
+  loop: "{{ _admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: admin_ssh_public_key | default('') | length > 0
+
+# Deploy per-user SSH keys (rich format only).
+- name: Deploy per-user admin SSH keys
+  ansible.posix.authorized_key:
+    user: "{{ item.0.name }}"
+    key: "{{ item.1 }}"
+    state: present
+  loop: "{{ _admin_users | selectattr('ssh_keys', 'defined') | subelements('ssh_keys') }}"
+  loop_control:
+    label: "{{ item.0.name }}"
 """,
     'roles/ssh_hardening/templates/sshd_config.j2': """\
 Port {{ ssh_port }}
@@ -6516,11 +7435,113 @@ PasswordAuthentication {{ 'yes' if deployment_environment | default('production'
 PubkeyAuthentication yes
 PermitRootLogin {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' }}
 UsePAM yes
-AllowUsers root {{ admin_users | join(" ") }}
+AllowUsers root {{ _admin_user_names | default(admin_users) | join(" ") }}
 Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family == 'RedHat' else '/usr/libexec/sftp-server' if ansible_facts.os_family == 'FreeBSD' else '/usr/lib/openssh/sftp-server' if ansible_facts.os_family == 'Debian' else '/usr/lib/ssh/sftp-server' }}
+""",
+    'roles/users/defaults/main.yml': """\
+---
+# User accounts to manage on this host.
+#
+# user_accounts:
+#   - name:       (required) username
+#     state:      present | absent  (default: present)
+#     uid:        (optional) numeric UID
+#     group:      (optional) primary group name (created if missing)
+#     groups:     (optional) list of supplementary groups
+#     shell:      login shell (default: /bin/bash)
+#     home:       home directory (default: /home/<name>)
+#     create_home: create home dir (default: true)
+#     system:     create a system account (default: false)
+#     comment:    GECOS comment field
+#     password:   hashed password (use vault + password_hash filter)
+#     ssh_keys:   list of public SSH key strings to authorize
+#     sudo:       grant passwordless sudo (default: false)
+#
+# Example:
+#   user_accounts:
+#     - name: deploy
+#       groups: [docker, sudo]
+#       ssh_keys:
+#         - ssh-ed25519 AAAA... deploy@laptop
+#       sudo: true
+#     - name: appuser
+#       uid: 2000
+#       system: true
+#       shell: /usr/sbin/nologin
+#       create_home: false
+#     - name: olduser
+#       state: absent
+user_accounts: []
 """,
     'roles/users/tasks/main.yml': """\
 ---
+# -- Managed user accounts -------------------------------------------------
+- name: Ensure user groups exist
+  group:
+    name: "{{ item.group | default(item.name) }}"
+    gid: "{{ item.gid | default(omit) }}"
+    state: present
+  loop: "{{ user_accounts | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.state | default('present') == 'present'
+    - item.group is defined or item.gid is defined
+
+- name: Manage user accounts
+  user:
+    name: "{{ item.name }}"
+    state: "{{ item.state | default('present') }}"
+    uid: "{{ item.uid | default(omit) }}"
+    group: "{{ item.group | default(item.name if item.gid is defined else omit) }}"
+    groups: "{{ item.groups | default(omit) }}"
+    append: true
+    shell: "{{ item.shell | default('/bin/bash') }}"
+    home: "{{ item.home | default(omit) }}"
+    create_home: "{{ item.create_home | default(true) | bool }}"
+    system: "{{ item.system | default(false) | bool }}"
+    comment: "{{ item.comment | default(omit) }}"
+    password: "{{ item.password | default(omit) }}"
+    remove: "{{ true if item.state | default('present') == 'absent' else false }}"
+  loop: "{{ user_accounts | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Deploy authorized SSH keys
+  ansible.posix.authorized_key:
+    user: "{{ item.0.name }}"
+    key: "{{ item.1 }}"
+    state: present
+  loop: "{{ user_accounts | default([]) | selectattr('ssh_keys', 'defined') | subelements('ssh_keys') }}"
+  loop_control:
+    label: "{{ item.0.name }}"
+  when: item.0.state | default('present') == 'present'
+
+- name: Configure passwordless sudo
+  copy:
+    dest: "/etc/sudoers.d/{{ item.name }}"
+    mode: "0440"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD: ALL\n"
+    validate: "visudo -cf %s"
+  loop: "{{ user_accounts | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.state | default('present') == 'present'
+    - item.sudo | default(false) | bool
+
+- name: Remove sudo config for absent users
+  file:
+    path: "/etc/sudoers.d/{{ item.name }}"
+    state: absent
+  loop: "{{ user_accounts | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: >
+    item.state | default('present') == 'absent'
+    or not (item.sudo | default(false) | bool)
+
+# -- Service owner accounts (from services dict) ---------------------------
 # Only create users and web roots for services that declare an 'owner'.
 # Docker-managed services (prometheus, grafana, nextcloud) have no owner key.
 - name: Ensure service owners exist
@@ -6608,6 +7629,8 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
       tags: [common, always]
     - role: ssh_hardening
       tags: [ssh_hardening, ssh]
+    - role: users
+      tags: [users]
     - role: geoip
       tags: [geoip]
       when: >
@@ -6648,13 +7671,6 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
     - role: nginx
       tags: [nginx, web]
       when: nginx_enabled | default(false) | bool
-    - role: users
-      tags: [users]
-    # users intentionally precedes nextcloud here even though
-    # roles/nextcloud/meta/main.yml already declares the dependency.
-    # The meta entry is the safety net for standalone invocations;
-    # the ordering here keeps the playbook readable without relying
-    # on implicit dependency resolution.
     - role: nextcloud
       tags: [nextcloud]
       when:
@@ -6704,10 +7720,19 @@ Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family 
       tags: [samba]
       when: samba.enabled | default(false) | bool
     - role: nfs
-      tags: [nfs]
+      tags: [nfs, mounts]
       when: >
         nfs.server.enabled | default(false) | bool
         or nfs.client.enabled | default(false) | bool
+        or 'nfs' in (_required_providers | default([]))
+        or mounts | default([]) | length > 0
+        or 'nfs' in (_required_providers | default([]))
+    - role: container_engine
+      tags: [container_engine, containers]
+      when: workloads | default([]) | length > 0
+    - role: workloads
+      tags: [workloads, containers]
+      when: workloads | default([]) | length > 0
     # file_copy runs on every host but is a no-op when file_copy_items is empty.
     - role: file_copy
       tags: [file_copy, files]
@@ -7374,6 +8399,23 @@ bootstrap_repo_uri: ""
   set_fact:
     _bootstrap_key: "{{ _bootstrap_key_raw.content | b64decode | trim }}"
 
+- name: Normalize bootstrap admin_users
+  set_fact:
+    _bootstrap_admin_users: >-
+      {%- set normalized = [] -%}
+      {%- for item in admin_users | default(['myadmin']) -%}
+      {%-   if item is string -%}
+      {%-     set _ = normalized.append({'name': item}) -%}
+      {%-   else -%}
+      {%-     set _ = normalized.append(item) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ normalized }}
+
+- name: Derive normalized bootstrap admin user names
+  set_fact:
+    _bootstrap_admin_user_names: "{{ _bootstrap_admin_users | map(attribute='name') | list }}"
+
 # Collect the variables the template needs into a single dict so the
 # template stays readable.
 - name: Build bootstrap variable set
@@ -7382,7 +8424,8 @@ bootstrap_repo_uri: ""
       hostname: "{{ set_hostname | default(inventory_hostname) }}"
       domain: "{{ set_domain_name | default('') }}"
       ssh_port: "{{ ssh_port | default(22) }}"
-      admin_users: "{{ admin_users | default(['myadmin']) }}"
+      admin_users: "{{ _bootstrap_admin_users }}"
+      admin_user_names: "{{ _bootstrap_admin_user_names }}"
       admin_ssh_public_key: "{{ admin_ssh_public_key | default('') }}"
       admin_dev_password_hash: "{{ admin_dev_password_hash | default('') }}"
       repo_uri: "{{ bootstrap_repo_uri_override | default(bootstrap_repo_uri) | default('') }}"
@@ -7576,7 +8619,7 @@ BOOTSTRAP_VARS_B64='{{ _bs_vars_b64 }}'
 HOSTNAME='{{ _bs.hostname }}'
 DOMAIN='{{ _bs.domain }}'
 SSH_PORT='{{ _bs.ssh_port }}'
-ADMIN_USERS=({{ _bs.admin_users | join(' ') }})
+ADMIN_USERS=({{ _bs.admin_user_names | join(' ') }})
 REPO_URI="${URI_OVERRIDE:-{{ _bs.repo_uri }}}"
 
 {% if _encrypted_mode %}
@@ -7699,10 +8742,13 @@ fi
 # 3. Create admin users with sudo
 # -------------------------------------------------------------------------
 echo "==> Creating admin users..."
-for USER in "${ADMIN_USERS[@]}"; do
+{% for _admin in _bs.admin_users %}
+USER={{ _admin.name | quote }}
+USER_SHELL={{ _admin.shell | default('/bin/bash') | quote }}
+USER_PASSWORD_HASH={{ _admin.password | default(_bs.admin_dev_password_hash) | default('') | quote }}
     if ! id "$USER" >/dev/null 2>&1; then
-        useradd -m -s /bin/bash "$USER" 2>/dev/null || \
-            pw useradd "$USER" -m -s /bin/bash 2>/dev/null || true
+        useradd -m -s "$USER_SHELL" "$USER" 2>/dev/null || \
+            pw useradd "$USER" -m -s "$USER_SHELL" 2>/dev/null || true
     fi
 
     # Passwordless sudo
@@ -7717,25 +8763,31 @@ for USER in "${ADMIN_USERS[@]}"; do
     chmod 0440 "${SUDOERS_DIR}/${USER}"
 
     # SSH authorized_keys
-    if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
+    if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]{% if _admin.ssh_keys | default([]) | length > 0 %} || true{% endif %}; then
         SSH_DIR="$(eval echo ~"$USER")/.ssh"
         mkdir -p "$SSH_DIR"
-        echo "$ADMIN_SSH_PUBLIC_KEY" > "${SSH_DIR}/authorized_keys"
+        : > "${SSH_DIR}/authorized_keys"
+        if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
+            printf '%s\n' "$ADMIN_SSH_PUBLIC_KEY" >> "${SSH_DIR}/authorized_keys"
+        fi
+{% for _key in _admin.ssh_keys | default([]) %}
+        printf '%s\n' {{ _key | quote }} >> "${SSH_DIR}/authorized_keys"
+{% endfor %}
         chmod 0700 "$SSH_DIR"
         chmod 0600 "${SSH_DIR}/authorized_keys"
         chown -R "$USER" "$SSH_DIR"
     fi
 
     # Console password (optional)
-    if [ -n "$ADMIN_DEV_PASSWORD_HASH" ]; then
+    if [ -n "$USER_PASSWORD_HASH" ]; then
         case "$PLATFORM" in
             FreeBSD)
-                echo "${ADMIN_DEV_PASSWORD_HASH}" | pw usermod "$USER" -H 0 ;;
+                echo "${USER_PASSWORD_HASH}" | pw usermod "$USER" -H 0 ;;
             *)
-                usermod -p "$ADMIN_DEV_PASSWORD_HASH" "$USER" ;;
+                usermod -p "$USER_PASSWORD_HASH" "$USER" ;;
         esac
     fi
-done
+{% endfor %}
 
 # Deploy SSH key and console password for root as well.
 if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
@@ -7771,7 +8823,7 @@ sed -i.bak "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSHD_CO
 sed -i.bak "s/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/" "$SSHD_CONFIG"
 
 # AllowUsers
-ALLOW_LINE="AllowUsers root ${ADMIN_USERS[*]}"
+ALLOW_LINE="AllowUsers root {{ _bs.admin_user_names | join(' ') }}"
 if grep -q "^AllowUsers " "$SSHD_CONFIG"; then
     sed -i.bak "s/^AllowUsers .*/${ALLOW_LINE}/" "$SSHD_CONFIG"
 else

@@ -20,6 +20,7 @@ CAPS = {
     "firewall":        {"provider": "nftables"},
     "geoip":           {"provider": "maxmind_nftables"},
     "mail":            {"provider": "mailserver"},
+    "id_mapping":      {"provider": "nfs"},
 }
 
 
@@ -59,6 +60,10 @@ class TestResolveProviders(unittest.TestCase):
     def test_dns_requires_resolves_to_bind(self):
         services = {"app": {"enabled": True, "requires": ["dns"]}}
         self.assertIn("bind", resolve_providers(CAPS, services))
+
+    def test_id_mapping_requires_resolves_to_nfs(self):
+        services = {"app": {"enabled": True, "requires": ["id_mapping"]}}
+        self.assertIn("nfs", resolve_providers(CAPS, services))
 
     # ------------------------------------------------------------------
     # Multiple services and deduplication

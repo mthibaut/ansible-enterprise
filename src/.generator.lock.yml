@@ -1,5 +1,5 @@
-source_hash: 0f8d53b4bc7ee96e7b02d416812fcd45859eef6724228a0ef88d29992d66f1b2
-output_hash: 33fac2005a2a596f7f03266a667773e64549d0d8280ba8ffdbb98284bb544132
+source_hash: 71abd0b9dffc828a6994caf490279eda36d6d36ef5527eb8b1c28fb0e30c976b
+output_hash: 4bd95da90dca4fa21993c86a421d93f30fabd91d2663458fa753fabba14f6beb
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -28,6 +28,10 @@ generated_files:
   - roles/certbot/templates/renew-deploy-hook.sh.j2
   - roles/common/defaults/main.yml
   - roles/common/tasks/main.yml
+  - roles/container_engine/defaults/main.yml
+  - roles/container_engine/tasks/docker.yml
+  - roles/container_engine/tasks/main.yml
+  - roles/container_engine/tasks/podman.yml
   - roles/dns/defaults/main.yml
   - roles/dns/files/dns-bump-serial
   - roles/dns/files/normalize_zone_soa.py
@@ -108,12 +112,22 @@ generated_files:
   - roles/step_ca/defaults/main.yml
   - roles/step_ca/handlers/main.yml
   - roles/step_ca/tasks/main.yml
+  - roles/users/defaults/main.yml
   - roles/users/tasks/main.yml
   - roles/wireguard/defaults/main.yml
   - roles/wireguard/handlers/main.yml
   - roles/wireguard/tasks/instance.yml
   - roles/wireguard/tasks/main.yml
   - roles/wireguard/templates/wg.conf.j2
+  - roles/workloads/defaults/main.yml
+  - roles/workloads/handlers/main.yml
+  - roles/workloads/tasks/docker/instance.yml
+  - roles/workloads/tasks/main.yml
+  - roles/workloads/tasks/podman/instance.yml
+  - roles/workloads/tasks/remove_docker.yml
+  - roles/workloads/tasks/remove_podman.yml
+  - roles/workloads/templates/docker.service.j2
+  - roles/workloads/templates/quadlet.container.j2
   - site.yml
   - templates/bind/.gitkeep
   - templates/dovecot/.gitkeep
