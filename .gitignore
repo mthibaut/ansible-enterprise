@@ -21,3 +21,6 @@ src/.regen-staging-verify
 
 # Claude Code local config
 .claude/
+
+# Bot handoff
+HANDOFF.md

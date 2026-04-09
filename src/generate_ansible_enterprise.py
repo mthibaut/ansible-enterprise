@@ -633,12 +633,17 @@ capabilities:
   geoip: {provider: maxmind_nftables}
   mail: {provider: mailserver}
   id_mapping: {provider: nfs}
+  hypervisor: {provider: proxmox}
+  router: {provider: pfsense}
 """,
     'roles/ssh_hardening/defaults/main.yml': """\
 ---
 # TCP port sshd listens on. Must match ssh_port in common/defaults.
 # Override in inventory host_vars; the firewall rule uses the same variable.
 ssh_port: 22
+# Set to false to skip sudo installation and sudoers configuration.
+# Useful for hosts where sudo is not wanted (e.g. appliances).
+sudo_enabled: true
 """,
     'roles/geoip/defaults/main.yml': """\
 ---
@@ -7296,6 +7301,607 @@ ExecStop=/usr/bin/docker stop {{ _wl.name }}
 [Install]
 WantedBy=multi-user.target
 """,
+    # ------------------------------------------------------------------ #
+    #  Proxmox VE role -- hypervisor host configuration (Debian only)      #
+    # ------------------------------------------------------------------ #
+    'roles/proxmox/defaults/main.yml': """\
+---
+# Proxmox VE host configuration.
+# Debian-only -- Proxmox VE runs on Debian.
+proxmox:
+  enabled: false
+  # Repository type: enterprise (requires subscription) or no_subscription (free).
+  repo: no_subscription
+  # Remove the "no valid subscription" nag dialog from the web UI.
+  remove_nag: true
+  # Extra packages to install on the Proxmox host.
+  extra_packages: []
+  # vzdump backup configuration.
+  backup:
+    enabled: false
+    # Storage target for backups (e.g. local, nfs-backup).
+    storage: local
+    # Backup schedule (systemd calendar format).
+    schedule: "0 2 * * *"
+    # Backup mode: snapshot, suspend, or stop.
+    mode: snapshot
+    # Compression: zstd, lzo, gzip, or none.
+    compress: zstd
+    # Max backups to keep per VM/CT (0 = unlimited).
+    maxfiles: 3
+    # Mailto for backup notifications.
+    mailto: ""
+    # VMs/CTs to include (empty = all). Supports ranges: [100, "200-205"].
+    vmids: []
+    # VMs/CTs to exclude. Supports ranges: [9000, "100-105"].
+    exclude_vmids: []
+  # SMTP relay for Proxmox email alerts (postfix relayhost).
+  smtp:
+    enabled: false
+    relayhost: ""
+    port: 587
+    user: ""
+    # Password from vault: proxmox_smtp_password
+    from: ""
+  # Cluster join configuration (optional).
+  # Leave empty for standalone nodes.
+  cluster:
+    name: ""
+  # PCI passthrough / IOMMU.
+  iommu:
+    enabled: false
+    # intel or amd -- determines kernel parameter.
+    cpu_vendor: intel
+""",
+    'roles/proxmox/handlers/main.yml': """\
+---
+- name: Update apt cache
+  apt:
+    update_cache: true
+
+- name: Restart pveproxy
+  systemd:
+    name: pveproxy
+    state: restarted
+    daemon_reload: true
+
+- name: Restart postfix
+  systemd:
+    name: postfix
+    state: restarted
+    daemon_reload: true
+
+- name: Update GRUB
+  command: update-grub
+  changed_when: false
+""",
+    'roles/proxmox/tasks/main.yml': """\
+---
+- name: Assert Proxmox runs on Debian
+  assert:
+    that: ansible_facts.os_family == 'Debian'
+    fail_msg: "The proxmox role only supports Debian-based Proxmox VE hosts"
+
+# -- Repository configuration -----------------------------------------------
+- name: Configure Proxmox no-subscription repository
+  apt_repository:
+    repo: "deb http://download.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-no-subscription"
+    filename: pve-no-subscription
+    state: present
+  when: proxmox.repo | default('no_subscription') == 'no_subscription'
+  notify: Update apt cache
+
+- name: Disable Proxmox enterprise repository
+  apt_repository:
+    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
+    filename: pve-enterprise
+    state: absent
+  when: proxmox.repo | default('no_subscription') == 'no_subscription'
+  notify: Update apt cache
+
+- name: Enable Proxmox enterprise repository
+  apt_repository:
+    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
+    filename: pve-enterprise
+    state: present
+  when: proxmox.repo | default('no_subscription') == 'enterprise'
+  notify: Update apt cache
+
+# -- Web UI subscription nag removal ----------------------------------------
+- name: Remove subscription nag from web UI
+  shell: |
+    sed -i.bak "s/Ext.Msg.show({/void({/g" \\
+      /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+  args:
+    creates: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js.bak
+  when: proxmox.remove_nag | default(true) | bool
+  notify: Restart pveproxy
+
+# -- Extra packages ----------------------------------------------------------
+- name: Install extra Proxmox packages
+  apt:
+    name: "{{ proxmox.extra_packages | default([]) }}"
+    state: present
+  when: proxmox.extra_packages | default([]) | length > 0
+
+# -- vzdump backup configuration --------------------------------------------
+- name: Deploy vzdump backup configuration
+  template:
+    src: vzdump.conf.j2
+    dest: /etc/vzdump.conf
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when: proxmox.backup.enabled | default(false) | bool
+
+- name: Expand VMID ranges for backup
+  set_fact:
+    _proxmox_vmids: >-
+      {%- set _ids = [] -%}
+      {%- for _v in proxmox.backup.vmids | default([]) -%}
+      {%-   if _v | string | regex_search('^\\d+-\\d+$') -%}
+      {%-     set _parts = _v | string | split('-') -%}
+      {%-     for _i in range(_parts[0] | int, _parts[1] | int + 1) -%}
+      {%-       set _ = _ids.append(_i) -%}
+      {%-     endfor -%}
+      {%-   else -%}
+      {%-     set _ = _ids.append(_v | int) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ _ids | sort }}
+    _proxmox_exclude_vmids: >-
+      {%- set _ids = [] -%}
+      {%- for _v in proxmox.backup.exclude_vmids | default([]) -%}
+      {%-   if _v | string | regex_search('^\\d+-\\d+$') -%}
+      {%-     set _parts = _v | string | split('-') -%}
+      {%-     for _i in range(_parts[0] | int, _parts[1] | int + 1) -%}
+      {%-       set _ = _ids.append(_i) -%}
+      {%-     endfor -%}
+      {%-   else -%}
+      {%-     set _ = _ids.append(_v | int) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ _ids | sort }}
+  when: proxmox.backup.enabled | default(false) | bool
+
+- name: Build vzdump command
+  set_fact:
+    _vzdump_cmd: >-
+      {%- set _parts = ['/usr/bin/vzdump'] -%}
+      {%- if _proxmox_vmids | default([]) | length == 0 -%}
+      {%-   set _ = _parts.append('--all') -%}
+      {%- else -%}
+      {%-   for _id in _proxmox_vmids -%}
+      {%-     set _ = _parts.append(_id | string) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- set _ = _parts.append('--mode ' + proxmox.backup.mode | default('snapshot')) -%}
+      {%- set _ = _parts.append('--compress ' + proxmox.backup.compress | default('zstd')) -%}
+      {%- set _ = _parts.append('--storage ' + proxmox.backup.storage | default('local')) -%}
+      {%- set _ = _parts.append('--maxfiles ' + (proxmox.backup.maxfiles | default(3) | string)) -%}
+      {%- if _proxmox_exclude_vmids | default([]) | length > 0 -%}
+      {%-   set _ = _parts.append('--exclude ' + _proxmox_exclude_vmids | join(',')) -%}
+      {%- endif -%}
+      {%- if proxmox.backup.mailto | default('') | length > 0 -%}
+      {%-   set _ = _parts.append('--mailto ' + proxmox.backup.mailto) -%}
+      {%- endif -%}
+      {%- set _ = _parts.append('--quiet 1') -%}
+      {{ _parts | join(' ') }}
+  when: proxmox.backup.enabled | default(false) | bool
+
+- name: Configure vzdump backup schedule
+  cron:
+    name: "vzdump-backup"
+    job: "{{ _vzdump_cmd }}"
+    minute: "0"
+    hour: "2"
+    state: "{{ 'present' if proxmox.backup.enabled | default(false) | bool else 'absent' }}"
+
+# -- SMTP relay for alerts ---------------------------------------------------
+- name: Configure postfix relayhost
+  lineinfile:
+    path: /etc/postfix/main.cf
+    regexp: '^relayhost\\s*='
+    line: "relayhost = [{{ proxmox.smtp.relayhost }}]:{{ proxmox.smtp.port | default(587) }}"
+  when: proxmox.smtp.enabled | default(false) | bool
+  notify: Restart postfix
+
+- name: Configure postfix SASL authentication
+  copy:
+    content: |
+      [{{ proxmox.smtp.relayhost }}]:{{ proxmox.smtp.port | default(587) }} {{ proxmox.smtp.user }}:{{ proxmox_smtp_password | default('') }}
+    dest: /etc/postfix/sasl_passwd
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0600"
+  when:
+    - proxmox.smtp.enabled | default(false) | bool
+    - proxmox.smtp.user | default('') | length > 0
+  no_log: true
+  notify: Restart postfix
+
+- name: Hash postfix SASL password map
+  command: postmap /etc/postfix/sasl_passwd
+  when:
+    - proxmox.smtp.enabled | default(false) | bool
+    - proxmox.smtp.user | default('') | length > 0
+  changed_when: false
+  notify: Restart postfix
+
+- name: Enable postfix SASL in main.cf
+  blockinfile:
+    path: /etc/postfix/main.cf
+    marker: "# {mark} ANSIBLE MANAGED - SASL AUTH"
+    block: |
+      smtp_use_tls = yes
+      smtp_sasl_auth_enable = yes
+      smtp_sasl_security_options = noanonymous
+      smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+      smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+  when:
+    - proxmox.smtp.enabled | default(false) | bool
+    - proxmox.smtp.user | default('') | length > 0
+  notify: Restart postfix
+
+# -- IOMMU / PCI passthrough ------------------------------------------------
+- name: Enable IOMMU in GRUB
+  lineinfile:
+    path: /etc/default/grub
+    regexp: "^GRUB_CMDLINE_LINUX_DEFAULT="
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet {{ "intel_iommu=on" if proxmox.iommu.cpu_vendor | default("intel") == "intel" else "amd_iommu=on" }} iommu=pt"'
+  when: proxmox.iommu.enabled | default(false) | bool
+  notify: Update GRUB
+
+- name: Load vfio modules
+  copy:
+    content: |
+      vfio
+      vfio_iommu_type1
+      vfio_pci
+      vfio_virqfd
+    dest: /etc/modules-load.d/vfio.conf
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when: proxmox.iommu.enabled | default(false) | bool
+""",
+    'roles/proxmox/templates/vzdump.conf.j2': """\
+# vzdump.conf - managed by Ansible
+storage: {{ proxmox.backup.storage | default('local') }}
+mode: {{ proxmox.backup.mode | default('snapshot') }}
+compress: {{ proxmox.backup.compress | default('zstd') }}
+maxfiles: {{ proxmox.backup.maxfiles | default(3) }}
+{% if proxmox.backup.mailto | default('') | length > 0 %}
+mailto: {{ proxmox.backup.mailto }}
+{% endif %}
+""",
+    # ------------------------------------------------------------------ #
+    #  pfSense role -- firewall/router configuration (FreeBSD/pfSense)     #
+    # ------------------------------------------------------------------ #
+    'roles/pfsense/defaults/main.yml': """\
+---
+# pfSense firewall/router configuration.
+# Runs on pfSense hosts (FreeBSD-based).
+# Manages configuration via pfSense's config.xml and PHP shell.
+pfsense:
+  enabled: false
+  # Config backup before making changes.
+  backup_config: true
+  backup_dir: /cf/conf/backup
+  # DNS resolver (Unbound) host overrides.
+  # Each entry creates a local DNS record in Unbound.
+  # Example:
+  #   dns_overrides:
+  #     - host: nas
+  #       domain: home.lan
+  #       ip: 192.168.1.10
+  #       description: Synology NAS
+  #     - host: proxmox
+  #       domain: home.lan
+  #       ip: 192.168.1.20
+  #       description: Proxmox VE host
+  dns_overrides: []
+  # DHCP static mappings per interface.
+  # Example:
+  #   dhcp_static_maps:
+  #     lan:
+  #       - mac: "aa:bb:cc:dd:ee:ff"
+  #         ip: 192.168.1.100
+  #         hostname: workstation
+  #         description: Office desktop
+  dhcp_static_maps: {}
+  # Firewall aliases.
+  # Example:
+  #   aliases:
+  #     - name: trusted_hosts
+  #       type: host
+  #       address: ["192.168.1.0/24", "10.0.0.0/8"]
+  #       description: Trusted networks
+  #     - name: web_ports
+  #       type: port
+  #       address: ["80", "443"]
+  #       description: HTTP and HTTPS ports
+  aliases: []
+  # pfSense packages to install via pkg.
+  packages: []
+  # System tunables (sysctl).
+  # Example:
+  #   tunables:
+  #     - name: net.inet.ip.forwarding
+  #       value: "1"
+  tunables: []
+""",
+    'roles/pfsense/handlers/main.yml': """\
+---
+- name: Reload Unbound
+  command: pfSsh.php playback svc restart dns
+  changed_when: false
+
+- name: Reload DHCP
+  command: pfSsh.php playback svc restart dhcpd
+  changed_when: false
+
+- name: Reload firewall
+  command: pfSsh.php playback svc restart pf
+  changed_when: false
+
+- name: Reload sysctl
+  command: /etc/rc.d/sysctl reload
+  changed_when: false
+""",
+    'roles/pfsense/tasks/main.yml': """\
+---
+- name: Assert running on pfSense (FreeBSD)
+  assert:
+    that: ansible_facts.os_family == 'FreeBSD'
+    fail_msg: "The pfsense role only supports pfSense (FreeBSD-based) hosts"
+
+# -- Config backup -----------------------------------------------------------
+- name: Ensure backup directory exists
+  file:
+    path: "{{ pfsense.backup_dir | default('/cf/conf/backup') }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: "0700"
+  when: pfsense.backup_config | default(true) | bool
+
+- name: Backup config.xml
+  copy:
+    src: /cf/conf/config.xml
+    dest: "{{ pfsense.backup_dir | default('/cf/conf/backup') }}/config-{{ ansible_date_time.iso8601_basic_short }}.xml"
+    remote_src: true
+    owner: root
+    group: wheel
+    mode: "0600"
+  when: pfsense.backup_config | default(true) | bool
+
+# -- DNS resolver host overrides --------------------------------------------
+- name: Deploy DNS host override script
+  template:
+    src: dns_overrides.php.j2
+    dest: /tmp/ansible_dns_overrides.php
+    owner: root
+    group: wheel
+    mode: "0700"
+  when: pfsense.dns_overrides | default([]) | length > 0
+  register: _dns_script
+
+- name: Apply DNS host overrides
+  command: /usr/local/bin/php /tmp/ansible_dns_overrides.php
+  when:
+    - pfsense.dns_overrides | default([]) | length > 0
+    - _dns_script is changed
+  notify: Reload Unbound
+
+- name: Clean up DNS override script
+  file:
+    path: /tmp/ansible_dns_overrides.php
+    state: absent
+
+# -- DHCP static mappings ---------------------------------------------------
+- name: Deploy DHCP static map script
+  template:
+    src: dhcp_static_maps.php.j2
+    dest: /tmp/ansible_dhcp_maps.php
+    owner: root
+    group: wheel
+    mode: "0700"
+  when: pfsense.dhcp_static_maps | default({}) | length > 0
+  register: _dhcp_script
+
+- name: Apply DHCP static mappings
+  command: /usr/local/bin/php /tmp/ansible_dhcp_maps.php
+  when:
+    - pfsense.dhcp_static_maps | default({}) | length > 0
+    - _dhcp_script is changed
+  notify: Reload DHCP
+
+- name: Clean up DHCP static map script
+  file:
+    path: /tmp/ansible_dhcp_maps.php
+    state: absent
+
+# -- Firewall aliases -------------------------------------------------------
+- name: Deploy firewall alias script
+  template:
+    src: aliases.php.j2
+    dest: /tmp/ansible_aliases.php
+    owner: root
+    group: wheel
+    mode: "0700"
+  when: pfsense.aliases | default([]) | length > 0
+  register: _alias_script
+
+- name: Apply firewall aliases
+  command: /usr/local/bin/php /tmp/ansible_aliases.php
+  when:
+    - pfsense.aliases | default([]) | length > 0
+    - _alias_script is changed
+  notify: Reload firewall
+
+- name: Clean up alias script
+  file:
+    path: /tmp/ansible_aliases.php
+    state: absent
+
+# -- pfSense packages -------------------------------------------------------
+- name: Install pfSense packages
+  command: pkg install -y {{ item }}
+  loop: "{{ pfsense.packages | default([]) }}"
+  register: _pkg_install
+  changed_when: "'already installed' not in _pkg_install.stdout"
+
+# -- System tunables ---------------------------------------------------------
+- name: Set system tunables
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop: "{{ pfsense.tunables | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+""",
+    'roles/pfsense/templates/dns_overrides.php.j2': """\
+<?php
+// DNS host overrides - managed by Ansible
+require_once("config.inc");
+require_once("util.inc");
+require_once("services.inc");
+
+$config = parse_config(true);
+
+if (!is_array($config['unbound'])) {
+    $config['unbound'] = array();
+}
+if (!is_array($config['unbound']['hosts'])) {
+    $config['unbound']['hosts'] = array();
+}
+
+// Build desired state from Ansible variables.
+$desired = array();
+{% for entry in pfsense.dns_overrides | default([]) %}
+$desired[] = array(
+    'host' => '{{ entry.host }}',
+    'domain' => '{{ entry.domain }}',
+    'ip' => '{{ entry.ip }}',
+    'descr' => '{{ entry.description | default('') }}'
+);
+{% endfor %}
+
+// Replace all Ansible-managed entries (matched by host+domain).
+$existing = array();
+foreach ($config['unbound']['hosts'] as $h) {
+    $dominated = false;
+    foreach ($desired as $d) {
+        if ($h['host'] == $d['host'] && $h['domain'] == $d['domain']) {
+            $dominated = true;
+            break;
+        }
+    }
+    if (!$dominated) {
+        $existing[] = $h;
+    }
+}
+
+$config['unbound']['hosts'] = array_merge($existing, $desired);
+write_config("Ansible: update DNS host overrides");
+?>
+""",
+    'roles/pfsense/templates/dhcp_static_maps.php.j2': """\
+<?php
+// DHCP static mappings - managed by Ansible
+require_once("config.inc");
+require_once("util.inc");
+require_once("services.inc");
+
+$config = parse_config(true);
+
+{% for _iface in (pfsense.dhcp_static_maps | default({})).keys() | list %}
+{% set _maps = pfsense.dhcp_static_maps[_iface] %}
+// Interface: {{ _iface }}
+if (!is_array($config['dhcpd']['{{ _iface }}'])) {
+    $config['dhcpd']['{{ _iface }}'] = array();
+}
+if (!is_array($config['dhcpd']['{{ _iface }}']['staticmap'])) {
+    $config['dhcpd']['{{ _iface }}']['staticmap'] = array();
+}
+
+$desired_{{ _iface }} = array();
+{% for _m in _maps %}
+$desired_{{ _iface }}[] = array(
+    'mac' => '{{ _m.mac }}',
+    'ipaddr' => '{{ _m.ip }}',
+    'hostname' => '{{ _m.hostname | default('') }}',
+    'descr' => '{{ _m.description | default('') }}'
+);
+{% endfor %}
+
+// Replace entries matched by MAC address.
+$keep = array();
+foreach ($config['dhcpd']['{{ _iface }}']['staticmap'] as $entry) {
+    $dominated = false;
+    foreach ($desired_{{ _iface }} as $d) {
+        if (strtolower($entry['mac']) == strtolower($d['mac'])) {
+            $dominated = true;
+            break;
+        }
+    }
+    if (!$dominated) {
+        $keep[] = $entry;
+    }
+}
+$config['dhcpd']['{{ _iface }}']['staticmap'] = array_merge($keep, $desired_{{ _iface }});
+{% endfor %}
+
+write_config("Ansible: update DHCP static mappings");
+?>
+""",
+    'roles/pfsense/templates/aliases.php.j2': """\
+<?php
+// Firewall aliases - managed by Ansible
+require_once("config.inc");
+require_once("util.inc");
+
+$config = parse_config(true);
+
+if (!is_array($config['aliases'])) {
+    $config['aliases'] = array();
+}
+if (!is_array($config['aliases']['alias'])) {
+    $config['aliases']['alias'] = array();
+}
+
+$desired = array();
+{% for alias in pfsense.aliases | default([]) %}
+$desired[] = array(
+    'name' => '{{ alias.name }}',
+    'type' => '{{ alias.type }}',
+    'address' => '{{ alias.address | join(' ') }}',
+    'descr' => '{{ alias.description | default('') }}',
+    'detail' => '{{ alias.detail | default('') }}'
+);
+{% endfor %}
+
+// Replace entries matched by alias name.
+$keep = array();
+foreach ($config['aliases']['alias'] as $entry) {
+    $dominated = false;
+    foreach ($desired as $d) {
+        if ($entry['name'] == $d['name']) {
+            $dominated = true;
+            break;
+        }
+    }
+    if (!$dominated) {
+        $keep[] = $entry;
+    }
+}
+$config['aliases']['alias'] = array_merge($keep, $desired);
+write_config("Ansible: update firewall aliases");
+?>
+""",
     'roles/ssh_hardening/handlers/main.yml': """\
 ---
 - name: Restart SSH
@@ -7309,11 +7915,11 @@ WantedBy=multi-user.target
   package:
     name: >-
       {{
-        ['sudo']
+        (['sudo'] if sudo_enabled | default(true) | bool else [])
         if ansible_facts.os_family == 'FreeBSD' else
-        ['openssh', 'sudo']
+        ['openssh'] + (['sudo'] if sudo_enabled | default(true) | bool else [])
         if ansible_facts.os_family == 'Archlinux' else
-        ['openssh-server', 'sudo']
+        ['openssh-server'] + (['sudo'] if sudo_enabled | default(true) | bool else [])
       }}
     state: present
 
@@ -7368,7 +7974,9 @@ WantedBy=multi-user.target
     owner: root
     group: "{{ _root_group }}"
     mode: "0750"
-  when: ansible_facts.os_family == 'FreeBSD'
+  when:
+    - ansible_facts.os_family == 'FreeBSD'
+    - sudo_enabled | default(true) | bool
 
 - name: Grant admin users passwordless sudo
   copy:
@@ -7379,6 +7987,7 @@ WantedBy=multi-user.target
   loop: "{{ _admin_users }}"
   loop_control:
     label: "{{ item.name }}"
+  when: sudo_enabled | default(true) | bool
 
 - name: Deploy sshd_config
   template:
@@ -7407,21 +8016,43 @@ WantedBy=multi-user.target
     update_password: always
   when: admin_dev_password_hash | default('') | length > 0
 
+# Ensure .ssh directory exists with correct ownership before deploying keys.
+# This is done separately so authorized_key with manage_dir: false is
+# idempotent and works in check mode (path: is explicit).
+- name: Ensure admin user .ssh directories exist
+  file:
+    path: "{{ '/root/.ssh' if item.name == 'root' else '/home/' + item.name + '/.ssh' }}"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ _admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 # Deploy the shared admin SSH key to all admin users.
+# path: is set explicitly so check mode works even when the user
+# was not yet created (the user module is a no-op in check mode).
 - name: Deploy shared admin SSH key
   ansible.posix.authorized_key:
     user: "{{ item.name }}"
     key: "{{ admin_ssh_public_key }}"
+    path: "{{ '/root/.ssh/authorized_keys' if item.name == 'root' else '/home/' + item.name + '/.ssh/authorized_keys' }}"
+    manage_dir: false
   loop: "{{ _admin_users }}"
   loop_control:
     label: "{{ item.name }}"
-  when: admin_ssh_public_key | default('') | length > 0
+  when:
+    - admin_ssh_public_key | default('') | length > 0
+    - item.ssh_keys is not defined or item.ssh_keys | length == 0
 
 # Deploy per-user SSH keys (rich format only).
 - name: Deploy per-user admin SSH keys
   ansible.posix.authorized_key:
     user: "{{ item.0.name }}"
     key: "{{ item.1 }}"
+    path: "{{ '/root/.ssh/authorized_keys' if item.0.name == 'root' else '/home/' + item.0.name + '/.ssh/authorized_keys' }}"
+    manage_dir: false
     state: present
   loop: "{{ _admin_users | selectattr('ssh_keys', 'defined') | subelements('ssh_keys') }}"
   loop_control:
@@ -7713,9 +8344,6 @@ user_accounts: []
     - role: step_ca
       tags: [step_ca, pki]
       when: step_ca.enabled | default(false) | bool
-    - role: step_ca
-      tags: [step_ca, pki]
-      when: step_ca.enabled | default(false) | bool
     - role: samba
       tags: [samba]
       when: samba.enabled | default(false) | bool
@@ -7726,13 +8354,22 @@ user_accounts: []
         or nfs.client.enabled | default(false) | bool
         or 'nfs' in (_required_providers | default([]))
         or mounts | default([]) | length > 0
-        or 'nfs' in (_required_providers | default([]))
     - role: container_engine
       tags: [container_engine, containers]
       when: workloads | default([]) | length > 0
     - role: workloads
       tags: [workloads, containers]
       when: workloads | default([]) | length > 0
+    - role: proxmox
+      tags: [proxmox, hypervisor]
+      when: >
+        proxmox.enabled | default(false) | bool
+        or 'proxmox' in (_required_providers | default([]))
+    - role: pfsense
+      tags: [pfsense, router, firewall]
+      when: >
+        pfsense.enabled | default(false) | bool
+        or 'pfsense' in (_required_providers | default([]))
     # file_copy runs on every host but is a no-op when file_copy_items is empty.
     - role: file_copy
       tags: [file_copy, files]

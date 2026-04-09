@@ -1,5 +1,5 @@
-source_hash: 71abd0b9dffc828a6994caf490279eda36d6d36ef5527eb8b1c28fb0e30c976b
-output_hash: 4bd95da90dca4fa21993c86a421d93f30fabd91d2663458fa753fabba14f6beb
+source_hash: e03d12289743280d8438a4f889f99300a73aed18eaf9b08f63f746148ffe31dd
+output_hash: 464c4aed985bbf94ba81f0abecffa9335995589fbe4f31e321af1192d2852df6
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -96,11 +96,21 @@ generated_files:
   - roles/openvpn/tasks/server_instance.yml
   - roles/openvpn/templates/client.conf.j2
   - roles/openvpn/templates/server.conf.j2
+  - roles/pfsense/defaults/main.yml
+  - roles/pfsense/handlers/main.yml
+  - roles/pfsense/tasks/main.yml
+  - roles/pfsense/templates/aliases.php.j2
+  - roles/pfsense/templates/dhcp_static_maps.php.j2
+  - roles/pfsense/templates/dns_overrides.php.j2
   - roles/preflight/tasks/main.yml
   - roles/prometheus/defaults/main.yml
   - roles/prometheus/handlers/main.yml
   - roles/prometheus/tasks/main.yml
   - roles/prometheus/templates/prometheus.yml.j2
+  - roles/proxmox/defaults/main.yml
+  - roles/proxmox/handlers/main.yml
+  - roles/proxmox/tasks/main.yml
+  - roles/proxmox/templates/vzdump.conf.j2
   - roles/samba/defaults/main.yml
   - roles/samba/handlers/main.yml
   - roles/samba/tasks/main.yml

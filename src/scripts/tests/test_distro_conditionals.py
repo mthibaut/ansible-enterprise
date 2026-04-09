@@ -1294,3 +1294,50 @@ class TestFreeBSDPfFirewall(unittest.TestCase):
         text = _read(self.REFRESH)
         self.assertIn("pfctl -f /etc/pf.conf", text)
         self.assertIn("nft -f /etc/nftables.conf", text)
+
+
+class TestSiteYmlStructure(unittest.TestCase):
+    """Structural integrity checks for site.yml."""
+
+    def test_no_duplicate_role_entries(self):
+        """Each role must appear at most once in site.yml roles list."""
+        import re
+        text = _read("site.yml")
+        roles = re.findall(r"- role:\s+(\S+)", text)
+        seen = {}
+        duplicates = []
+        for role in roles:
+            if role in seen:
+                duplicates.append(role)
+            seen[role] = True
+        self.assertEqual(duplicates, [],
+            f"Duplicate role entries in site.yml: {duplicates}")
+
+    def test_no_duplicate_conditions_in_when(self):
+        """No when: block should contain the same condition twice."""
+        import re
+        text = _read("site.yml")
+        # Find all when: blocks (multi-line, ending at next - role: or end)
+        blocks = re.split(r"^\s+- role:", text, flags=re.MULTILINE)
+        duplicates = []
+        for block in blocks:
+            when_match = re.search(r"when:\s*>?\s*\n((?:\s+.*\n)*)", block)
+            if not when_match:
+                continue
+            lines = [l.strip() for l in when_match.group(1).splitlines()
+                     if l.strip() and not l.strip().startswith("#")]
+            # Normalize: strip leading or/and
+            conditions = []
+            for line in lines:
+                cond = re.sub(r"^\s*(or|and)\s+", "", line).strip()
+                if cond:
+                    conditions.append(cond)
+            seen = set()
+            for cond in conditions:
+                if cond in seen:
+                    role_match = re.search(r"(\S+)", block)
+                    role_name = role_match.group(1) if role_match else "unknown"
+                    duplicates.append(f"{role_name}: {cond}")
+                seen.add(cond)
+        self.assertEqual(duplicates, [],
+            f"Duplicate conditions in site.yml when: blocks: {duplicates}")
