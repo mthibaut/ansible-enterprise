@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -87,6 +88,29 @@ REQUIRED_ROOT_FILES = [
     "Makefile",
     "ansible.cfg",
 ]
+
+# The committed repo must not contain obviously local/operator-specific
+# configuration examples copied from a real environment. Keep this list small
+# and explicit so generic documentation examples remain usable.
+LOCAL_CONFIG_FORBIDDEN_PATTERNS = {
+    r"\bgregoriusgild\b": "private domain fragment 'gregoriusgild'",
+    r"\bkjsl\b": "private domain fragment 'kjsl'",
+    r"\bpve-nuc\b": "local Proxmox node naming pattern 'pve-nuc'",
+    r"\bautomator_nosep\b": "local Proxmox API token example 'automator_nosep'",
+    r"\b192\.168\.20\.\d{1,3}\b": "private LAN address in committed example content",
+    r"\bhome\.lan\b": "local search/domain example 'home.lan'",
+}
+
+LOCAL_CONFIG_SCAN_ROOTS = [
+    REPO / "README.md",
+    REPO / "docs",
+    SRC,
+]
+
+LOCAL_CONFIG_EXEMPT_PATHS = {
+    SRC / "scripts" / "verify_repo_contracts.py",
+    SRC / "scripts" / "tests" / "test_verify_repo_contracts.py",
+}
 
 
 def fail(message: str) -> None:
@@ -241,6 +265,55 @@ def verify_export_hygiene() -> None:
             fail(f"repository has committed cache file: {line}")
         if line.startswith("build/"):
             fail(f"build/ file should not be committed: {line}")
+
+
+def find_local_config_violations() -> list[str]:
+    violations: list[str] = []
+    text_paths: list[Path] = []
+
+    for root in LOCAL_CONFIG_SCAN_ROOTS:
+        if not root.exists():
+            continue
+        if root.is_file():
+            text_paths.append(root)
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            if path.suffix in {".pyc", ".zip"}:
+                continue
+            if path in LOCAL_CONFIG_EXEMPT_PATHS:
+                continue
+            text_paths.append(path)
+
+    for path in text_paths:
+        try:
+            text = read_text(path)
+        except UnicodeDecodeError:
+            continue
+        try:
+            rel = path.relative_to(REPO)
+        except ValueError:
+            rel = path
+        for pattern, label in LOCAL_CONFIG_FORBIDDEN_PATTERNS.items():
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            line_no = text[:match.start()].count("\n") + 1
+            violations.append(f"{rel}:{line_no}: contains {label}")
+
+    return violations
+
+
+def verify_local_config_scrubbed() -> None:
+    violations = find_local_config_violations()
+    if violations:
+        fail(
+            "Repository contains local configuration identifiers that must be scrubbed:\n"
+            + "\n".join(violations)
+        )
 
 
 def verify_lock(module) -> None:
@@ -634,6 +707,7 @@ def main() -> None:
     verify_capability_contracts()
     verify_lock(module)
     verify_export_hygiene()
+    verify_local_config_scrubbed()
     verify_regenerated_tree(module)
     verify_unit_tests()
     verify_checkpoints()

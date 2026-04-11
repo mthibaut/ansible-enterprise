@@ -1676,7 +1676,7 @@ dns:
   #
   # Example:
   #   zones:
-  #     - name: test.gregoriusgild.be
+  #     - name: test.example.com
   #       type: primary
   #       public: true
   #       secondaries: [185.x.x.x]
@@ -1692,25 +1692,25 @@ dns:
   #           value: 1.2.3.99
   #           state: absent
   #
-  #     - name: gregoriusgild.be
+  #     - name: example.com
   #       type: remote_primary
   #       nsupdate_server: 185.x.x.x
   #       allow_update: [{key: certbot-acme}]
   #
-  #     - name: home.lab
+  #     - name: example.internal
   #       type: secondary
   #       primaries: [192.168.1.1]
   #
   # DNSSEC (optional per primary zone):
-  #     - name: test.gregoriusgild.be
+  #     - name: test.example.com
   #       type: primary
   #       dnssec:
   #         enabled: true
   #         algorithm: ECDSAP256SHA256   # default
   #         key_directory: /etc/bind/keys
   #         # Optional: provide pre-generated keys instead of auto-generating
-  #         # ksk_file: /path/to/Ktest.gregoriusgild.be.+013+12345.key
-  #         # zsk_file: /path/to/Ktest.gregoriusgild.be.+013+67890.key
+  #         # ksk_file: /path/to/Ktest.example.com.+013+12345.key
+  #         # zsk_file: /path/to/Ktest.example.com.+013+67890.key
   zones: []
 
 # DNS defaults - separate from dns dict to avoid Ansible hash overwrite.
@@ -4908,7 +4908,7 @@ nfs:
     #   exports:
     #     - path: /srv/data
     #       clients:
-    #         - host: 192.168.20.0/24
+    #         - host: 192.0.2.0/24
     #           options: rw,sync,no_subtree_check
     #         - host: 192.168.30.5
     #           options: ro,sync
@@ -4938,7 +4938,7 @@ nfs:
     #   mode:  mountpoint directory mode  (default: '0755')
     # Example:
     #   mounts:
-    #     - src: 192.168.20.10:/srv/data
+    #     - src: 192.0.2.10:/srv/data
     #       path: /mnt/data
     #       opts: rw,nfsvers=4.1,soft,timeo=30
     #       state: mounted
@@ -5764,7 +5764,7 @@ step_ca:
   name: "Internal CA"
   dns_names: []
     # - ca.gilde.internal
-    # - 192.168.20.100
+    # - 192.0.2.100
 
   # ACME provisioner name (what certbot clients see).
   acme_provisioner: acme
@@ -7593,11 +7593,11 @@ pfsense:
   # Example:
   #   dns_overrides:
   #     - host: nas
-  #       domain: home.lan
+  #       domain: example.internal
   #       ip: 192.168.1.10
   #       description: Synology NAS
   #     - host: proxmox
-  #       domain: home.lan
+  #       domain: example.internal
   #       ip: 192.168.1.20
   #       description: Proxmox VE host
   dns_overrides: []
@@ -8196,6 +8196,359 @@ user_accounts: []
   when:
     - item.value.enabled | default(false) | bool
     - item.value.owner is defined
+""",
+    'infra.yml': """\
+---
+# infra.yml - Create/update Proxmox VMs and LXC containers from inventory.
+#
+# Usage:
+#   ansible-playbook -i inventory ansible-enterprise/build/infra.yml
+#   ansible-playbook -i inventory ansible-enterprise/build/infra.yml --limit vm-example
+#   ansible-playbook -i inventory ansible-enterprise/build/infra.yml -e proxmox_force_rebuild=true
+#
+# Each target host must define a `proxmox_vm` dict in host_vars (or inherit
+# proxmox_defaults from group_vars). At minimum, `proxmox_vm.vmid` and
+# `proxmox_vm.type` (vm or lxc) are required.
+#
+# Rebuild policy:
+#   proxmox_defaults.state / proxmox_vm.state
+#     - present       : ensure the guest exists
+#     - absent        : stop + destroy the guest if it exists
+#
+#   proxmox_defaults.rebuild_on / proxmox_vm.rebuild_on
+#     - never         : keep the existing guest and update it in place
+#     - config_change : destroy + recreate only when the desired config hash changes
+#     - always        : destroy + recreate on every run
+#
+# The config-change fingerprint is stored controller-side in:
+#   build/.infra-state/<inventory_hostname>.json
+
+- name: Provision Proxmox VMs and containers
+  hosts: all
+  gather_facts: false
+
+  vars:
+    _proxmox: "{{ proxmox_defaults | default({}) | combine(proxmox_vm | default({}), recursive=True) }}"
+    _proxmox_state: "{{ _proxmox.state | default('present') }}"
+    _proxmox_rebuild_on: "{{ _proxmox.rebuild_on | default('never') }}"
+    _proxmox_force_rebuild: "{{ proxmox_force_rebuild | default(false) | bool }}"
+    _proxmox_rebuild_config: >-
+      {{
+        _proxmox
+        | dict2items
+        | rejectattr('key', 'equalto', 'state')
+        | rejectattr('key', 'equalto', 'rebuild_on')
+        | list
+        | items2dict
+      }}
+    _proxmox_config_hash: "{{ (_proxmox_rebuild_config | to_nice_json) | hash('sha256') }}"
+    _proxmox_state_dir: "{{ playbook_dir }}/.infra-state"
+    _proxmox_state_file: "{{ _proxmox_state_dir }}/{{ inventory_hostname }}.json"
+
+    _pve_node: "{{ _proxmox.node }}"
+    _pve_api_host: "{{ hostvars[_pve_node].ansible_host }}"
+    _pve_api_user: "{{ _proxmox.api_user | default('root@pam') }}"
+    _pve_api_token_id: "{{ vault_proxmox_api_token_id }}"
+    _pve_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+
+    _ci_sshkeys: >-
+      {%- set keys = [] -%}
+      {%- for u in admin_users | default([]) -%}
+      {%-   if u is mapping and u.ssh_keys is defined -%}
+      {%-     for k in u.ssh_keys -%}
+      {%-       set _ = keys.append(k) -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if keys | length == 0 and admin_ssh_public_key | default('') | length > 0 -%}
+      {%-   set _ = keys.append(admin_ssh_public_key) -%}
+      {%- endif -%}
+      {{ keys | join("\\n") }}
+
+  tasks:
+    - name: Validate required proxmox vars
+      assert:
+        that:
+          - _proxmox.vmid is defined
+          - _proxmox.type is defined
+          - _proxmox.type in ['vm', 'lxc']
+          - _proxmox.node is defined
+        fail_msg: "Host {{ inventory_hostname }} must define proxmox.vmid, proxmox.type (vm|lxc), and proxmox.node"
+
+    - name: Validate proxmox rebuild policy
+      assert:
+        that:
+          - _proxmox_rebuild_on in ['never', 'config_change', 'always']
+        fail_msg: "rebuild_on for {{ inventory_hostname }} must be one of: never, config_change, always"
+
+    - name: Validate proxmox lifecycle state
+      assert:
+        that:
+          - _proxmox_state in ['present', 'absent']
+        fail_msg: "state for {{ inventory_hostname }} must be one of: present, absent"
+
+    - name: Ensure local Proxmox infra state directory exists
+      file:
+        path: "{{ _proxmox_state_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
+    - name: Check previous Proxmox config state
+      stat:
+        path: "{{ _proxmox_state_file }}"
+      delegate_to: localhost
+      register: _proxmox_state_stat
+
+    - name: Read previous Proxmox config state
+      slurp:
+        path: "{{ _proxmox_state_file }}"
+      delegate_to: localhost
+      when: _proxmox_state_stat.stat.exists | default(false)
+      register: _proxmox_state_raw
+
+    - name: Decode previous Proxmox config state
+      set_fact:
+        _proxmox_last_state: "{{ _proxmox_state_raw.content | b64decode | from_json }}"
+        _proxmox_last_config_hash: "{{ (_proxmox_state_raw.content | b64decode | from_json).config_hash | default('') }}"
+      when: _proxmox_state_stat.stat.exists | default(false)
+
+    - name: Check whether the Proxmox guest already exists
+      command: "{{ 'qm' if _proxmox.type == 'vm' else 'pct' }} status {{ _proxmox.vmid }}"
+      delegate_to: "{{ _pve_node }}"
+      register: _proxmox_guest_status
+      failed_when: false
+      changed_when: false
+
+    - name: Decide whether the Proxmox guest must be rebuilt
+      set_fact:
+        _proxmox_guest_exists: "{{ _proxmox_guest_status.rc == 0 }}"
+        _proxmox_should_remove: "{{ _proxmox_state == 'absent' and (_proxmox_guest_status.rc == 0) }}"
+        _proxmox_should_rebuild: >-
+          {{
+            _proxmox_state == 'present'
+            and (
+              _proxmox_force_rebuild
+            or _proxmox_rebuild_on == 'always'
+            or (
+              _proxmox_rebuild_on == 'config_change'
+              and (_proxmox_guest_status.rc == 0)
+              and (_proxmox_last_config_hash | default('') | length > 0)
+              and (_proxmox_last_config_hash | default('')) != _proxmox_config_hash
+            )
+            )
+          }}
+
+    - name: Stop existing Proxmox guest before removal or rebuild
+      command: "{{ 'qm' if _proxmox.type == 'vm' else 'pct' }} stop {{ _proxmox.vmid }}"
+      delegate_to: "{{ _pve_node }}"
+      register: _proxmox_stop_guest
+      failed_when: false
+      changed_when: _proxmox_stop_guest.rc == 0
+      when:
+        - _proxmox_guest_exists | default(false) | bool
+        - (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+
+    - name: Wait for Proxmox guest to stop before removal or rebuild
+      command: "{{ 'qm' if _proxmox.type == 'vm' else 'pct' }} status {{ _proxmox.vmid }}"
+      delegate_to: "{{ _pve_node }}"
+      register: _proxmox_stop_status
+      changed_when: false
+      until: "'status: stopped' in (_proxmox_stop_status.stdout | default(''))"
+      retries: 24
+      delay: 5
+      when:
+        - _proxmox_guest_exists | default(false) | bool
+        - (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+
+    - name: Destroy existing Proxmox guest for removal or rebuild
+      command: >-
+        {{ 'qm destroy ' ~ (_proxmox.vmid | string) ~ ' --destroy-unreferenced-disks 1 --purge 1'
+           if _proxmox.type == 'vm'
+           else 'pct destroy ' ~ (_proxmox.vmid | string) ~ ' --purge 1' }}
+      delegate_to: "{{ _pve_node }}"
+      when:
+        - _proxmox_guest_exists | default(false) | bool
+        - (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+
+    - name: Remove cached Proxmox config state after removal or before rebuild
+      file:
+        path: "{{ _proxmox_state_file }}"
+        state: absent
+      delegate_to: localhost
+      when: (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+
+    - name: Clone VM from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        node: "{{ _pve_node }}"
+        vmid: "{{ _proxmox.vmid }}"
+        name: "{{ inventory_hostname }}"
+        clone: "{{ _proxmox.template_name | default(omit) }}"
+        newid: "{{ _proxmox.vmid }}"
+        full: true
+        state: present
+        timeout: 300
+      delegate_to: localhost
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'vm'
+      register: _vm_clone
+
+    - name: Configure VM hardware
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        node: "{{ _pve_node }}"
+        vmid: "{{ _proxmox.vmid }}"
+        name: "{{ inventory_hostname }}"
+        cores: "{{ _proxmox.cores | default(2) }}"
+        memory: "{{ _proxmox.memory | default(2048) }}"
+        onboot: "{{ _proxmox.onboot | default(true) }}"
+        agent: "enabled=1"
+        net:
+          net0: "virtio,bridge={{ _proxmox.net.bridge | default('vmbr0') }}"
+        update: true
+        state: present
+      delegate_to: localhost
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'vm'
+
+    - name: Configure VM cloud-init
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        node: "{{ _pve_node }}"
+        vmid: "{{ _proxmox.vmid }}"
+        ciuser: root
+        cipassword: "{{ _proxmox.cipassword | default(omit) }}"
+        sshkeys: "{{ _ci_sshkeys }}"
+        ipconfig:
+          ipconfig0: "ip={{ _proxmox.net.ip }},gw={{ _proxmox.net.gw | default(omit) }}"
+        nameservers: "{{ _proxmox.nameserver | default(omit) }}"
+        searchdomains: "{{ _proxmox.searchdomain | default(omit) }}"
+        update: true
+        state: present
+      delegate_to: localhost
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'vm'
+
+    - name: Resize VM disks
+      community.proxmox.proxmox_disk:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        vmid: "{{ _proxmox.vmid }}"
+        disk: "{{ item.disk | default('scsi' + (idx | string)) }}"
+        size: "{{ item.size }}"
+        state: resized
+      delegate_to: localhost
+      loop: "{{ _proxmox.disks | default([]) }}"
+      loop_control:
+        index_var: idx
+        label: "{{ item.disk | default('scsi' + (idx | string)) }} -> {{ item.size }}"
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'vm'
+
+    - name: Start VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        node: "{{ _pve_node }}"
+        vmid: "{{ _proxmox.vmid }}"
+        state: started
+      delegate_to: localhost
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'vm'
+        - _proxmox.started | default(true) | bool
+
+    - name: Create LXC container
+      community.proxmox.proxmox:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        node: "{{ _pve_node }}"
+        vmid: "{{ _proxmox.vmid }}"
+        hostname: "{{ inventory_hostname }}"
+        ostemplate: "{{ _proxmox.ostemplate }}"
+        storage: "{{ _proxmox.storage | default('local-lvm') }}"
+        disk: "{{ _proxmox.disk | default('8') }}"
+        cores: "{{ _proxmox.cores | default(2) }}"
+        memory: "{{ _proxmox.memory | default(2048) }}"
+        swap: "{{ _proxmox.swap | default(512) }}"
+        onboot: "{{ _proxmox.onboot | default(true) }}"
+        netif:
+          net0: "name=eth0,bridge={{ _proxmox.net.bridge | default('vmbr0') }},ip={{ _proxmox.net.ip }},gw={{ _proxmox.net.gw | default(omit) }}"
+        nameserver: "{{ _proxmox.nameserver | default(omit) }}"
+        searchdomain: "{{ _proxmox.searchdomain | default(omit) }}"
+        pubkey: "{{ _ci_sshkeys }}"
+        unprivileged: "{{ _proxmox.unprivileged | default(true) }}"
+        features: "{{ _proxmox.features | default(omit) }}"
+        state: present
+      delegate_to: localhost
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'lxc'
+
+    - name: Start LXC container
+      community.proxmox.proxmox:
+        api_host: "{{ _pve_api_host }}"
+        api_user: "{{ _pve_api_user }}"
+        api_token_id: "{{ _pve_api_token_id }}"
+        api_token_secret: "{{ _pve_api_token_secret }}"
+        node: "{{ _pve_node }}"
+        vmid: "{{ _proxmox.vmid }}"
+        state: started
+      delegate_to: localhost
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.type == 'lxc'
+        - _proxmox.started | default(true) | bool
+
+    - name: Persist last applied Proxmox config fingerprint
+      copy:
+        dest: "{{ _proxmox_state_file }}"
+        mode: "0644"
+        content: |
+          {{
+            {
+              "inventory_hostname": inventory_hostname,
+              "vmid": _proxmox.vmid,
+              "type": _proxmox.type,
+              "state": _proxmox_state,
+              "config_hash": _proxmox_config_hash,
+              "rebuild_on": _proxmox_rebuild_on
+            } | to_nice_json
+          }}
+      delegate_to: localhost
+      when: _proxmox_state == 'present'
+
+    - name: Wait for SSH to become available
+      command: ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes {{ ansible_user | default('root') }}@{{ ansible_host }} true
+      delegate_to: localhost
+      register: _ssh_check
+      retries: 60
+      delay: 5
+      until: _ssh_check.rc == 0
+      changed_when: false
+      when:
+        - _proxmox_state == 'present'
+        - _proxmox.started | default(true) | bool
 """,
     'site.yml': """\
 ---

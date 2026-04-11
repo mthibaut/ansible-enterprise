@@ -151,3 +151,20 @@ The repository must continue to provide:
 - contract verification scripts
 - checkpoint numbering governance
 - lockstep generation with a lock file
+
+## Local Configuration Scrub Contract
+
+Committed examples and documentation must not leak operator-local
+configuration from a real environment.
+
+CI enforces a denylist-based scrub check in
+`src/scripts/verify_repo_contracts.py` for known local identifiers such as:
+
+- private domain fragments copied from real infrastructure
+- private LAN example addresses from the operator environment
+- local node naming patterns and token names that should not appear in docs
+
+Generic placeholders such as `example.com`, `example.internal`,
+`192.0.2.0/24`, and `root@pam` are permitted. When a real local identifier
+accidentally appears in committed docs, examples, or source comments, it must
+be replaced with a neutral placeholder before merging.

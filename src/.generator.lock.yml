@@ -1,9 +1,10 @@
-source_hash: e03d12289743280d8438a4f889f99300a73aed18eaf9b08f63f746148ffe31dd
-output_hash: 464c4aed985bbf94ba81f0abecffa9335995589fbe4f31e321af1192d2852df6
+source_hash: c066876362f473762ffd128a7ce738db782fc611fcd24e7f041cf811f396406d
+output_hash: 49d27e58f219fd882bbdca1153ecc12b6d2d1038671945d087e5c85007cd8e87
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
   - group_vars/all/vault.yml.example
+  - infra.yml
   - inventory/group_vars/.gitkeep
   - inventory/host_vars/.gitkeep
   - inventory/hosts.ini.example

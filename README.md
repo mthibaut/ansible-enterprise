@@ -1,5 +1,7 @@
 # Enterprise Ansible Platform
 
+[![CI](https://github.com/mthibaut/ansible-enterprise/actions/workflows/ci.yml/badge.svg)](https://github.com/mthibaut/ansible-enterprise/actions/workflows/ci.yml)
+
 Deterministic Ansible platform for provisioning hardened Linux servers.
 Supports Debian 12/13, Ubuntu 24.04, AlmaLinux 9, and Rocky Linux 9.
 
@@ -29,6 +31,20 @@ cd build
 ansible-galaxy collection install -r requirements.yml
 pip install jsonschema pyyaml
 ```
+
+Optional controller-side dependencies:
+
+```bash
+# Proxmox provisioning from infra.yml
+pip install proxmoxer requests
+ansible-galaxy collection install community.proxmox
+
+# If you validate or render extra inventory tooling locally, keep PyYAML/jsonschema installed
+```
+
+Infrastructure provisioning docs:
+
+- [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md)
 
 Copy and populate the vault:
 
@@ -108,21 +124,45 @@ To update a managed file:
 
 Files in `UNMANAGED_FILES` (e.g. `build/group_vars/all/vault.yml`) are never touched.
 
+## Infrastructure provisioning
+
+Infrastructure creation and lifecycle docs are kept separate from host configuration docs.
+
+- [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md)
+
 ## Role overview
+
+Per-role configuration docs live under [`docs/roles/`](docs/roles/README.md).
 
 | Role | Purpose |
 |---|---|
-| preflight | SSH key assertion before any changes |
-| common | Fast variable contract assertions |
-| ssh_hardening | Hardened sshd_config; keys deployed after restart |
-| geoip | MaxMind GeoLite2 download and nftables set generation |
-| firewall_geo | nftables ruleset; GeoIP drops before port-accept rules |
-| dns | BIND hidden primary; zone files created once, serials updated deterministically |
-| certbot | DNS-01 TLS certificate provisioning via Let's Encrypt |
-| nginx | Per-service vhosts from the services dict |
-| users | Service owner accounts and web roots |
-| nextcloud | Nextcloud + MariaDB stack |
-| mailserver | Postfix + Dovecot + OpenDKIM |
+| [preflight](docs/roles/preflight.md) | SSH key assertion before any changes |
+| [common](docs/roles/common.md) | Global contract validation and shared host settings |
+| [ssh_hardening](docs/roles/ssh_hardening.md) | Hardened sshd_config, admin users, sudo |
+| [users](docs/roles/users.md) | Generic user account management and service owner accounts |
+| [geoip](docs/roles/geoip.md) | MaxMind GeoLite2 download and country/IP set generation |
+| [firewall_geo](docs/roles/firewall_geo.md) | nftables or pf rules derived from geoip and exposed services |
+| [dns](docs/roles/dns.md) | BIND hidden primary, explicit zones, service-derived records |
+| [certbot](docs/roles/certbot.md) | DNS-01 TLS certificate provisioning via Let's Encrypt |
+| [apache2](docs/roles/apache2.md) | Backend Apache vhosts for services with `app.type: apache2` |
+| [nginx](docs/roles/nginx.md) | Per-service reverse proxy and static site vhosts |
+| [nextcloud](docs/roles/nextcloud.md) | Nextcloud + MariaDB stack |
+| [mailserver](docs/roles/mailserver.md) | Postfix + Dovecot + OpenDKIM |
+| [node_exporter](docs/roles/node_exporter.md) | Host metrics exporter |
+| [docker](docs/roles/docker.md) | Docker runtime support for dependent roles |
+| [prometheus](docs/roles/prometheus.md) | Prometheus server |
+| [grafana](docs/roles/grafana.md) | Grafana dashboards |
+| [openvpn](docs/roles/openvpn.md) | Multi-instance OpenVPN |
+| [wireguard](docs/roles/wireguard.md) | Multi-instance WireGuard |
+| [step_ca](docs/roles/step_ca.md) | Internal ACME-compatible certificate authority |
+| [samba](docs/roles/samba.md) | Samba server and shares |
+| [nfs](docs/roles/nfs.md) | NFS server, client, and generic mounts |
+| [container_engine](docs/roles/container_engine.md) | Podman/Docker runtime selector |
+| [workloads](docs/roles/workloads.md) | OCI container workload runner |
+| [bootstrap_scripts](docs/roles/bootstrap_scripts.md) | Per-host bootstrap script generation |
+| [proxmox](docs/roles/proxmox.md) | Proxmox VE host configuration |
+| [pfsense](docs/roles/pfsense.md) | pfSense config management |
+| [file_copy](docs/roles/file_copy.md) | Copy inline or repo-managed files to targets |
 
 ## Services
 
@@ -147,3 +187,7 @@ git tag checkpoint-011-src-build-separation
 git archive --format=zip --prefix="ansible-enterprise-checkpoint-011-src-build-separation/" \
   checkpoint-011-src-build-separation -o ansible-enterprise-checkpoint-011-src-build-separation.zip
 ```
+
+## Acknowledgements
+
+This project was made possible with help from multiple AI resources used during design, implementation, validation, and handoff.

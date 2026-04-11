@@ -367,6 +367,44 @@ class TestFileCopyRegression(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# proxmox infra playbook
+# ---------------------------------------------------------------------------
+
+class TestProxmoxInfraRegression(unittest.TestCase):
+
+    INFRA = "infra.yml"
+
+    def test_infra_playbook_documents_rebuild_policy_and_force_override(self):
+        text = _read(self.INFRA)
+        self.assertIn("proxmox_defaults.state / proxmox_vm.state", text)
+        self.assertIn("present       : ensure the guest exists", text)
+        self.assertIn("absent        : stop + destroy the guest if it exists", text)
+        self.assertIn("proxmox_defaults.rebuild_on / proxmox_vm.rebuild_on", text)
+        self.assertIn("never         : keep the existing guest and update it in place", text)
+        self.assertIn("config_change : destroy + recreate only when the desired config hash changes", text)
+        self.assertIn("always        : destroy + recreate on every run", text)
+        self.assertIn("proxmox_force_rebuild=true", text)
+        self.assertIn("build/.infra-state/<inventory_hostname>.json", text)
+
+    def test_infra_playbook_persists_and_uses_config_hash_state(self):
+        text = _read(self.INFRA)
+        self.assertIn("_proxmox_state", text)
+        self.assertIn("Validate proxmox lifecycle state", text)
+        self.assertIn("_proxmox_should_remove", text)
+        self.assertIn("_proxmox_rebuild_on", text)
+        self.assertIn("_proxmox_force_rebuild", text)
+        self.assertIn("_proxmox_rebuild_config", text)
+        self.assertIn("_proxmox_config_hash", text)
+        self.assertIn("_proxmox_state_dir", text)
+        self.assertIn("_proxmox_state_file", text)
+        self.assertIn("Decode previous Proxmox config state", text)
+        self.assertIn("_proxmox_last_config_hash", text)
+        self.assertIn("_proxmox_should_rebuild", text)
+        self.assertIn("Destroy existing Proxmox guest for removal or rebuild", text)
+        self.assertIn("Persist last applied Proxmox config fingerprint", text)
+
+
+# ---------------------------------------------------------------------------
 # certbot role
 # ---------------------------------------------------------------------------
 

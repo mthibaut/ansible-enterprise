@@ -2550,7 +2550,7 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
 
      remote_primary: new zone type where BIND is elsewhere and certbot
      pushes _acme-challenge records via nsupdate. Enables certificates for
-     domains hosted on external BIND servers (e.g. gregoriusgild.be).
+     domains hosted on external BIND servers (e.g. example.com).
 
      certbot integration: Resolve nsupdate target from dns.zones at runtime.
      Prefers remote_primary zones, then primary zones with allow_update,
@@ -3215,3 +3215,18 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      parent directories automatically. This enables persistent config injection
      for external inventory use cases such as the Time Machine Samba workload
      without introducing repo-specific one-off tasks.
+
+205. `checkpoint-205-docs-scrub-and-proxmox-lifecycle`
+     Documentation was substantially expanded and sanitized. The top-level
+     README now links to dedicated per-role docs under `docs/roles/`, and the
+     Proxmox infrastructure guidance was split into `docs/infrastructure/`.
+     Example inventory values were scrubbed of local environment details, and a
+     new repository contract now verifies that known local identifiers do not
+     leak into committed docs/examples.
+     Proxmox infrastructure provisioning in `infra.yml` is now generator-owned
+     and supports explicit lifecycle and rebuild policy controls:
+     `state: present|absent` and
+     `rebuild_on: never|config_change|always`, plus the runtime override
+     `-e proxmox_force_rebuild=true`. `config_change` decisions use a
+     controller-side fingerprint stored under `build/.infra-state/`, and
+     `state: absent` destroys the guest and clears cached state.

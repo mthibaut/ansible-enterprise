@@ -47,6 +47,10 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  infra.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/common/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
