@@ -109,7 +109,8 @@ infra:
   rebuild_on: never
   proxmox:
     ostemplate: "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
-    disk: local:8
+    storage: local
+    disk: 8
     cores: 1
     memory: 512
     net:
@@ -196,17 +197,37 @@ Then configure the new host with the normal site playbook:
 ansible-playbook -i inventory ansible-enterprise/build/site.yml --limit vm-example
 ```
 
-## Helper scripts
+## Playbooks
 
-The repo also includes two controller-side helper scripts under `src/scripts/`:
+The generated `build/` directory contains these playbooks:
 
-- `proxmox_infra_render.py`: renders a single `infra:` block
-- `proxmox_inventory_scaffold.py`: creates `hosts.ini` and `host_vars/<host>/infra.yml` from column-based input
+| Playbook | Purpose |
+| --- | --- |
+| `infra.yml` | Creates, updates, or destroys infrastructure instances from inventory. Run first. |
+| `lxc_bootstrap.yml` | Installs Python on minimal LXC containers via `raw` module. Run after `infra.yml` for LXC targets that lack Python. Skips hosts that already have a working interpreter. |
+| `bootstrap.yml` | Generates per-host bootstrap shell scripts on the Ansible controller (connection: local). Not the same as `lxc_bootstrap.yml`. |
+| `site.yml` | Configures hosts with roles. Requires a working Python interpreter on each target. |
 
-Both scripts are executable and follow the same naming pattern:
+Typical workflow:
 
-- `proxmox_infra_render.py`
-- `proxmox_inventory_scaffold.py`
+```text
+infra.yml → lxc_bootstrap.yml → site.yml
+```
+
+## Scripts
+
+The repo includes user-facing scripts under `src/scripts/`:
+
+| Script | Purpose |
+| --- | --- |
+| `proxmox_infra_render.py` | Renders a single `host_vars/<host>/infra.yml` file from CLI flags. Use for one-off host additions. |
+| `proxmox_inventory_scaffold.py` | Creates `hosts.ini` and `host_vars/<host>/infra.yml` for multiple hosts from two-column stdin input (hostname + artifact). Use for bulk inventory generation. |
+| `bootstrap_pull_host.sh` | Installs Ansible collections from `requirements.yml` and runs `ansible-pull` against `site.yml`. Use on a target host that pulls its own config. |
+| `precommit_verify.sh` | Runs all repository contract verifications (repo contracts, services schema, checkpoints). Used by pre-commit hooks and CI. |
+
+Scripts under `src/scripts/internal/` are not meant to be called directly.
+
+### Inventory scaffold details
 
 Second-column behavior depends on `--type`:
 

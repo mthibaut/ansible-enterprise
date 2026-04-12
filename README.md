@@ -2,12 +2,32 @@
 
 [![CI](https://github.com/mthibaut/ansible-enterprise/actions/workflows/ci.yml/badge.svg)](https://github.com/mthibaut/ansible-enterprise/actions/workflows/ci.yml)
 
-Deterministic Ansible platform for provisioning hardened Linux servers.
-Supports Debian 12/13, Ubuntu 24.04, AlmaLinux 9, and Rocky Linux 9.
+Deterministic Ansible platform for provisioning and configuring hardened Linux servers.
+Supports Debian 12/13, Ubuntu 24.04/25.04, AlmaLinux 9/10, Rocky Linux 9/10, Alpine, Arch, openSUSE, Fedora, Gentoo, Devuan, and FreeBSD.
+
+## Two modes of operation
+
+This platform has two distinct phases that run independently:
+
+**Phase 1 -- Infrastructure provisioning** creates the hosts themselves.
+Runs from the Ansible controller against the hypervisor API. No SSH to the target is needed.
+
+```text
+infra.yml → lxc_bootstrap.yml → (hosts now exist and have Python)
+```
+
+**Phase 2 -- Host configuration** installs and configures services on existing hosts.
+Runs from the Ansible controller over SSH (or `pct exec` for LXC) to the target.
+
+```text
+site.yml → (hosts are now fully configured)
+```
+
+You can use either phase independently. If your hosts already exist (bare metal, cloud VMs, manually provisioned), skip Phase 1 and go straight to `site.yml`.
 
 ## Repository layout
 
-```
+```text
 src/        Generator, specs, schemas, scripts (committed, source of truth)
 build/      Generated Ansible runtime (gitignored, regenerated from src/)
 Makefile    Build automation
@@ -24,35 +44,13 @@ Generate the Ansible runtime:
 make generate
 ```
 
-Install Ansible dependencies:
+Install dependencies:
 
 ```bash
 cd build
 ansible-galaxy collection install -r requirements.yml
 pip install jsonschema pyyaml
 ```
-
-Optional controller-side dependencies:
-
-```bash
-# Infrastructure provisioning via infra.yml (current provider: proxmox)
-pip install proxmoxer requests
-ansible-galaxy collection install community.proxmox
-
-# If you validate or render extra inventory tooling locally, keep PyYAML/jsonschema installed
-```
-
-Infrastructure provisioning docs:
-
-- [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md)
-
-Provider status:
-
-- `proxmox`: implemented
-- `aws`: not implemented yet
-- manual provisioning: supported fallback when infra automation is unavailable or unnecessary
-
-For manually provisioned hosts, skip `infra.yml` and run `site.yml` after the machine already exists and is reachable by Ansible.
 
 Copy and populate the vault:
 
@@ -70,19 +68,46 @@ cd build
 cp inventory/hosts.ini.example inventory/hosts.ini
 ```
 
-Run the playbook from `build/`:
+### Phase 1: Infrastructure provisioning (optional)
+
+Only needed if you want Ansible to create the hosts. Currently supports Proxmox; manual provisioning is the fallback for other providers.
 
 ```bash
-cd build
+# Extra dependencies for Proxmox provider
+pip install proxmoxer requests
+ansible-galaxy collection install community.proxmox
+
+# Create hosts
+ansible-playbook -i inventory/hosts.ini infra.yml
+
+# Install Python on minimal LXC containers (skip for VMs with cloud-init)
+ansible-playbook -i inventory/hosts.ini lxc_bootstrap.yml
+```
+
+See [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md) for full details, inventory format, lifecycle controls, and helper scripts.
+
+### Phase 2: Host configuration
+
+```bash
 ansible-playbook -i inventory/hosts.ini site.yml --ask-vault-pass
 ```
 
-## Pull mode
+### Pull mode
+
+For hosts that pull their own configuration:
 
 ```bash
-cd build
 bash scripts/bootstrap_pull_host.sh
 ```
+
+## Playbooks
+
+| Playbook | Phase | Purpose |
+| --- | --- | --- |
+| `infra.yml` | 1 | Create, update, or destroy infrastructure instances from inventory |
+| `lxc_bootstrap.yml` | 1 | Install Python on minimal LXC containers via `raw` module |
+| `bootstrap.yml` | 1 | Generate per-host bootstrap shell scripts on the controller |
+| `site.yml` | 2 | Configure hosts with roles (requires Python on targets) |
 
 ## Validation
 
@@ -94,59 +119,12 @@ make services        # services schema
 make order           # service dependency order
 ```
 
-Repository-facing helper tools live in `src/scripts/`.
-Generator, contract, and canonical-reference internals live in `src/scripts/internal/`.
-
-## DNS notes
-
-- Edit DNS behavior in `src/`, not `build/`.
-- Primary zones support `overwrite: true` to let Ansible rewrite the zone file from inventory content.
-- When overwriting, the role preserves the current SOA serial and only bumps it if the zone actually changed.
-- SOA serials use `YYYYMMDDNN` and must stay within the DNS 32-bit serial range.
-- Out-of-range legacy serials fail hard and must be repaired manually; they are not silently reset downward.
-- SOA mailbox values are emitted in DNS RNAME form, not mailbox form. For example,
-  `hostmaster@example.com` becomes `hostmaster.example.com.`
-- Service entries support `aliases:`; aliases feed nginx `server_name`, DNS A-record derivation, and TLS SAN handling.
-
-## Search domain management
-
-`set_domain_name` is backend-aware. The common role now routes search-domain
-configuration through the active manager instead of assuming `/etc/resolv.conf`
-is authoritative.
-
-Available backends:
-
-- `auto`
-- `networkmanager`
-- `systemd-resolved`
-- `resolvconf`
-- `dhclient`
-- `static`
-
-`auto` prefers: NetworkManager -> systemd-resolved -> resolvconf -> dhclient -> direct `/etc/resolv.conf`.
-
-## Generator workflow
-
-To update a managed file:
-
-1. Edit the file's content in `FILE_MANIFEST` inside `src/generate_ansible_enterprise.py`.
-2. Run `make generate`.
-3. Commit the `src/` change. `build/` is gitignored.
-
-Files in `UNMANAGED_FILES` (e.g. `build/group_vars/all/vault.yml`) are never touched.
-
-## Infrastructure provisioning
-
-Infrastructure creation and lifecycle docs are kept separate from host configuration docs.
-
-- [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md)
-
 ## Role overview
 
 Per-role configuration docs live under [`docs/roles/`](docs/roles/README.md).
 
 | Role | Purpose |
-|---|---|
+| --- | --- |
 | [preflight](docs/roles/preflight.md) | SSH key assertion before any changes |
 | [common](docs/roles/common.md) | Global contract validation and shared host settings |
 | [ssh_hardening](docs/roles/ssh_hardening.md) | Hardened sshd_config, admin users, sudo |
@@ -181,15 +159,36 @@ Services are declared in `build/group_vars/all/main.yml` and drive nginx vhosts,
 firewall ports, and user creation. See `src/schemas/services.schema.json` for the
 full schema and `src/spec/services.md` for documentation.
 
-## Checkpoints
+## Generator workflow
 
-Current documented checkpoints are listed in `src/spec/checkpoints.md`.
+To update a managed file:
 
-Validate with:
+1. Edit the file's content in `FILE_MANIFEST` inside `src/generate_ansible_enterprise.py`.
+2. Run `make generate`.
+3. Commit the `src/` change. `build/` is gitignored.
 
-```bash
-make checkpoints
-```
+Files in `UNMANAGED_FILES` (e.g. `build/group_vars/all/vault.yml`) are never touched.
+
+## DNS notes
+
+- Edit DNS behavior in `src/`, not `build/`.
+- Primary zones support `overwrite: true` to let Ansible rewrite the zone file from inventory content.
+- When overwriting, the role preserves the current SOA serial and only bumps it if the zone actually changed.
+- SOA serials use `YYYYMMDDNN` and must stay within the DNS 32-bit serial range.
+- Out-of-range legacy serials fail hard and must be repaired manually; they are not silently reset downward.
+- SOA mailbox values are emitted in DNS RNAME form, not mailbox form. For example,
+  `hostmaster@example.com` becomes `hostmaster.example.com.`
+- Service entries support `aliases:`; aliases feed nginx `server_name`, DNS A-record derivation, and TLS SAN handling.
+
+## Search domain management
+
+`set_domain_name` is backend-aware. The common role routes search-domain
+configuration through the active manager instead of assuming `/etc/resolv.conf`
+is authoritative.
+
+Available backends: `auto`, `networkmanager`, `systemd-resolved`, `resolvconf`, `dhclient`, `static`.
+
+`auto` prefers: NetworkManager -> systemd-resolved -> resolvconf -> dhclient -> direct `/etc/resolv.conf`.
 
 ## Acknowledgements
 
