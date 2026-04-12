@@ -15,7 +15,7 @@ Rules:
 - Numbers are never reused
 - Descriptions should stay short and architecture-focused
 - ZIP exports should include the checkpoint in the filename
-- Validate ordering with: `python3 scripts/verify_checkpoints.py`
+- Validate ordering with: `python3 scripts/internal/verify_checkpoints.py`
 
 ## Defined checkpoints
 
@@ -116,14 +116,6 @@ Rules:
     client_cert_site.conf.j2 accessed svc.security.client_ca_path
     without | default().
 
-## Export naming rule
-
-Export archives should use:
-
-```text
-ansible-enterprise-<checkpoint>.zip
-```
-
 ## Checkpoint procedure
 
 Every checkpoint must include a HANDOFF.md update. The full procedure is:
@@ -137,7 +129,6 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
    architecture. HANDOFF.md is the primary document a new AI reads first —
    it must always describe the current state, not a past state.
 5. `git add src/ HANDOFF.md && git commit -m "feat: checkpoint-NNN-description"`
-6. `git archive --format=zip --prefix="ansible-enterprise-checkpoint-NNN-description/" HEAD -o ansible-enterprise-checkpoint-NNN-description.zip`
 
 11. `checkpoint-011-src-build-separation`
     Implements Option C directory separation. The repository is split into
@@ -607,7 +598,7 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
     notexample.com is NOT covered by example.com). Both zone creation and
     serial-update tasks loop over _effective_dns_zones; named.conf.local.j2
     registers the same list with BIND. A companion Python module
-    src/scripts/derive_dns_zones.py provides the canonical reference
+    src/scripts/internal/derive_dns_zones.py provides the canonical reference
     implementation of the algorithm (also usable standalone), and
     src/scripts/tests/test_derive_dns_zones.py adds 17 unit tests covering
     apex, subdomain, sibling, disabled, empty-domain, deduplication, and sort
@@ -682,7 +673,7 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
     - nftables mail port block (25, 587, 993, 465) extended with the same
       condition, keeping the firewall and role activation in sync.
 
-    src/scripts/resolve_capabilities.py: canonical Python reference
+    src/scripts/internal/resolve_capabilities.py: canonical Python reference
     implementation of resolve_providers(capabilities, services), also usable
     standalone with --vars-file.
 
@@ -690,7 +681,7 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
     empty inputs, disabled services, single and multiple capability resolution,
     deduplication, unknown capability names, and output sort order.
 
-    src/scripts/verify_repo_contracts.py:
+    src/scripts/internal/verify_repo_contracts.py:
     - verify_capability_contracts() added: fails if any enabled service
       declares a requires entry that does not name a known capabilities key.
     - resolve_capabilities.py and derive_dns_zones.py added to
@@ -3230,3 +3221,19 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      `-e proxmox_force_rebuild=true`. `config_change` decisions use a
      controller-side fingerprint stored under `build/.infra-state/`, and
      `state: absent` destroys the guest and clears cached state.
+
+206. `checkpoint-206-lxc-bootstrap-and-disk-volume-fix`
+     Fixes Proxmox LXC creation failing with "Only root can pass arbitrary
+     filesystem paths" when using API token auth. Root cause: the
+     `community.proxmox.proxmox` module sent `storage` and `disk` as separate
+     API parameters; PVE interpreted `storage` as a filesystem path request
+     which requires ticket auth, not token auth. Fix: replaced `storage`/`disk`
+     with `disk_volume` (storage + size), which constructs `rootfs=storage:size`
+     as a single API value — matching the working curl behavior.
+     Removed the debug curl script generation tasks from infra.yml (no longer
+     needed). Added `lxc_bootstrap.yml` playbook to install Python on minimal
+     LXC containers via `raw` module before `site.yml` runs. The SSH wait task
+     in infra.yml now skips hosts using `proxmox_pct_remote` connection.
+     Extended `proxmox_inventory_scaffold.py` with `--ansible-group`,
+     `--ansible-port`, `--ansible-connection`, `--ansible-become`, and
+     `--ansible-become-method` flags for hosts.ini generation.

@@ -30,7 +30,7 @@ The generator adds notice headers via `apply_notice()`.
 
 ## Verifier
 
-`scripts/verify_repo_contracts.py` imports the generator module and checks:
+`scripts/internal/verify_repo_contracts.py` imports the generator module and checks:
 
 - Required files exist
 - Generated files contain correct headers
@@ -44,5 +44,5 @@ The generator adds notice headers via `apply_notice()`.
 
 ```bash
 python3 generate_ansible_enterprise.py
-python3 scripts/verify_repo_contracts.py
+python3 scripts/internal/verify_repo_contracts.py
 ```

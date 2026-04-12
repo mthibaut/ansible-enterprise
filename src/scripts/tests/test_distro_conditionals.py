@@ -376,32 +376,61 @@ class TestProxmoxInfraRegression(unittest.TestCase):
 
     def test_infra_playbook_documents_rebuild_policy_and_force_override(self):
         text = _read(self.INFRA)
-        self.assertIn("proxmox_defaults.state / proxmox_vm.state", text)
+        self.assertIn("infra_defaults.state / infra.state", text)
         self.assertIn("present       : ensure the guest exists", text)
         self.assertIn("absent        : stop + destroy the guest if it exists", text)
-        self.assertIn("proxmox_defaults.rebuild_on / proxmox_vm.rebuild_on", text)
+        self.assertIn("infra_defaults.rebuild_on / infra.rebuild_on", text)
         self.assertIn("never         : keep the existing guest and update it in place", text)
         self.assertIn("config_change : destroy + recreate only when the desired config hash changes", text)
         self.assertIn("always        : destroy + recreate on every run", text)
-        self.assertIn("proxmox_force_rebuild=true", text)
+        self.assertIn("infra_force_rebuild=true", text)
         self.assertIn("build/.infra-state/<inventory_hostname>.json", text)
 
     def test_infra_playbook_persists_and_uses_config_hash_state(self):
         text = _read(self.INFRA)
-        self.assertIn("_proxmox_state", text)
-        self.assertIn("Validate proxmox lifecycle state", text)
-        self.assertIn("_proxmox_should_remove", text)
-        self.assertIn("_proxmox_rebuild_on", text)
-        self.assertIn("_proxmox_force_rebuild", text)
-        self.assertIn("_proxmox_rebuild_config", text)
-        self.assertIn("_proxmox_config_hash", text)
-        self.assertIn("_proxmox_state_dir", text)
-        self.assertIn("_proxmox_state_file", text)
-        self.assertIn("Decode previous Proxmox config state", text)
-        self.assertIn("_proxmox_last_config_hash", text)
-        self.assertIn("_proxmox_should_rebuild", text)
-        self.assertIn("Destroy existing Proxmox guest for removal or rebuild", text)
-        self.assertIn("Persist last applied Proxmox config fingerprint", text)
+        self.assertIn("_infra_provider", text)
+        self.assertIn("_infra_state", text)
+        self.assertIn("Validate infra lifecycle state", text)
+        self.assertIn("_infra_should_remove", text)
+        self.assertIn("_infra_rebuild_on", text)
+        self.assertIn("_infra_force_rebuild", text)
+        self.assertIn("_infra_rebuild_config", text)
+        self.assertIn("_infra_config_hash", text)
+        self.assertIn("_infra_state_dir", text)
+        self.assertIn("_infra_state_file", text)
+        self.assertIn("Decode previous infra config state", text)
+        self.assertIn("_infra_last_config_hash", text)
+        self.assertIn("_infra_should_rebuild", text)
+        self.assertIn("Destroy existing infrastructure instance for removal or rebuild", text)
+        self.assertIn("Persist last applied infra config fingerprint", text)
+        self.assertIn("provider in ['proxmox']", text)
+        self.assertIn("infra.proxmox.node", text)
+
+    def test_infra_playbook_uses_vm_specific_defaults(self):
+        text = _read(self.INFRA)
+        self.assertIn('_proxmox_default_cores: "{{ 2 if _infra_type == \'vm\' else 2 }}"', text)
+        self.assertIn('_proxmox_default_memory: "{{ 4096 if _infra_type == \'vm\' else 2048 }}"', text)
+        self.assertIn('cores: "{{ _proxmox.cores | default(_proxmox_default_cores) }}"', text)
+        self.assertIn('memory: "{{ _proxmox.memory | default(_proxmox_default_memory) }}"', text)
+
+    def test_infra_playbook_derives_internal_api_host_from_public_input(self):
+        text = _read(self.INFRA)
+        self.assertIn('_pve_node_hostvars: "{{ hostvars.get(_pve_node, {}) if _pve_node | length > 0 else {} }}"', text)
+        self.assertIn('_pve_api_host: "{{ _proxmox.api_host | default(_pve_node_hostvars.ansible_host | default(_pve_node), true) }}"', text)
+        self.assertIn('_pve_api_host | default(\'\') | length > 0', text)
+
+    def test_infra_playbook_validates_lxc_ostemplate_is_storage_backed(self):
+        text = _read(self.INFRA)
+        self.assertIn("Validate Proxmox LXC template reference format", text)
+        self.assertIn("not (_proxmox.ostemplate | default('')).startswith('/')", text)
+        self.assertIn("':' in (_proxmox.ostemplate | default(''))", text)
+        self.assertIn("vztmpl/", text)
+        self.assertIn("not a filesystem path", text)
+
+    def test_infra_playbook_creates_lxc_with_disk_volume(self):
+        text = _read(self.INFRA)
+        self.assertIn("Create Proxmox LXC container", text)
+        self.assertIn("disk_volume:", text)
 
 
 # ---------------------------------------------------------------------------

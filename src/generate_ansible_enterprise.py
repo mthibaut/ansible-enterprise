@@ -12,7 +12,7 @@
 # HOW TO UPDATE A MANAGED FILE:
 #   1. Edit the content in FILE_MANIFEST below.
 #   2. make generate   (or: cd src && python3 generate_ansible_enterprise.py)
-#   3. make validate   (or: cd src && python3 scripts/verify_repo_contracts.py)
+#   3. make validate   (or: cd src && python3 scripts/internal/verify_repo_contracts.py)
 #   4. Commit the src/ change (build/ is gitignored).
 #
 # TRUST ZONES:
@@ -5739,7 +5739,7 @@ node_exporter_version: "1.8.2"
     'roles/preflight/tasks/main.yml': """\
 ---
 # Services schema validation is performed at CI time by
-# src/scripts/verify_repo_contracts.py.
+# src/scripts/internal/verify_repo_contracts.py.
 # This task validates the SSH key is populated before any system changes.
 - name: Ensure admin SSH key is populated
   assert:
@@ -8199,23 +8199,23 @@ user_accounts: []
 """,
     'infra.yml': """\
 ---
-# infra.yml - Create/update Proxmox VMs and LXC containers from inventory.
+# infra.yml - Create/update infrastructure instances from inventory.
 #
 # Usage:
 #   ansible-playbook -i inventory ansible-enterprise/build/infra.yml
 #   ansible-playbook -i inventory ansible-enterprise/build/infra.yml --limit vm-example
-#   ansible-playbook -i inventory ansible-enterprise/build/infra.yml -e proxmox_force_rebuild=true
+#   ansible-playbook -i inventory ansible-enterprise/build/infra.yml -e infra_force_rebuild=true
 #
-# Each target host must define a `proxmox_vm` dict in host_vars (or inherit
-# proxmox_defaults from group_vars). At minimum, `proxmox_vm.vmid` and
-# `proxmox_vm.type` (vm or lxc) are required.
+# Each target host must define an `infra` dict in host_vars (or inherit
+# `infra_defaults` from group_vars). At minimum, `infra.provider`,
+# `infra.type`, and `infra.id` are required.
 #
-# Rebuild policy:
-#   proxmox_defaults.state / proxmox_vm.state
+# Lifecycle and rebuild policy:
+#   infra_defaults.state / infra.state
 #     - present       : ensure the guest exists
 #     - absent        : stop + destroy the guest if it exists
 #
-#   proxmox_defaults.rebuild_on / proxmox_vm.rebuild_on
+#   infra_defaults.rebuild_on / infra.rebuild_on
 #     - never         : keep the existing guest and update it in place
 #     - config_change : destroy + recreate only when the desired config hash changes
 #     - always        : destroy + recreate on every run
@@ -8223,33 +8223,40 @@ user_accounts: []
 # The config-change fingerprint is stored controller-side in:
 #   build/.infra-state/<inventory_hostname>.json
 
-- name: Provision Proxmox VMs and containers
+- name: Provision infrastructure instances
   hosts: all
   gather_facts: false
 
   vars:
-    _proxmox: "{{ proxmox_defaults | default({}) | combine(proxmox_vm | default({}), recursive=True) }}"
-    _proxmox_state: "{{ _proxmox.state | default('present') }}"
-    _proxmox_rebuild_on: "{{ _proxmox.rebuild_on | default('never') }}"
-    _proxmox_force_rebuild: "{{ proxmox_force_rebuild | default(false) | bool }}"
-    _proxmox_rebuild_config: >-
+    _infra: "{{ infra_defaults | default({}) | combine(infra | default({}), recursive=True) }}"
+    _infra_provider: "{{ _infra.provider | default('') }}"
+    _infra_type: "{{ _infra.type | default('') }}"
+    _infra_id: "{{ _infra.id | default('') }}"
+    _infra_state: "{{ _infra.state | default('present') }}"
+    _infra_rebuild_on: "{{ _infra.rebuild_on | default('never') }}"
+    _infra_force_rebuild: "{{ infra_force_rebuild | default(false) | bool }}"
+    _infra_rebuild_config: >-
       {{
-        _proxmox
+        _infra
         | dict2items
         | rejectattr('key', 'equalto', 'state')
         | rejectattr('key', 'equalto', 'rebuild_on')
         | list
         | items2dict
       }}
-    _proxmox_config_hash: "{{ (_proxmox_rebuild_config | to_nice_json) | hash('sha256') }}"
-    _proxmox_state_dir: "{{ playbook_dir }}/.infra-state"
-    _proxmox_state_file: "{{ _proxmox_state_dir }}/{{ inventory_hostname }}.json"
+    _infra_config_hash: "{{ (_infra_rebuild_config | to_nice_json) | hash('sha256') }}"
+    _infra_state_dir: "{{ playbook_dir }}/.infra-state"
+    _infra_state_file: "{{ _infra_state_dir }}/{{ inventory_hostname }}.json"
 
-    _pve_node: "{{ _proxmox.node }}"
-    _pve_api_host: "{{ hostvars[_pve_node].ansible_host }}"
+    _proxmox: "{{ _infra.proxmox | default({}) }}"
+    _pve_node: "{{ _proxmox.node | default('') }}"
+    _pve_node_hostvars: "{{ hostvars.get(_pve_node, {}) if _pve_node | length > 0 else {} }}"
+    _pve_api_host: "{{ _proxmox.api_host | default(_pve_node_hostvars.ansible_host | default(_pve_node), true) }}"
     _pve_api_user: "{{ _proxmox.api_user | default('root@pam') }}"
     _pve_api_token_id: "{{ vault_proxmox_api_token_id }}"
     _pve_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+    _proxmox_default_cores: "{{ 2 if _infra_type == 'vm' else 2 }}"
+    _proxmox_default_memory: "{{ 4096 if _infra_type == 'vm' else 2048 }}"
 
     _ci_sshkeys: >-
       {%- set keys = [] -%}
@@ -8266,149 +8273,174 @@ user_accounts: []
       {{ keys | join("\\n") }}
 
   tasks:
-    - name: Validate required proxmox vars
+    - name: Validate required infra vars
       assert:
         that:
-          - _proxmox.vmid is defined
-          - _proxmox.type is defined
-          - _proxmox.type in ['vm', 'lxc']
-          - _proxmox.node is defined
-        fail_msg: "Host {{ inventory_hostname }} must define proxmox.vmid, proxmox.type (vm|lxc), and proxmox.node"
+          - _infra_provider in ['proxmox']
+          - _infra_type in ['vm', 'lxc']
+          - _infra_id | string | length > 0
+        fail_msg: "Host {{ inventory_hostname }} must define infra.provider, infra.type (vm|lxc), and infra.id"
 
-    - name: Validate proxmox rebuild policy
+    - name: Validate supported provider-specific infra vars
       assert:
         that:
-          - _proxmox_rebuild_on in ['never', 'config_change', 'always']
+          - _proxmox.node | default('') | length > 0
+          - _pve_api_host | default('') | length > 0
+        fail_msg: "Host {{ inventory_hostname }} with provider=proxmox must define infra.proxmox.node"
+      when: _infra_provider == 'proxmox'
+
+    - name: Validate infra rebuild policy
+      assert:
+        that:
+          - _infra_rebuild_on in ['never', 'config_change', 'always']
         fail_msg: "rebuild_on for {{ inventory_hostname }} must be one of: never, config_change, always"
 
-    - name: Validate proxmox lifecycle state
+    - name: Validate infra lifecycle state
       assert:
         that:
-          - _proxmox_state in ['present', 'absent']
+          - _infra_state in ['present', 'absent']
         fail_msg: "state for {{ inventory_hostname }} must be one of: present, absent"
 
-    - name: Ensure local Proxmox infra state directory exists
+    - name: Validate Proxmox LXC template reference format
+      assert:
+        that:
+          - "_proxmox.ostemplate | default('') | length > 0"
+          - "not (_proxmox.ostemplate | default('')).startswith('/')"
+          - "':' in (_proxmox.ostemplate | default(''))"
+          - "':vztmpl/' in (_proxmox.ostemplate | default(''))"
+        fail_msg: >-
+          Host {{ inventory_hostname }} must define infra.proxmox.ostemplate as a
+          Proxmox storage-backed template volume ID such as
+          local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst, not a filesystem path.
+          The referenced storage must be file-based and have `Container template`
+          content enabled in Proxmox.
+      when:
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'lxc'
+
+    - name: Ensure local infra state directory exists
       file:
-        path: "{{ _proxmox_state_dir }}"
+        path: "{{ _infra_state_dir }}"
         state: directory
         mode: "0755"
       delegate_to: localhost
 
-    - name: Check previous Proxmox config state
+    - name: Check previous infra config state
       stat:
-        path: "{{ _proxmox_state_file }}"
+        path: "{{ _infra_state_file }}"
       delegate_to: localhost
-      register: _proxmox_state_stat
+      register: _infra_state_stat
 
-    - name: Read previous Proxmox config state
+    - name: Read previous infra config state
       slurp:
-        path: "{{ _proxmox_state_file }}"
+        path: "{{ _infra_state_file }}"
       delegate_to: localhost
-      when: _proxmox_state_stat.stat.exists | default(false)
-      register: _proxmox_state_raw
+      when: _infra_state_stat.stat.exists | default(false)
+      register: _infra_state_raw
 
-    - name: Decode previous Proxmox config state
+    - name: Decode previous infra config state
       set_fact:
-        _proxmox_last_state: "{{ _proxmox_state_raw.content | b64decode | from_json }}"
-        _proxmox_last_config_hash: "{{ (_proxmox_state_raw.content | b64decode | from_json).config_hash | default('') }}"
-      when: _proxmox_state_stat.stat.exists | default(false)
+        _infra_last_state: "{{ _infra_state_raw.content | b64decode | from_json }}"
+        _infra_last_config_hash: "{{ (_infra_state_raw.content | b64decode | from_json).config_hash | default('') }}"
+      when: _infra_state_stat.stat.exists | default(false)
 
-    - name: Check whether the Proxmox guest already exists
-      command: "{{ 'qm' if _proxmox.type == 'vm' else 'pct' }} status {{ _proxmox.vmid }}"
+    - name: Check whether the infrastructure instance already exists
+      command: "{{ 'qm' if _infra_type == 'vm' else 'pct' }} status {{ _infra_id }}"
       delegate_to: "{{ _pve_node }}"
-      register: _proxmox_guest_status
+      register: _infra_guest_status
       failed_when: false
       changed_when: false
 
-    - name: Decide whether the Proxmox guest must be rebuilt
+    - name: Decide whether the infrastructure instance must be rebuilt
       set_fact:
-        _proxmox_guest_exists: "{{ _proxmox_guest_status.rc == 0 }}"
-        _proxmox_should_remove: "{{ _proxmox_state == 'absent' and (_proxmox_guest_status.rc == 0) }}"
-        _proxmox_should_rebuild: >-
+        _infra_guest_exists: "{{ _infra_guest_status.rc == 0 }}"
+        _infra_should_remove: "{{ _infra_state == 'absent' and (_infra_guest_status.rc == 0) }}"
+        _infra_should_rebuild: >-
           {{
-            _proxmox_state == 'present'
+            _infra_state == 'present'
             and (
-              _proxmox_force_rebuild
-            or _proxmox_rebuild_on == 'always'
+              _infra_force_rebuild
+            or _infra_rebuild_on == 'always'
             or (
-              _proxmox_rebuild_on == 'config_change'
-              and (_proxmox_guest_status.rc == 0)
-              and (_proxmox_last_config_hash | default('') | length > 0)
-              and (_proxmox_last_config_hash | default('')) != _proxmox_config_hash
+              _infra_rebuild_on == 'config_change'
+              and (_infra_guest_status.rc == 0)
+              and (_infra_last_config_hash | default('') | length > 0)
+              and (_infra_last_config_hash | default('')) != _infra_config_hash
             )
             )
           }}
 
-    - name: Stop existing Proxmox guest before removal or rebuild
-      command: "{{ 'qm' if _proxmox.type == 'vm' else 'pct' }} stop {{ _proxmox.vmid }}"
+    - name: Stop existing infrastructure instance before removal or rebuild
+      command: "{{ 'qm' if _infra_type == 'vm' else 'pct' }} stop {{ _infra_id }}"
       delegate_to: "{{ _pve_node }}"
-      register: _proxmox_stop_guest
+      register: _infra_stop_guest
       failed_when: false
-      changed_when: _proxmox_stop_guest.rc == 0
+      changed_when: _infra_stop_guest.rc == 0
       when:
-        - _proxmox_guest_exists | default(false) | bool
-        - (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+        - _infra_guest_exists | default(false) | bool
+        - (_infra_should_remove | default(false) | bool) or (_infra_should_rebuild | default(false) | bool)
 
-    - name: Wait for Proxmox guest to stop before removal or rebuild
-      command: "{{ 'qm' if _proxmox.type == 'vm' else 'pct' }} status {{ _proxmox.vmid }}"
+    - name: Wait for infrastructure instance to stop before removal or rebuild
+      command: "{{ 'qm' if _infra_type == 'vm' else 'pct' }} status {{ _infra_id }}"
       delegate_to: "{{ _pve_node }}"
-      register: _proxmox_stop_status
+      register: _infra_stop_status
       changed_when: false
-      until: "'status: stopped' in (_proxmox_stop_status.stdout | default(''))"
+      until: "'status: stopped' in (_infra_stop_status.stdout | default(''))"
       retries: 24
       delay: 5
       when:
-        - _proxmox_guest_exists | default(false) | bool
-        - (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+        - _infra_guest_exists | default(false) | bool
+        - (_infra_should_remove | default(false) | bool) or (_infra_should_rebuild | default(false) | bool)
 
-    - name: Destroy existing Proxmox guest for removal or rebuild
+    - name: Destroy existing infrastructure instance for removal or rebuild
       command: >-
-        {{ 'qm destroy ' ~ (_proxmox.vmid | string) ~ ' --destroy-unreferenced-disks 1 --purge 1'
-           if _proxmox.type == 'vm'
-           else 'pct destroy ' ~ (_proxmox.vmid | string) ~ ' --purge 1' }}
+        {{ 'qm destroy ' ~ (_infra_id | string) ~ ' --destroy-unreferenced-disks 1 --purge 1'
+           if _infra_type == 'vm'
+           else 'pct destroy ' ~ (_infra_id | string) ~ ' --purge 1' }}
       delegate_to: "{{ _pve_node }}"
       when:
-        - _proxmox_guest_exists | default(false) | bool
-        - (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+        - _infra_guest_exists | default(false) | bool
+        - (_infra_should_remove | default(false) | bool) or (_infra_should_rebuild | default(false) | bool)
 
-    - name: Remove cached Proxmox config state after removal or before rebuild
+    - name: Remove cached infra config state after removal or before rebuild
       file:
-        path: "{{ _proxmox_state_file }}"
+        path: "{{ _infra_state_file }}"
         state: absent
       delegate_to: localhost
-      when: (_proxmox_should_remove | default(false) | bool) or (_proxmox_should_rebuild | default(false) | bool)
+      when: (_infra_should_remove | default(false) | bool) or (_infra_should_rebuild | default(false) | bool)
 
-    - name: Clone VM from template
+    - name: Provision Proxmox VM from template
       community.proxmox.proxmox_kvm:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
         node: "{{ _pve_node }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         name: "{{ inventory_hostname }}"
         clone: "{{ _proxmox.template_name | default(omit) }}"
-        newid: "{{ _proxmox.vmid }}"
+        newid: "{{ _infra_id }}"
         full: true
         state: present
         timeout: 300
       delegate_to: localhost
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'vm'
-      register: _vm_clone
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'vm'
 
-    - name: Configure VM hardware
+    - name: Configure Proxmox VM hardware
       community.proxmox.proxmox_kvm:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
         node: "{{ _pve_node }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         name: "{{ inventory_hostname }}"
-        cores: "{{ _proxmox.cores | default(2) }}"
-        memory: "{{ _proxmox.memory | default(2048) }}"
+        cores: "{{ _proxmox.cores | default(_proxmox_default_cores) }}"
+        memory: "{{ _proxmox.memory | default(_proxmox_default_memory) }}"
         onboot: "{{ _proxmox.onboot | default(true) }}"
         agent: "enabled=1"
         net:
@@ -8417,17 +8449,18 @@ user_accounts: []
         state: present
       delegate_to: localhost
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'vm'
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'vm'
 
-    - name: Configure VM cloud-init
+    - name: Configure Proxmox VM cloud-init
       community.proxmox.proxmox_kvm:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
         node: "{{ _pve_node }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         ciuser: root
         cipassword: "{{ _proxmox.cipassword | default(omit) }}"
         sshkeys: "{{ _ci_sshkeys }}"
@@ -8439,16 +8472,17 @@ user_accounts: []
         state: present
       delegate_to: localhost
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'vm'
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'vm'
 
-    - name: Resize VM disks
+    - name: Resize Proxmox VM disks
       community.proxmox.proxmox_disk:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         disk: "{{ item.disk | default('scsi' + (idx | string)) }}"
         size: "{{ item.size }}"
         state: resized
@@ -8458,38 +8492,40 @@ user_accounts: []
         index_var: idx
         label: "{{ item.disk | default('scsi' + (idx | string)) }} -> {{ item.size }}"
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'vm'
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'vm'
 
-    - name: Start VM
+    - name: Start Proxmox VM
       community.proxmox.proxmox_kvm:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
         node: "{{ _pve_node }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         state: started
       delegate_to: localhost
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'vm'
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'vm'
         - _proxmox.started | default(true) | bool
-
-    - name: Create LXC container
+    - name: Create Proxmox LXC container
       community.proxmox.proxmox:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
         node: "{{ _pve_node }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         hostname: "{{ inventory_hostname }}"
         ostemplate: "{{ _proxmox.ostemplate }}"
-        storage: "{{ _proxmox.storage | default('local-lvm') }}"
-        disk: "{{ _proxmox.disk | default('8') }}"
-        cores: "{{ _proxmox.cores | default(2) }}"
-        memory: "{{ _proxmox.memory | default(2048) }}"
+        disk_volume:
+          storage: "{{ _proxmox.storage | default('local-lvm') }}"
+          size: "{{ _proxmox.disk | default('8') }}"
+        cores: "{{ _proxmox.cores | default(_proxmox_default_cores) }}"
+        memory: "{{ _proxmox.memory | default(_proxmox_default_memory) }}"
         swap: "{{ _proxmox.swap | default(512) }}"
         onboot: "{{ _proxmox.onboot | default(true) }}"
         netif:
@@ -8502,41 +8538,44 @@ user_accounts: []
         state: present
       delegate_to: localhost
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'lxc'
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'lxc'
 
-    - name: Start LXC container
+    - name: Start Proxmox LXC container
       community.proxmox.proxmox:
         api_host: "{{ _pve_api_host }}"
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
         node: "{{ _pve_node }}"
-        vmid: "{{ _proxmox.vmid }}"
+        vmid: "{{ _infra_id }}"
         state: started
       delegate_to: localhost
       when:
-        - _proxmox_state == 'present'
-        - _proxmox.type == 'lxc'
+        - _infra_provider == 'proxmox'
+        - _infra_state == 'present'
+        - _infra_type == 'lxc'
         - _proxmox.started | default(true) | bool
 
-    - name: Persist last applied Proxmox config fingerprint
+    - name: Persist last applied infra config fingerprint
       copy:
-        dest: "{{ _proxmox_state_file }}"
+        dest: "{{ _infra_state_file }}"
         mode: "0644"
         content: |
           {{
             {
               "inventory_hostname": inventory_hostname,
-              "vmid": _proxmox.vmid,
-              "type": _proxmox.type,
-              "state": _proxmox_state,
-              "config_hash": _proxmox_config_hash,
-              "rebuild_on": _proxmox_rebuild_on
+              "provider": _infra_provider,
+              "id": _infra_id,
+              "type": _infra_type,
+              "state": _infra_state,
+              "config_hash": _infra_config_hash,
+              "rebuild_on": _infra_rebuild_on
             } | to_nice_json
           }}
       delegate_to: localhost
-      when: _proxmox_state == 'present'
+      when: _infra_state == 'present'
 
     - name: Wait for SSH to become available
       command: ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes {{ ansible_user | default('root') }}@{{ ansible_host }} true
@@ -8547,8 +8586,60 @@ user_accounts: []
       until: _ssh_check.rc == 0
       changed_when: false
       when:
-        - _proxmox_state == 'present'
+        - _infra_state == 'present'
         - _proxmox.started | default(true) | bool
+        - ansible_connection | default('ssh') not in ['community.proxmox.proxmox_pct_remote']
+""",
+    'lxc_bootstrap.yml': """\
+---
+# lxc_bootstrap.yml - Install Python on minimal LXC containers.
+#
+# Run once after infra.yml creates the containers and before site.yml:
+#   ansible-playbook -i inventory ansible-enterprise/build/lxc_bootstrap.yml
+#
+# Requires no Python on the target -- uses the raw module exclusively.
+# Skips hosts that already have a working Python interpreter.
+
+- name: Bootstrap Python on LXC containers
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Check for existing Python interpreter
+      raw: command -v python3 || command -v python
+      register: _python_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Python
+      raw: |
+        set -e
+        if command -v apk >/dev/null 2>&1; then
+          apk add --no-cache python3
+        elif command -v dnf >/dev/null 2>&1; then
+          dnf install -y -q python3
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y -q python3
+        elif command -v apt-get >/dev/null 2>&1; then
+          apt-get update -qq && apt-get install -y -qq python3
+        elif command -v zypper >/dev/null 2>&1; then
+          zypper install -y -q python3
+        elif command -v pacman >/dev/null 2>&1; then
+          pacman -Sy --noconfirm python
+        elif command -v emerge >/dev/null 2>&1; then
+          emerge --quiet dev-lang/python
+        elif command -v pkg >/dev/null 2>&1; then
+          pkg install -y python3
+        elif command -v xbps-install >/dev/null 2>&1; then
+          xbps-install -Sy python3
+        else
+          echo "ERROR: no supported package manager found" >&2
+          exit 1
+        fi
+      when: _python_check.rc != 0
+
+    - name: Verify Python and gather facts
+      setup:
 """,
     'site.yml': """\
 ---

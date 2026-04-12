@@ -35,7 +35,7 @@ pip install jsonschema pyyaml
 Optional controller-side dependencies:
 
 ```bash
-# Proxmox provisioning from infra.yml
+# Infrastructure provisioning via infra.yml (current provider: proxmox)
 pip install proxmoxer requests
 ansible-galaxy collection install community.proxmox
 
@@ -45,6 +45,14 @@ ansible-galaxy collection install community.proxmox
 Infrastructure provisioning docs:
 
 - [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md)
+
+Provider status:
+
+- `proxmox`: implemented
+- `aws`: not implemented yet
+- manual provisioning: supported fallback when infra automation is unavailable or unnecessary
+
+For manually provisioned hosts, skip `infra.yml` and run `site.yml` after the machine already exists and is reachable by Ansible.
 
 Copy and populate the vault:
 
@@ -85,6 +93,9 @@ make checkpoints     # checkpoint ordering
 make services        # services schema
 make order           # service dependency order
 ```
+
+Repository-facing helper tools live in `src/scripts/`.
+Generator, contract, and canonical-reference internals live in `src/scripts/internal/`.
 
 ## DNS notes
 
@@ -178,14 +189,6 @@ Validate with:
 
 ```bash
 make checkpoints
-```
-
-Tag and export:
-
-```bash
-git tag checkpoint-011-src-build-separation
-git archive --format=zip --prefix="ansible-enterprise-checkpoint-011-src-build-separation/" \
-  checkpoint-011-src-build-separation -o ansible-enterprise-checkpoint-011-src-build-separation.zip
 ```
 
 ## Acknowledgements

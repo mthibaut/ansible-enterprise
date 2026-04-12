@@ -2,7 +2,7 @@
 # PROMPT.md is listed for every entry as the architectural spec.
 # generate_ansible_enterprise.py is the proximate mechanism that writes each file.
 # Paths are relative to src/.
-# Validate with: cd src && python3 scripts/verify_repo_contracts.py
+# Validate with: cd src && python3 scripts/internal/verify_repo_contracts.py
 
 generated_contracts:
   group_vars/all/main.yml:
@@ -48,6 +48,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   infra.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  lxc_bootstrap.yml:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py

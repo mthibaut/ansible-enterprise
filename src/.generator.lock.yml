@@ -1,5 +1,5 @@
-source_hash: c066876362f473762ffd128a7ce738db782fc611fcd24e7f041cf811f396406d
-output_hash: 49d27e58f219fd882bbdca1153ecc12b6d2d1038671945d087e5c85007cd8e87
+source_hash: 8cc68b09f3bdfbddef2e87b1c044eef75abd7b78ba8b328e7667aabc786fbc65
+output_hash: 4bf18cfa7cdf2b70875c28bd53435b762bd0eef294082fdac647822cdea622e1
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -9,6 +9,7 @@ generated_files:
   - inventory/host_vars/.gitkeep
   - inventory/hosts.ini.example
   - inventory/pull.ini
+  - lxc_bootstrap.yml
   - molecule/default/converge.yml
   - molecule/default/molecule.yml
   - molecule/default/verify.yml

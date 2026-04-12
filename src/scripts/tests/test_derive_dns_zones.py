@@ -1,5 +1,5 @@
 """
-Unit tests for scripts/derive_dns_zones.py
+Unit tests for scripts/internal/derive_dns_zones.py
 
 Tests derive_zones() against synthetic declared_zones / services inputs,
 covering the same cases the Jinja2 set_fact expression handles at runtime.
@@ -9,7 +9,7 @@ import sys
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / "src" / "scripts"))
+sys.path.insert(0, str(REPO / "src" / "scripts" / "internal"))
 from derive_dns_zones import derive_zones
 
 

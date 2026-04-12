@@ -53,7 +53,7 @@ The exact content standard for protected roles depends on the current
 checkpoint. See the Protected Role Scaffold Rule below.
 
 Protected roles: `firewall_geo`, `mailserver`, `nextcloud`
-Protected scripts: `scripts/verify_repo_contracts.py`, `scripts/resolve_service_order.py`
+Protected internal scripts: `scripts/internal/verify_repo_contracts.py`, `scripts/internal/resolve_service_order.py`
 
 ### Free Development Zone
 
@@ -89,7 +89,7 @@ Every manifest entry must be a key-value pair mapping the repository-relative
 path to the file content (excluding the notice header, which is applied automatically).
 
 Every file under `MANAGED_ROOTS` must appear in `FILE_MANIFEST` or `UNMANAGED_FILES`.
-`scripts/verify_repo_contracts.py` enforces this at CI time.
+`scripts/internal/verify_repo_contracts.py` enforces this at CI time.
 
 ## Generation Contracts
 
@@ -157,8 +157,24 @@ The repository must continue to provide:
 Committed examples and documentation must not leak operator-local
 configuration from a real environment.
 
-CI enforces a denylist-based scrub check in
-`src/scripts/verify_repo_contracts.py` for known local identifiers such as:
+The repository contains the scrub-check mechanism in
+`src/scripts/internal/verify_repo_contracts.py`, but the operator-specific denylist
+must live outside the git tree in an external YAML file loaded by the verifier.
+By default the verifier looks for:
+
+- `../.ansible-enterprise-local-config-patterns.yml` relative to the repo root
+- or the path in `ANSIBLE_ENTERPRISE_LOCAL_CONFIG_PATTERNS_FILE`
+
+That external file should provide a top-level `patterns:` mapping of regex
+to human-readable label. Example shape:
+
+```yaml
+patterns:
+  "\\bhypervisor-alpha\\b": "local node name"
+  "\\b198\\.51\\.100\\.44\\b": "local IP example"
+```
+
+The external denylist should contain known local identifiers such as:
 
 - private domain fragments copied from real infrastructure
 - private LAN example addresses from the operator environment

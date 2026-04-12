@@ -8,7 +8,7 @@
 set -euo pipefail
 
 echo "Running repository contract verification..."
-python3 scripts/verify_repo_contracts.py
-python3 scripts/validate_services_schema.py
-python3 scripts/verify_checkpoints.py
+python3 scripts/internal/verify_repo_contracts.py
+python3 scripts/internal/validate_services_schema.py
+python3 scripts/internal/verify_checkpoints.py
 echo "Contracts verified."

@@ -1,5 +1,5 @@
 """
-Unit tests for scripts/resolve_service_order.py
+Unit tests for scripts/internal/resolve_service_order.py
 
 Tests the resolve_order() function directly against synthetic services dicts.
 """
@@ -8,7 +8,7 @@ import pathlib
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / "src" / "scripts"))
+sys.path.insert(0, str(REPO / "src" / "scripts" / "internal"))
 from resolve_service_order import resolve_order
 
 

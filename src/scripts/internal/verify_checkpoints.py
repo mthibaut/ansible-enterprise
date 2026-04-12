@@ -11,8 +11,8 @@ import pathlib
 import re
 import sys
 
-# SRC = src/ directory (parent of scripts/)
-SRC = pathlib.Path(__file__).resolve().parent.parent
+# SRC = src/ directory (grandparent of internal/)
+SRC = pathlib.Path(__file__).resolve().parents[2]
 CHECKPOINTS_FILE = SRC / "spec" / "checkpoints.md"
 PATTERN = re.compile(r"`(checkpoint-(\d{3})-[a-z0-9][a-z0-9-]*)`")
 

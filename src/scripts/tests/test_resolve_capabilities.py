@@ -1,5 +1,5 @@
 """
-Unit tests for scripts/resolve_capabilities.py
+Unit tests for scripts/internal/resolve_capabilities.py
 
 Tests resolve_providers() against synthetic capabilities / services inputs.
 """
@@ -8,7 +8,7 @@ import sys
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / "src" / "scripts"))
+sys.path.insert(0, str(REPO / "src" / "scripts" / "internal"))
 from resolve_capabilities import resolve_providers
 
 # Canonical capabilities dict matching group_vars/all/main.yml

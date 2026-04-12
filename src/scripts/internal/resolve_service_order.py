@@ -12,7 +12,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 import yaml
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 BUILD = REPO / "build"
 
 

@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 from jsonschema import validate
 
-SRC = Path(__file__).resolve().parents[1]
+SRC = Path(__file__).resolve().parents[2]
 BUILD = SRC.parent / "build"
 schema = json.loads((SRC / "schemas/services.schema.json").read_text(encoding="utf-8"))
 data = yaml.safe_load((BUILD / "group_vars/all/main.yml").read_text(encoding="utf-8")) or {}

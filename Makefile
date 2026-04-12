@@ -10,19 +10,19 @@ generate:
 	cd src && python3 generate_ansible_enterprise.py
 
 validate:
-	cd src && python3 scripts/verify_repo_contracts.py
+	cd src && python3 scripts/internal/verify_repo_contracts.py
 
 test:
 	cd src && python3 -m unittest discover -s scripts/tests -p "test_*.py" -v
 
 services:
-	cd src && python3 scripts/validate_services_schema.py
+	cd src && python3 scripts/internal/validate_services_schema.py
 
 checkpoints:
-	cd src && python3 scripts/verify_checkpoints.py
+	cd src && python3 scripts/internal/verify_checkpoints.py
 
 order:
-	cd src && python3 scripts/resolve_service_order.py
+	cd src && python3 scripts/internal/resolve_service_order.py
 
 clean:
 	rm -rf build/ src/.regen-staging src/.regen-staging-verify

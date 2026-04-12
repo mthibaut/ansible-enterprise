@@ -1,6 +1,6 @@
 /generate_ansible_enterprise.py @maintainer
-/scripts/verify_repo_contracts.py @maintainer
-/scripts/resolve_service_order.py @maintainer
+/src/scripts/internal/verify_repo_contracts.py @maintainer
+/src/scripts/internal/resolve_service_order.py @maintainer
 /schemas/* @maintainer
 /roles/firewall_geo/ @maintainer
 /roles/mailserver/ @maintainer

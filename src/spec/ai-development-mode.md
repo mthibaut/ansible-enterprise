@@ -36,8 +36,8 @@ Protected files:
 - `roles/firewall_geo/**`
 - `roles/mailserver/**`
 - `roles/nextcloud/**`
-- `scripts/verify_repo_contracts.py`
-- `scripts/resolve_service_order.py`
+- `scripts/internal/verify_repo_contracts.py`
+- `scripts/internal/resolve_service_order.py`
 
 Rules:
 
@@ -62,9 +62,9 @@ After modifying the repository:
 
 ```bash
 python3 generate_ansible_enterprise.py
-python3 scripts/verify_repo_contracts.py
-python3 scripts/validate_services_schema.py
-python3 scripts/verify_checkpoints.py
+python3 scripts/internal/verify_repo_contracts.py
+python3 scripts/internal/validate_services_schema.py
+python3 scripts/internal/verify_checkpoints.py
 ```
 
 ## AI Contributor Rules

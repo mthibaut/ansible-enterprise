@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -19,7 +20,7 @@ import yaml
 # REPO  = repo root  (parent of src/)
 # SRC   = src/       (spec, schemas, scripts, generator)
 # BUILD = build/     (generated Ansible runtime, gitignored)
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 SRC = REPO / "src"
 BUILD = REPO / "build"
 LOCK_FILE = SRC / ".generator.lock.yml"
@@ -63,8 +64,8 @@ REQUIRED_SRC_FILES = [
     "spec/ai-development-mode.md",
     "scripts/generation_contracts.yml",
     "scripts/known_gaps.yml",
-    "scripts/verify_repo_contracts.py",
-    "scripts/verify_checkpoints.py",
+    "scripts/internal/verify_repo_contracts.py",
+    "scripts/internal/verify_checkpoints.py",
     "schemas/services.schema.json",
 ]
 
@@ -73,10 +74,12 @@ REQUIRED_SRC_FILES = [
 REQUIRED_TEST_COVERAGE = {
     "../build/roles/geoip/files/geoip_ingest.py":    "test_geoip_ingest.py",
     "../build/roles/dns/files/dns-bump-serial":        "test_dns_bump_serial.py",
-    "scripts/resolve_service_order.py":               "test_resolve_service_order.py",
-    "scripts/validate_services_schema.py":            "test_services_schema.py",
-    "scripts/resolve_capabilities.py":                "test_resolve_capabilities.py",
-    "scripts/derive_dns_zones.py":                    "test_derive_dns_zones.py",
+    "scripts/proxmox_infra_render.py":               "test_proxmox_inventory_scaffold.py",
+    "scripts/proxmox_inventory_scaffold.py":         "test_proxmox_inventory_scaffold.py",
+    "scripts/internal/resolve_service_order.py":      "test_resolve_service_order.py",
+    "scripts/internal/validate_services_schema.py":   "test_services_schema.py",
+    "scripts/internal/resolve_capabilities.py":       "test_resolve_capabilities.py",
+    "scripts/internal/derive_dns_zones.py":           "test_derive_dns_zones.py",
     "../build/roles/dns/files/sync_dns_records.py":   "test_sync_dns_records.py",
 }
 
@@ -89,28 +92,14 @@ REQUIRED_ROOT_FILES = [
     "ansible.cfg",
 ]
 
-# The committed repo must not contain obviously local/operator-specific
-# configuration examples copied from a real environment. Keep this list small
-# and explicit so generic documentation examples remain usable.
-LOCAL_CONFIG_FORBIDDEN_PATTERNS = {
-    r"\bgregoriusgild\b": "private domain fragment 'gregoriusgild'",
-    r"\bkjsl\b": "private domain fragment 'kjsl'",
-    r"\bpve-nuc\b": "local Proxmox node naming pattern 'pve-nuc'",
-    r"\bautomator_nosep\b": "local Proxmox API token example 'automator_nosep'",
-    r"\b192\.168\.20\.\d{1,3}\b": "private LAN address in committed example content",
-    r"\bhome\.lan\b": "local search/domain example 'home.lan'",
-}
+LOCAL_CONFIG_PATTERNS_ENV = "ANSIBLE_ENTERPRISE_LOCAL_CONFIG_PATTERNS_FILE"
+DEFAULT_LOCAL_CONFIG_PATTERNS_FILE = REPO.parent / ".ansible-enterprise-local-config-patterns.yml"
 
 LOCAL_CONFIG_SCAN_ROOTS = [
     REPO / "README.md",
     REPO / "docs",
     SRC,
 ]
-
-LOCAL_CONFIG_EXEMPT_PATHS = {
-    SRC / "scripts" / "verify_repo_contracts.py",
-    SRC / "scripts" / "tests" / "test_verify_repo_contracts.py",
-}
 
 
 def fail(message: str) -> None:
@@ -267,9 +256,38 @@ def verify_export_hygiene() -> None:
             fail(f"build/ file should not be committed: {line}")
 
 
+def local_config_patterns_file() -> Path:
+    override = os.environ.get(LOCAL_CONFIG_PATTERNS_ENV, "").strip()
+    if override:
+        return Path(override)
+    return DEFAULT_LOCAL_CONFIG_PATTERNS_FILE
+
+
+def load_local_config_forbidden_patterns() -> dict[str, str]:
+    path = local_config_patterns_file()
+    if not path.exists():
+        return {}
+
+    data = load_yaml(path)
+    patterns = data.get("patterns")
+    if not isinstance(patterns, dict):
+        fail(
+            f"{path} must define a top-level 'patterns' mapping "
+            f"of regex -> human-readable label"
+        )
+    return {
+        str(pattern): str(label)
+        for pattern, label in patterns.items()
+    }
+
+
 def find_local_config_violations() -> list[str]:
     violations: list[str] = []
     text_paths: list[Path] = []
+    patterns = load_local_config_forbidden_patterns()
+
+    if not patterns:
+        return violations
 
     for root in LOCAL_CONFIG_SCAN_ROOTS:
         if not root.exists():
@@ -284,8 +302,6 @@ def find_local_config_violations() -> list[str]:
                 continue
             if path.suffix in {".pyc", ".zip"}:
                 continue
-            if path in LOCAL_CONFIG_EXEMPT_PATHS:
-                continue
             text_paths.append(path)
 
     for path in text_paths:
@@ -297,7 +313,7 @@ def find_local_config_violations() -> list[str]:
             rel = path.relative_to(REPO)
         except ValueError:
             rel = path
-        for pattern, label in LOCAL_CONFIG_FORBIDDEN_PATTERNS.items():
+        for pattern, label in patterns.items():
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if not match:
                 continue
@@ -346,7 +362,7 @@ def verify_regenerated_tree(module) -> None:
 
 def verify_checkpoints() -> None:
     result = subprocess.run(
-        ["python3", str(SRC / "scripts/verify_checkpoints.py")],
+        ["python3", str(SRC / "scripts/internal/verify_checkpoints.py")],
         capture_output=True, text=True, cwd=str(REPO)
     )
     if result.returncode != 0:

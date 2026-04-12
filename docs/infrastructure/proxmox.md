@@ -1,7 +1,16 @@
 # Proxmox Infrastructure Provisioning
 
-`infra.yml` creates and manages Proxmox VMs and LXC containers from inventory.
+`infra.yml` creates and manages infrastructure instances from inventory.
+This document covers the current `proxmox` provider implementation.
 It is separate from `site.yml`, which configures hosts after they exist.
+
+## Provider status
+
+- `proxmox`: implemented
+- `aws`: not implemented yet
+- manual provisioning: supported fallback when provider automation is unavailable or unnecessary
+
+If you are not using an implemented `infra.yml` provider, provision the host manually first and then use `site.yml` for configuration management.
 
 ## Prerequisites
 
@@ -20,7 +29,8 @@ ansible-galaxy collection install community.proxmox
 Create a Proxmox API token in the PVE web UI at `Datacenter -> Permissions -> API Tokens`.
 This project keeps the Proxmox user and token name separate:
 
-- `proxmox_defaults.api_user` contains the owning user, for example `root@pam`
+- `infra_defaults.proxmox.api_host` optionally overrides the Proxmox API endpoint if it differs from the node hostname or its `ansible_host`
+- `infra_defaults.proxmox.api_user` contains the owning user, for example `root@pam`
 - `vault_proxmox_api_token_id` contains only the token name, for example `ansible`
 
 For this setup, create the token with **Privilege Separation disabled**.
@@ -28,8 +38,11 @@ For this setup, create the token with **Privilege Separation disabled**.
 Store them like this:
 
 ```yaml
-proxmox_defaults:
-  api_user: root@pam
+infra_defaults:
+  provider: proxmox
+  proxmox:
+    api_host: 192.0.2.20
+    api_user: root@pam
 
 vault_proxmox_api_token_id: "ansible"
 vault_proxmox_api_token_secret: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
@@ -40,73 +53,85 @@ vault_proxmox_api_token_secret: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 Group-level defaults go in `group_vars/<group>/main.yml`:
 
 ```yaml
-proxmox_defaults:
-  node: pve01
-  api_user: root@pam
-  template_vmid: 9000
-  storage: local-lvm
+infra_defaults:
+  provider: proxmox
   state: present
   rebuild_on: never
-  cores: 2
-  memory: 2048
-  onboot: true
-  started: true
-  net:
-    bridge: vmbr0
-    gw: 192.0.2.1
-  nameserver: 192.0.2.53
-  searchdomain: example.internal
+  proxmox:
+    node: pve01
+    # Optional if the API endpoint differs from the node inventory address.
+    # If omitted, infra.yml uses hostvars[pve01].ansible_host and then pve01.
+    api_host: 192.0.2.20
+    api_user: root@pam
+    template_vmid: 9000
+    storage: local-lvm
+    cores: 2
+    memory: 2048
+    onboot: true
+    started: true
+    net:
+      bridge: vmbr0
+      gw: 192.0.2.1
+    nameserver: 192.0.2.53
+    searchdomain: example.internal
 ```
 
-Per-host overrides go in `host_vars/<host>/infra.yml` using `proxmox_vm`.
-Values are merged on top of `proxmox_defaults`, so you only need to specify the differences.
+Per-host overrides go in `host_vars/<host>/infra.yml` using `infra`.
+Values are merged on top of `infra_defaults`, so you only need to specify the differences.
 
 ### VM example
 
 ```yaml
-proxmox_vm:
+infra:
+  provider: proxmox
   type: vm
-  vmid: 110
+  id: 110
   state: present
   rebuild_on: config_change
-  cores: 4
-  memory: 4096
-  disks:
-    - size: 15G
-    - size: 2000G
-  net:
-    ip: 192.0.2.90/24
+  proxmox:
+    cores: 4
+    memory: 4096
+    disks:
+      - size: 15G
+      - size: 2000G
+    net:
+      ip: 192.0.2.90/24
 ```
 
 ### LXC example
 
 ```yaml
-proxmox_vm:
+infra:
+  provider: proxmox
   type: lxc
-  vmid: 200
+  id: 200
   state: present
   rebuild_on: never
-  ostemplate: "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
-  disk: local:8
-  cores: 1
-  memory: 512
-  net:
-    ip: 192.0.2.91/24
+  proxmox:
+    ostemplate: "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+    disk: local:8
+    cores: 1
+    memory: 512
+    net:
+      ip: 192.0.2.91/24
 ```
 
 Note:
 - Using local storage for LXC root filesystems typically requires root-level Proxmox permissions. If your API token is more restricted, use a storage target and permission model that your token can actually allocate on.
+- LXC `ostemplate` must come from a file-based Proxmox storage that has `Container template` content enabled. The container rootfs `storage` can still be something different, such as `local-lvm`.
 
 ## Lifecycle and rebuild policy
 
 `infra.yml` supports both lifecycle and rebuild policy controls:
 
 ```yaml
-proxmox_defaults:
+infra_defaults:
+  provider: proxmox
   state: present
   rebuild_on: never
 
-proxmox_vm:
+infra:
+  provider: proxmox
   state: present
   rebuild_on: config_change
 ```
@@ -122,17 +147,18 @@ Rebuild values:
 - `config_change`: destroy and recreate the guest when the effective desired config changes
 - `always`: destroy and recreate the guest on every run
 
-The per-host `proxmox_vm.state` value overrides `proxmox_defaults.state`.
-The per-host `proxmox_vm.rebuild_on` value overrides `proxmox_defaults.rebuild_on`.
+The per-host `infra.state` value overrides `infra_defaults.state`.
+The per-host `infra.rebuild_on` value overrides `infra_defaults.rebuild_on`.
 
 When `state: absent`, the playbook removes the guest and skips all provisioning, startup, and SSH wait steps.
 
 Example removal:
 
 ```yaml
-proxmox_vm:
+infra:
+  provider: proxmox
   type: vm
-  vmid: 110
+  id: 110
   state: absent
 ```
 
@@ -144,7 +170,7 @@ SSH keys from `admin_users`, and `admin_ssh_public_key` as fallback, are injecte
 
 ## Usage
 
-Provision all hosts with `proxmox_vm` defined:
+Provision all hosts with `infra` defined:
 
 ```bash
 ansible-playbook -i inventory ansible-enterprise/build/infra.yml
@@ -159,15 +185,73 @@ ansible-playbook -i inventory ansible-enterprise/build/infra.yml --limit vm-exam
 Force a rebuild without changing inventory:
 
 ```bash
-ansible-playbook -i inventory ansible-enterprise/build/infra.yml -e proxmox_force_rebuild=true --limit vm-example
+ansible-playbook -i inventory ansible-enterprise/build/infra.yml -e infra_force_rebuild=true --limit vm-example
 ```
 
-`proxmox_force_rebuild=true` overrides `rebuild_on` for that run and always reprovisions the guest.
+`infra_force_rebuild=true` overrides `rebuild_on` for that run and always reprovisions the instance.
 
 Then configure the new host with the normal site playbook:
 
 ```bash
 ansible-playbook -i inventory ansible-enterprise/build/site.yml --limit vm-example
+```
+
+## Helper scripts
+
+The repo also includes two controller-side helper scripts under `src/scripts/`:
+
+- `proxmox_infra_render.py`: renders a single `infra:` block
+- `proxmox_inventory_scaffold.py`: creates `hosts.ini` and `host_vars/<host>/infra.yml` from column-based input
+
+Both scripts are executable and follow the same naming pattern:
+
+- `proxmox_infra_render.py`
+- `proxmox_inventory_scaffold.py`
+
+Second-column behavior depends on `--type`:
+
+- `--type lxc`: the second column is an LXC template artifact; if it does not already include a storage prefix like `shared:vztmpl/...`, the script defaults it to `local:vztmpl/`
+- `--type vm`: the second column is treated as a Proxmox VM template name and is written to `proxmox.template_name`
+
+For LXCs, `--artifact-storage` may be either:
+
+- a full prefix like `local:vztmpl` or `shared:vztmpl`
+- or a bare storage name like `synology-pve`, which the helper normalizes to `synology-pve:vztmpl`
+
+That storage must still be a Proxmox template-capable file storage. If Proxmox does not expose `Container template` content for it, use a storage like `local:vztmpl` for `ostemplate` and keep your rootfs destination in `proxmox.storage`.
+
+Both scripts also support `PROXMOX_*` environment variables, and `--help` prints the full list with descriptions. A few common examples:
+
+```bash
+export PROXMOX_PROVIDER=proxmox
+export PROXMOX_NODE=pve01
+export PROXMOX_BRIDGE=vmbr0
+export PROXMOX_GATEWAY=192.0.2.1
+export PROXMOX_CORES=2
+export PROXMOX_MEMORY=4096
+```
+
+Use the renderer for one host:
+
+```bash
+./src/scripts/proxmox_infra_render.py \
+  --type vm \
+  --id 110 \
+  --artifact ubuntu-noble-ci \
+  --ip 192.0.2.90/24
+```
+
+Use the scaffold script for many hosts:
+
+```bash
+./src/scripts/proxmox_inventory_scaffold.py \
+  --type lxc \
+  --id-start 200 \
+  --ip-start 192.0.2.10/24 \
+  --out-dir inventory-scaffold <<'EOF'
+almalinux-10 almalinux-10-default_20250930_amd64.tar.xz
+almalinux-9 almalinux-9-default_20240911_amd64.tar.xz
+EOF
 ```
 
 ## Preparing a cloud-init VM template
