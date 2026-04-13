@@ -8611,31 +8611,18 @@ user_accounts: []
       changed_when: false
       failed_when: false
 
+    - name: Wait for package manager locks
+      raw: "/bin/sh -c 'i=0; while [ $i -lt 30 ]; do if command -v apt-get >/dev/null 2>&1; then fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then fuser /var/run/yum.pid >/dev/null 2>&1 || fuser /var/cache/dnf/metadata_lock.pid >/dev/null 2>&1 || break; else break; fi; i=$((i+1)); sleep 2; done'"
+      changed_when: false
+      when: _python_check.rc != 0
+
+    - name: Run bootstrap prep commands
+      raw: "/bin/sh -c '{{ item }}'"
+      loop: "{{ bootstrap_commands }}"
+      when: bootstrap_commands is defined and bootstrap_commands | length > 0
+
     - name: Install Python
-      raw: |
-        set -e
-        if command -v apk >/dev/null 2>&1; then
-          apk add --no-cache python3
-        elif command -v dnf >/dev/null 2>&1; then
-          dnf install -y -q python3
-        elif command -v yum >/dev/null 2>&1; then
-          yum install -y -q python3
-        elif command -v apt-get >/dev/null 2>&1; then
-          apt-get update -qq && apt-get install -y -qq python3
-        elif command -v zypper >/dev/null 2>&1; then
-          zypper install -y -q python3
-        elif command -v pacman >/dev/null 2>&1; then
-          pacman -Sy --noconfirm python
-        elif command -v emerge >/dev/null 2>&1; then
-          emerge --quiet dev-lang/python
-        elif command -v pkg >/dev/null 2>&1; then
-          pkg install -y python3
-        elif command -v xbps-install >/dev/null 2>&1; then
-          xbps-install -Sy python3
-        else
-          echo "ERROR: no supported package manager found" >&2
-          exit 1
-        fi
+      raw: "/bin/sh -c 'if command -v apk >/dev/null 2>&1; then apk add --no-cache python3; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q python3; elif command -v yum >/dev/null 2>&1; then yum install -y -q python3; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq python3; elif command -v zypper >/dev/null 2>&1; then zypper install -y python3; elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm python; elif command -v emerge >/dev/null 2>&1; then emerge --quiet dev-lang/python; elif command -v pkg >/dev/null 2>&1; then pkg install -y python3; elif command -v xbps-install >/dev/null 2>&1; then xbps-install -Sy python3; else echo ERROR_NO_PACKAGE_MANAGER >&2; exit 1; fi'"
       when: _python_check.rc != 0
 
     - name: Verify Python and gather facts

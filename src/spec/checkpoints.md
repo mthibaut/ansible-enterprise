@@ -3237,3 +3237,14 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      Extended `proxmox_inventory_scaffold.py` with `--ansible-group`,
      `--ansible-port`, `--ansible-connection`, `--ansible-become`, and
      `--ansible-become-method` flags for hosts.ini generation.
+
+207. `checkpoint-207-bootstrap-commands-and-compat-fixes`
+     Added `bootstrap_commands` variable to `lxc_bootstrap.yml`: a list of
+     arbitrary shell commands run via `raw` before Python installation. Enables
+     per-host or per-group prep steps for containers that need OS-level fixes
+     before package installation (e.g. Gentoo profile symlink, openSUSE 16.0
+     systemd-networkd config). Fixed zypper `-q` flag not supported on
+     openSUSE. Confirmed bootstrap works across Debian, Ubuntu, Alpine,
+     AlmaLinux, Rocky, CentOS, Fedora, Devuan, Arch, openSUSE, and Gentoo.
+     openEuler excluded from LXC testing — Proxmox `Setup.pm` cannot detect
+     the distro and fails in `post_create_hook`.
