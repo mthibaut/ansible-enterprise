@@ -25,3 +25,21 @@ wireguard_instances:
 ```yaml
 vault_wireguard_private_key: "BASE64PRIVATEKEY"
 ```
+
+Topology-driven generation is also available via
+[wireguard_topology_render.py](/Users/mthibaut/install/chat-gpt-out/ansible-enterprise/src/scripts/wireguard_topology_render.py).
+It compiles a topology YAML into:
+
+- `host_vars/<host>/wireguard.yml`
+- `host_vars/<host>/wireguard_vault_<network>.yml`
+- ready-to-use `wg-quick` configs under `wg-conf/`
+
+Example:
+
+```bash
+./src/scripts/wireguard_topology_render.py \
+  --inventory ../gilde \
+  --topology ../wireguard/topology.yml
+```
+
+Use `--rotate <network>` to force-regenerate keys and PSKs for one network.

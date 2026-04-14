@@ -680,7 +680,7 @@ class TestCronieArch(unittest.TestCase):
 class TestDnsPublicFirewall(unittest.TestCase):
     """dns_public variable controls whether port 53 is open to all sources."""
 
-    NFTABLES = "roles/firewall_geo/templates/nftables.conf.j2"
+    NFTABLES = "roles/dns/templates/40-dns.nft.j2"
     DNS_DEFAULTS = "roles/dns/defaults/main.yml"
 
     def test_dns_public_defaults_to_false(self):
@@ -691,7 +691,7 @@ class TestDnsPublicFirewall(unittest.TestCase):
         text = _read(self.NFTABLES)
         self.assertIn("dns_public", text)
         # When true, plain accept with no source restriction
-        idx = text.index("dns_public | default(false) | bool %}")
+        idx = text.index("{% if dns_public | default(false) | bool %}")
         block = text[idx:idx+200]
         self.assertIn("tcp dport 53 accept", block)
         self.assertIn("udp dport 53 accept", block)
@@ -708,12 +708,10 @@ class TestDnsPublicFirewall(unittest.TestCase):
         self.assertIn("saddr ::1", text)
 
     def test_dns_public_block_inside_dns_active_guard(self):
-        """dns_public conditional must be inside the _dns.active guard."""
+        """dns_public handling now lives in the dns role's dedicated drop-in."""
         text = _read(self.NFTABLES)
-        active_pos = text.index("_dns.active %}")
-        # Find the Jinja2 if tag, not the comment
-        public_pos = text.index("{% if dns_public")
-        self.assertLess(active_pos, public_pos)
+        self.assertIn("# managed by ansible - dns role", text)
+        self.assertIn("{% if dns_public | default(false) | bool %}", text)
 
 
 class TestSelinuxRedhat(unittest.TestCase):
@@ -830,7 +828,7 @@ class TestUpdatePasswordIdempotence(unittest.TestCase):
 class TestNftablesIdempotence(unittest.TestCase):
     """nftables enable task must not use state: started (oneshot service = always changed)."""
 
-    TASKS = "roles/firewall_geo/tasks/main.yml"
+    TASKS = "roles/firewall/tasks/main.yml"
 
     def _task_block(self):
         text = _read(self.TASKS)
@@ -869,8 +867,8 @@ class TestNftablesIdempotence(unittest.TestCase):
 class TestPfFirewall(unittest.TestCase):
     """pf firewall for FreeBSD."""
 
-    TASKS = "roles/firewall_geo/tasks/main.yml"
-    PF_CONF = "roles/firewall_geo/templates/pf.conf.j2"
+    TASKS = "roles/firewall/tasks/main.yml"
+    PF_CONF = "roles/firewall/templates/pf.conf.j2"
 
     def test_pf_tasks_present(self):
         text = _read(self.TASKS)
@@ -922,7 +920,7 @@ class TestPfFirewall(unittest.TestCase):
         self.assertIn("node_exporter_port", text)
 
     def test_pf_handler_uses_pfctl(self):
-        text = _read("roles/firewall_geo/handlers/main.yml")
+        text = _read("roles/firewall/handlers/main.yml")
         self.assertIn("pfctl -f /etc/pf.conf", text)
         self.assertIn("os_family == 'FreeBSD'", text)
 
@@ -1256,12 +1254,88 @@ class TestPrometheusGrafanaRoles(unittest.TestCase):
         self.assertIn("assert", text)
 
 
+class TestFirewallRefactorPhaseOne(unittest.TestCase):
+    def test_site_orders_firewall_before_firewall_geo_and_wireguard(self):
+        text = _read("site.yml")
+        lines = text.splitlines()
+        firewall_idx = next(i for i, line in enumerate(lines) if line.strip() == "- role: firewall")
+        firewall_geo_idx = next(i for i, line in enumerate(lines) if line.strip() == "- role: firewall_geo")
+        wireguard_idx = next(i for i, line in enumerate(lines) if line.strip() == "- role: wireguard")
+        self.assertLess(firewall_idx, firewall_geo_idx)
+        self.assertLess(firewall_idx, wireguard_idx)
+
+    def test_wireguard_role_deploys_its_own_nft_drop_in(self):
+        text = _read("roles/wireguard/tasks/main.yml")
+        self.assertIn("Deploy WireGuard nftables drop-in", text)
+        self.assertIn("src: 40-wireguard.nft.j2", text)
+        self.assertIn("dest: /etc/nftables.d/input/40-wireguard.nft", text)
+        self.assertIn("notify: Reload nftables", text)
+        self.assertIn("selectattr('listen_port', 'defined')", text)
+
+    def test_wireguard_nft_template_only_opens_defined_listen_ports(self):
+        text = _read("roles/wireguard/templates/40-wireguard.nft.j2")
+        self.assertIn("_inst.listen_port is defined", text)
+        self.assertIn('udp dport {{ _inst.listen_port }} accept comment "wg {{ _inst.name }}"', text)
+
+    def test_firewall_geo_legacy_drop_in_no_longer_contains_wireguard_ports(self):
+        text = _read("roles/firewall_geo/templates/30-legacy.nft.j2")
+        self.assertNotIn("wireguard_instances", text)
+        self.assertNotIn("listen_port | default(51820)", text)
+
+
+class TestFirewallRefactorPhaseTwo(unittest.TestCase):
+    def test_service_roles_deploy_own_nft_drop_ins(self):
+        cases = [
+            ("roles/dns/tasks/main.yml", "Deploy DNS nftables drop-in", "40-dns.nft.j2", "/etc/nftables.d/input/40-dns.nft"),
+            ("roles/mailserver/tasks/main.yml", "Deploy mailserver nftables drop-in", "40-mailserver.nft.j2", "/etc/nftables.d/input/40-mailserver.nft"),
+            ("roles/samba/tasks/main.yml", "Deploy Samba nftables drop-in", "40-samba.nft.j2", "/etc/nftables.d/input/40-samba.nft"),
+            ("roles/nfs/tasks/main.yml", "Deploy NFS nftables drop-in", "40-nfs.nft.j2", "/etc/nftables.d/input/40-nfs.nft"),
+            ("roles/node_exporter/tasks/main.yml", "Deploy node_exporter nftables drop-in", "40-node-exporter.nft.j2", "/etc/nftables.d/input/40-node-exporter.nft"),
+            ("roles/step_ca/tasks/main.yml", "Deploy step-ca nftables drop-in", "40-stepca.nft.j2", "/etc/nftables.d/input/40-stepca.nft"),
+            ("roles/openvpn/tasks/main.yml", "Deploy OpenVPN nftables drop-in", "40-openvpn.nft.j2", "/etc/nftables.d/input/40-openvpn.nft"),
+            ("roles/workloads/tasks/main.yml", "Deploy workloads nftables drop-in", "40-workloads.nft.j2", "/etc/nftables.d/input/40-workloads.nft"),
+        ]
+        for rel, task_name, src_name, dest in cases:
+            text = _read(rel)
+            self.assertIn(task_name, text)
+            self.assertIn(f"src: {src_name}", text)
+            self.assertIn(f"dest: {dest}", text)
+            self.assertIn("notify: Reload nftables", text)
+
+    def test_service_nft_templates_exist(self):
+        for rel in [
+            "roles/dns/templates/40-dns.nft.j2",
+            "roles/mailserver/templates/40-mailserver.nft.j2",
+            "roles/samba/templates/40-samba.nft.j2",
+            "roles/nfs/templates/40-nfs.nft.j2",
+            "roles/node_exporter/templates/40-node-exporter.nft.j2",
+            "roles/step_ca/templates/40-stepca.nft.j2",
+            "roles/openvpn/templates/40-openvpn.nft.j2",
+            "roles/workloads/templates/40-workloads.nft.j2",
+        ]:
+            self.assertTrue((BUILD / rel).exists(), msg=f"missing generated template: {rel}")
+
+    def test_firewall_geo_legacy_drop_in_no_longer_contains_migrated_service_blocks(self):
+        text = _read("roles/firewall_geo/templates/30-legacy.nft.j2")
+        for old_marker in [
+            "tcp dport 25  accept",
+            "dns_public: true",
+            "openvpn_instances",
+            "step_ca.enabled",
+            "samba.hosts_allow",
+            "nfs.server.exports",
+            "node_exporter_scrape_addresses",
+            "workloads | default([])",
+        ]:
+            self.assertNotIn(old_marker, text)
+
+
 class TestFreeBSDPfFirewall(unittest.TestCase):
     """FreeBSD pf firewall implementation tests."""
 
-    PF_CONF    = "roles/firewall_geo/templates/pf.conf.j2"
-    FW_TASKS   = "roles/firewall_geo/tasks/main.yml"
-    FW_HANDLER = "roles/firewall_geo/handlers/main.yml"
+    PF_CONF    = "roles/firewall/templates/pf.conf.j2"
+    FW_TASKS   = "roles/firewall/tasks/main.yml"
+    FW_HANDLER = "roles/firewall/handlers/main.yml"
     GEOIP_CONF = "roles/geoip/templates/geoip.conf.j2"
     INGEST     = "roles/geoip/files/geoip_ingest.py"
     REFRESH    = "roles/geoip/files/geoip_refresh.sh"

@@ -63,6 +63,8 @@ UNMANAGED_FILES: Set[str] = {
 
 # Files that receive the PROTECTED IMPLEMENTATION FILE notice header.
 PROTECTED_FILES: Set[str] = {
+    "roles/firewall/tasks/main.yml",
+    "roles/firewall/handlers/main.yml",
     "roles/firewall_geo/tasks/main.yml",
     "roles/firewall_geo/handlers/main.yml",
     "roles/mailserver/tasks/main.yml",
@@ -2633,6 +2635,18 @@ if __name__ == "__main__":
 # restarted BIND with all zone and config changes applied.
 - name: Flush DNS handlers
   meta: flush_handlers
+
+- name: Deploy DNS nftables drop-in
+  template:
+    src: 40-dns.nft.j2
+    dest: /etc/nftables.d/input/40-dns.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - _dns_local_zones | length > 0
+  notify: Reload nftables
 """,
     'roles/dns/templates/named.conf.options.j2': """\
 // Managed by Ansible -- do not edit.
@@ -2837,8 +2851,74 @@ $TTL {{ _zone_ttl }}
 {% endfor %}
 {% endif %}
 """,
-    'roles/firewall_geo/handlers/main.yml': """\
+    'roles/dns/templates/40-dns.nft.j2': """\
+# managed by ansible - dns role
+{% if dns_public | default(false) | bool %}
+tcp dport 53 accept
+udp dport 53 accept
+{% else %}
+{% for _sec in ((dns_secondaries | default([])) + (dns_defaults.secondaries | default([]))) | unique %}
+{% if ':' in _sec %}
+ip6 saddr {{ _sec }} tcp dport 53 accept
+ip6 saddr {{ _sec }} udp dport 53 accept
+{% else %}
+ip  saddr {{ _sec }} tcp dport 53 accept
+ip  saddr {{ _sec }} udp dport 53 accept
+{% endif %}
+{% endfor %}
+{% for _adm in dns_admin_ips | default([]) %}
+{% if ':' in _adm %}
+ip6 saddr {{ _adm }} tcp dport 53 accept
+ip6 saddr {{ _adm }} udp dport 53 accept
+{% else %}
+ip  saddr {{ _adm }} tcp dport 53 accept
+ip  saddr {{ _adm }} udp dport 53 accept
+{% endif %}
+{% endfor %}
+ip  saddr 127.0.0.1 tcp dport 53 accept
+ip  saddr 127.0.0.1 udp dport 53 accept
+ip6 saddr ::1       tcp dport 53 accept
+ip6 saddr ::1       udp dport 53 accept
+{% endif %}
+""",
+    'roles/firewall/defaults/main.yml': """\
 ---
+# firewall role -- base nftables/pf skeleton and generic accept/DNAT/masquerade.
+#
+# Runs BEFORE firewall_geo and every service role, so the skeleton + drop-in
+# directories exist when other roles drop their own .nft files into them.
+#
+# Linux: deploys /etc/nftables.conf as a skeleton that include-globs
+#        /etc/nftables.d/{defines,input,forward,nat-prerouting,nat-postrouting}/
+# FreeBSD: deploys /etc/pf.conf monolithically (pf has no clean include story).
+#
+# Generic rule knobs (Linux only):
+#
+#   firewall_accept:
+#     - {proto: tcp, port: 8443, saddr: "203.0.113.0/24", comment: "..." }
+#     - {proto: udp, port: 4500}
+#     - {proto: tcp, ports: [80, 443]}
+#
+#   firewall_dnat:
+#     - {proto: udp, dport: 51824, to: "192.168.20.42:51824", comment: "wg-exit-be"}
+#     - {proto: tcp, dport: 8443,  to: "10.0.0.5:8443", saddr: "203.0.113.0/24"}
+#
+#   firewall_masquerade:
+#     - {saddr: "172.16.2.0/24", oif: "eth0", comment: "wg-exit-be egress"}
+#
+#   firewall_extra_forward:
+#     - "ip saddr 10.0.0.0/8 ip daddr 192.168.0.0/16 accept"
+#
+# net.ipv4.ip_forward is auto-enabled when firewall_dnat or firewall_masquerade
+# or firewall_extra_forward is non-empty.
+firewall_accept: []
+firewall_dnat: []
+firewall_masquerade: []
+firewall_extra_forward: []
+""",
+    'roles/firewall/handlers/main.yml': """\
+---
+# Global handlers notified by every role that drops files into /etc/nftables.d/.
 - name: Reload nftables
   command: nft -f /etc/nftables.conf
   when: ansible_facts.os_family != 'FreeBSD'
@@ -2847,23 +2927,30 @@ $TTL {{ _zone_ttl }}
   command: pfctl -f /etc/pf.conf
   when: ansible_facts.os_family == 'FreeBSD'
 """,
-    'roles/firewall_geo/tasks/main.yml': """\
+    'roles/firewall/tasks/main.yml': """\
 ---
 # -- Linux (nftables) ----------------------------------------------------
+
 - name: Install nftables
   package:
     name: nftables
     state: present
   when: ansible_facts.os_family != 'FreeBSD'
 
-- name: Ensure nftables include directory exists
+- name: Ensure nftables drop-in directories exist
   file:
-    path: /etc/nftables.d
+    path: "/etc/nftables.d/{{ item }}"
     state: directory
     mode: "0755"
+  loop:
+    - defines
+    - input
+    - forward
+    - nat-prerouting
+    - nat-postrouting
   when: ansible_facts.os_family != 'FreeBSD'
 
-- name: Deploy nftables rules
+- name: Deploy nftables skeleton
   template:
     src: nftables.conf.j2
     dest: /etc/nftables.conf
@@ -2871,13 +2958,50 @@ $TTL {{ _zone_ttl }}
   when: ansible_facts.os_family != 'FreeBSD'
   notify: Reload nftables
 
-# Enable nftables at boot. Do not use state: started  - nftables.service
-# is Type=oneshot RemainAfterExit=yes on Arch and some other distros.
-# Apply the ruleset immediately so firewall is active without a reboot.
-- name: Apply nftables ruleset
-  command: nft -f /etc/nftables.conf
-  changed_when: false
+- name: Deploy firewall_accept drop-in
+  template:
+    src: 10-firewall-accept.nft.j2
+    dest: /etc/nftables.d/input/10-firewall-accept.nft
+    mode: "0644"
   when: ansible_facts.os_family != 'FreeBSD'
+  notify: Reload nftables
+
+- name: Deploy firewall_dnat prerouting drop-in
+  template:
+    src: 10-dnat.nft.j2
+    dest: /etc/nftables.d/nat-prerouting/10-dnat.nft
+    mode: "0644"
+  when: ansible_facts.os_family != 'FreeBSD'
+  notify: Reload nftables
+
+- name: Deploy firewall_dnat forward drop-in
+  template:
+    src: 10-forward-dnat.nft.j2
+    dest: /etc/nftables.d/forward/10-dnat.nft
+    mode: "0644"
+  when: ansible_facts.os_family != 'FreeBSD'
+  notify: Reload nftables
+
+- name: Deploy firewall_masquerade drop-in
+  template:
+    src: 10-masquerade.nft.j2
+    dest: /etc/nftables.d/nat-postrouting/10-masquerade.nft
+    mode: "0644"
+  when: ansible_facts.os_family != 'FreeBSD'
+  notify: Reload nftables
+
+- name: Enable IPv4 forwarding when DNAT/masquerade/forward rules are set
+  sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/90-firewall.conf
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - (firewall_dnat | default([]) | length > 0)
+      or (firewall_masquerade | default([]) | length > 0)
+      or (firewall_extra_forward | default([]) | length > 0)
 
 - name: Enable nftables at boot
   systemd:
@@ -2886,8 +3010,14 @@ $TTL {{ _zone_ttl }}
     daemon_reload: true
   when: ansible_facts.os_family != 'FreeBSD'
 
+- name: Apply nftables ruleset
+  command: nft -f /etc/nftables.conf
+  changed_when: false
+  when: ansible_facts.os_family != 'FreeBSD'
+
 # -- FreeBSD (pf) --------------------------------------------------------
 # pf is in the FreeBSD base system -- no package install needed.
+# pf is still rendered monolithically because pf.conf has no clean include story.
 - name: Deploy pf rules
   template:
     src: pf.conf.j2
@@ -2914,21 +3044,159 @@ $TTL {{ _zone_ttl }}
   failed_when: false
   when: ansible_facts.os_family == 'FreeBSD'
 
-# Load rules unconditionally -- idempotent, always succeeds.
 - name: Load pf rules (FreeBSD)
   command: pfctl -f /etc/pf.conf
   changed_when: false
   when: ansible_facts.os_family == 'FreeBSD'
 
-# Enable pf -- exits non-zero with 'pf already enabled' if already active.
-# failed_when: false makes this idempotent.
 - name: Enable pf (FreeBSD)
   command: pfctl -e
   failed_when: false
   changed_when: false
   when: ansible_facts.os_family == 'FreeBSD'
 """,
-    'roles/firewall_geo/templates/pf.conf.j2': """\
+    'roles/firewall/templates/nftables.conf.j2': """\
+# Skeleton nftables config -- managed by the firewall role.
+# Per-service rules live as drop-ins under /etc/nftables.d/.
+flush ruleset
+
+# Top-level defines (geoip sets, etc.) must live outside any table.
+include "/etc/nftables.d/defines/*.nft"
+
+table inet filter {
+
+  chain input {
+    type filter hook input priority 0;
+    policy drop;
+
+    ct state established,related accept
+    ct state invalid drop
+    iif lo accept
+
+    ip  protocol icmp      accept
+    ip6 nexthdr  ipv6-icmp accept
+
+    include "/etc/nftables.d/input/*.nft"
+  }
+
+  chain forward {
+    type filter hook forward priority 0;
+    policy drop;
+
+    ct state established,related accept
+    ct state invalid drop
+
+    include "/etc/nftables.d/forward/*.nft"
+  }
+
+  chain output {
+    type filter hook output priority 0;
+    policy accept;
+  }
+}
+
+table ip nat {
+  chain prerouting {
+    type nat hook prerouting priority dstnat;
+    include "/etc/nftables.d/nat-prerouting/*.nft"
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    include "/etc/nftables.d/nat-postrouting/*.nft"
+  }
+}
+""",
+    'roles/firewall/templates/10-firewall-accept.nft.j2': """\
+# firewall_accept entries -- pasted inside inet filter/input chain.
+{% for _r in firewall_accept | default([]) %}
+{% set _proto = _r.proto %}
+{% set _ports = _r.ports | default([_r.port]) %}
+{% set _ports_expr = _ports[0] if _ports | length == 1 else '{ ' ~ _ports | join(', ') ~ ' }' %}
+{% if _r.saddr is defined %}
+{% if ':' in _r.saddr %}
+ip6 saddr {{ _r.saddr }} {{ _proto }} dport {{ _ports_expr }} accept{% if _r.comment is defined %} comment "{{ _r.comment }}"{% endif %}
+
+{% else %}
+ip  saddr {{ _r.saddr }} {{ _proto }} dport {{ _ports_expr }} accept{% if _r.comment is defined %} comment "{{ _r.comment }}"{% endif %}
+
+{% endif %}
+{% else %}
+{{ _proto }} dport {{ _ports_expr }} accept{% if _r.comment is defined %} comment "{{ _r.comment }}"{% endif %}
+
+{% endif %}
+{% endfor %}
+""",
+    'roles/firewall/templates/10-dnat.nft.j2': """\
+# firewall_dnat entries -- pasted inside ip nat/prerouting chain.
+{% for _d in firewall_dnat | default([]) %}
+{% if _d.saddr is defined %}
+ip saddr {{ _d.saddr }} {{ _d.proto }} dport {{ _d.dport }} dnat to {{ _d.to }}{% if _d.comment is defined %} comment "{{ _d.comment }}"{% endif %}
+
+{% else %}
+{{ _d.proto }} dport {{ _d.dport }} dnat to {{ _d.to }}{% if _d.comment is defined %} comment "{{ _d.comment }}"{% endif %}
+
+{% endif %}
+{% endfor %}
+""",
+    'roles/firewall/templates/10-forward-dnat.nft.j2': """\
+# Forward-chain accepts matching each firewall_dnat entry, plus firewall_extra_forward.
+# Without these, DNATed packets are dropped by the forward-chain default policy.
+{% for _d in firewall_dnat | default([]) %}
+{% set _to_host = _d.to.split(':')[0] %}
+{% set _to_port = _d.to.split(':')[1] if ':' in _d.to else _d.dport %}
+ip daddr {{ _to_host }} {{ _d.proto }} dport {{ _to_port }} accept{% if _d.comment is defined %} comment "{{ _d.comment }} (forward)"{% endif %}
+
+{% endfor %}
+{% for _f in firewall_extra_forward | default([]) %}
+{{ _f }}
+{% endfor %}
+""",
+    'roles/firewall/templates/10-masquerade.nft.j2': """\
+# firewall_masquerade entries -- pasted inside ip nat/postrouting chain.
+{% for _m in firewall_masquerade | default([]) %}
+ip saddr {{ _m.saddr }} oifname "{{ _m.oif }}" masquerade{% if _m.comment is defined %} comment "{{ _m.comment }}"{% endif %}
+
+{% endfor %}
+""",
+    'roles/firewall_geo/handlers/main.yml': """\
+---
+# firewall_geo's handlers are kept in sync with the firewall role's global names
+# so other roles can notify a single canonical handler.
+- name: Reload nftables
+  command: nft -f /etc/nftables.conf
+  when: ansible_facts.os_family != 'FreeBSD'
+""",
+    'roles/firewall_geo/tasks/main.yml': """\
+---
+# firewall_geo: geoip-specific rules only. The base skeleton + generic
+# accept/DNAT/masquerade lives in the firewall role, which runs first and
+# creates /etc/nftables.d/{defines,input,forward,nat-prerouting,nat-postrouting}.
+#
+# This role is Linux-only. On FreeBSD, geoip logic is rendered inline by the
+# firewall role's pf.conf.j2 (pf has no include-based drop-in mechanism).
+- name: Skip firewall_geo on FreeBSD
+  meta: end_host
+  when: ansible_facts.os_family == 'FreeBSD'
+
+# TRANSITIONAL: this single drop-in currently contains all the service-specific
+# rules (mail, dns, wireguard, samba, nfs, ssh, http/https, etc.) plus the geoip
+# filtering. A follow-up refactor will migrate each service's rules into a
+# drop-in owned by its own role (40-wireguard.nft, 40-mailserver.nft, ...).
+- name: Deploy geoip set include drop-in (top-level defines)
+  template:
+    src: 30-geoip-defines.nft.j2
+    dest: /etc/nftables.d/defines/30-geoip.nft
+    mode: "0644"
+  notify: Reload nftables
+
+- name: Deploy legacy service + geoip rules drop-in
+  template:
+    src: 30-legacy.nft.j2
+    dest: /etc/nftables.d/input/30-legacy.nft
+    mode: "0644"
+  notify: Reload nftables
+""",
+    'roles/firewall/templates/pf.conf.j2': """\
 # pf firewall rules - managed by Ansible.
 # FreeBSD pf: default-drop input, stateful, explicit accepts.
 
@@ -3147,9 +3415,8 @@ pass in proto tcp to any port 443 keep state
 {% endif %}
 """,
 
-    'roles/firewall_geo/templates/nftables.conf.j2': """\
-flush ruleset
-
+    'roles/firewall_geo/templates/30-geoip-defines.nft.j2': """\
+# Top-level geoip set includes (parse-time, outside any table).
 {% if geoip.enabled | default(false) | bool %}
 {% if geoip.ssh_allowed_countries | default([]) | length > 0 %}
 include "{{ _geoip_sets_dir }}/geoip_ssh_ipv4.nft"
@@ -3158,96 +3425,18 @@ include "{{ _geoip_sets_dir }}/geoip_ssh_ipv6.nft"
 {% if geoip.allowed_countries | default([]) | length > 0 %}
 include "{{ _geoip_sets_dir }}/geoip_allowed_ipv4.nft"
 include "{{ _geoip_sets_dir }}/geoip_allowed_ipv6.nft"
-{% endif %}
-{% if geoip.allowed_countries | default([]) | length > 0 %}
 include "{{ _geoip_sets_dir }}/geoip_http_ipv4.nft"
 include "{{ _geoip_sets_dir }}/geoip_http_ipv6.nft"
 include "{{ _geoip_sets_dir }}/geoip_https_ipv4.nft"
 include "{{ _geoip_sets_dir }}/geoip_https_ipv6.nft"
 {% endif %}
 {% endif %}
-
-table inet filter {
-
-  # input: default-drop, explicit accepts
-  chain input {
-    type filter hook input priority 0;
-    policy drop;
-
-    ct state established,related accept
-    ct state invalid drop
-    iif lo accept
-
-    ip  protocol icmp        accept
-    ip6 nexthdr  ipv6-icmp   accept
-
-    # Mail and DNS bypass geoip entirely.
-    # SMTP port 25 is a relay protocol: legitimate mail arrives from global
-    # relay infrastructure regardless of sender geography. GeoIP on port 25
-    # silently drops valid mail without bouncing it back to the sender.
-    # Submission (587/465) and IMAP (993) are authenticated; restrict at the
-    # application layer (fail2ban, rate-limiting) rather than by source country.
-    # DNS hidden-primary traffic must be accepted from secondary nameservers
-    # which may be located anywhere; geofiltering breaks zone transfers.
-    # Mail ports: open when mailserver role is active. Mirrors the mailserver
-    # role when: condition - triggers on either the legacy mailserver.enabled
-    # flag or when a service declares requires: [mail] via the capabilities layer.
-    {% if mailserver.enabled | default(false) | bool
-          or 'mailserver' in (_required_providers | default([])) %}
-    tcp dport 25  accept
-    tcp dport 587 accept
-    tcp dport 993 accept
-    tcp dport 465 accept
-    {% endif %}
-
-    # DNS ports: open when BIND is running. Mirrors the dns role when: condition.
-    # Covers explicitly declared zones, certbot local DNS-01, and service-derived
-    # zones (any enabled service with a domain triggers the dns role).
-    # When dns_public is true, port 53 is opened to all sources unconditionally
-    # (public resolver / authoritative server mode). Default false.
-    {% set _dns = namespace(active=false) %}
-    {% if dns_hidden_primary_zones | default([]) | length > 0
-          or certbot_dns_local | default(false) | bool %}
-    {%   set _dns.active = true %}
-    {% endif %}
-    {% for _svc in services | default({}) | dict2items %}
-    {%   if _svc.value.enabled | default(false) | bool
-           and _svc.value.domain | default('') %}
-    {%     set _dns.active = true %}
-    {%   endif %}
-    {% endfor %}
-    {% if _dns.active %}
-    {% if dns_public | default(false) | bool %}
-    # dns_public: true - port 53 open to all sources.
-    tcp dport 53 accept
-    udp dport 53 accept
-    {% else %}
-    # dns_public: false (default) - port 53 restricted to secondaries,
-    # dns_admin_ips (nsupdate sources), and localhost.
-    {% for _sec in ((dns_secondaries | default([])) + (dns_defaults.secondaries | default([]))) | unique %}
-    {% if ':' in _sec %}
-    ip6 saddr {{ _sec }} tcp dport 53 accept
-    ip6 saddr {{ _sec }} udp dport 53 accept
-    {% else %}
-    ip  saddr {{ _sec }} tcp dport 53 accept
-    ip  saddr {{ _sec }} udp dport 53 accept
-    {% endif %}
-    {% endfor %}
-    {% for _adm in dns_admin_ips | default([]) %}
-    {% if ':' in _adm %}
-    ip6 saddr {{ _adm }} tcp dport 53 accept
-    ip6 saddr {{ _adm }} udp dport 53 accept
-    {% else %}
-    ip  saddr {{ _adm }} tcp dport 53 accept
-    ip  saddr {{ _adm }} udp dport 53 accept
-    {% endif %}
-    {% endfor %}
-    ip  saddr 127.0.0.1 tcp dport 53 accept
-    ip  saddr 127.0.0.1 udp dport 53 accept
-    ip6 saddr ::1       tcp dport 53 accept
-    ip6 saddr ::1       udp dport 53 accept
-    {% endif %}
-    {% endif %}
+""",
+    'roles/firewall_geo/templates/30-legacy.nft.j2': """\
+# TRANSITIONAL drop-in -- pasted inside inet filter/input chain by the skeleton.
+# Contains all service + geoip rules from the legacy monolithic template.
+# A follow-up refactor will split each service block out into its own drop-in
+# owned by the corresponding service role.
 
     # Global allowlist: IPs/CIDRs that bypass all geoip filtering on every port.
     # Colon presence distinguishes IPv6 from IPv4 without netaddr dependency.
@@ -3258,95 +3447,6 @@ table inet filter {
     ip  saddr {{ _addr }} accept
     {% endif %}
     {% endfor %}
-
-    # OpenVPN ports
-    {% for _vpn in openvpn_instances | default([]) %}
-    {% if _vpn.mode | default('server') == 'server' %}
-    {{ _vpn.proto | default('udp') }} dport {{ _vpn.port | default(1194) }} accept
-    {% endif %}
-    {% endfor %}
-    # WireGuard ports
-    {% for _wg in wireguard_instances | default([]) %}
-    udp dport {{ _wg.listen_port | default(51820) }} accept
-    {% endfor %}
-    # Workload container ports
-    {% for _wl in workloads | default([]) %}
-    {% if _wl.state | default('present') == 'present' %}
-    {% for _p in _wl.ports | default([]) %}
-    {% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
-    {{ 'udp' if '/udp' in _p else 'tcp' }} dport {{ _host_port }} accept
-    {% endfor %}
-    {% endif %}
-    {% endfor %}
-
-    # Step CA ACME port 9000
-    {% if step_ca.enabled | default(false) | bool %}
-    tcp dport 9000 accept
-    {% endif %}
-
-    # Step CA ACME port 9000
-    {% if step_ca.enabled | default(false) | bool %}
-    tcp dport 9000 accept
-    {% endif %}
-
-    # Samba ports 139/445
-    {% if samba.enabled | default(false) | bool %}
-    {% set _smb_hosts = samba.hosts_allow | default([]) %}
-    {% if _smb_hosts | length > 0 %}
-    {% for _host in _smb_hosts %}
-    {% if ':' in _host %}
-    ip6 saddr {{ _host }} tcp dport { 139, 445 } accept
-    {% else %}
-    ip  saddr {{ _host }} tcp dport { 139, 445 } accept
-    {% endif %}
-    {% endfor %}
-    {% else %}
-    tcp dport { 139, 445 } accept
-    {% endif %}
-    {% endif %}
-
-    # NFS server ports (2049 + rpcbind 111 for NFSv3).
-    {% if nfs.server.enabled | default(false) | bool %}
-    {% set _nfs_clients = [] %}
-    {% for _exp in nfs.server.exports | default([]) %}
-    {%   for _cli in _exp.clients | default([]) %}
-    {%     if _cli.host not in _nfs_clients %}{% set _ = _nfs_clients.append(_cli.host) %}{% endif %}
-    {%   endfor %}
-    {% endfor %}
-    {% for _host in _nfs_clients %}
-    {% if ':' in _host %}
-    ip6 saddr {{ _host }} tcp dport 2049 accept
-    ip6 saddr {{ _host }} udp dport 2049 accept
-    {% if 3 in (nfs.server.versions | default([4])) %}
-    ip6 saddr {{ _host }} tcp dport 111 accept
-    ip6 saddr {{ _host }} udp dport 111 accept
-    {% endif %}
-    {% else %}
-    ip  saddr {{ _host }} tcp dport 2049 accept
-    ip  saddr {{ _host }} udp dport 2049 accept
-    {% if 3 in (nfs.server.versions | default([4])) %}
-    ip  saddr {{ _host }} tcp dport 111 accept
-    ip  saddr {{ _host }} udp dport 111 accept
-    {% endif %}
-    {% endif %}
-    {% endfor %}
-    {% endif %}
-
-    # Prometheus node_exporter scrape port.
-    # Bound to 127.0.0.1 by the service, but accepting packets here allows
-    # Prometheus servers to reach it via DNAT or forwarding rules if needed.
-    # Always accept from loopback; accept from scrape_addresses if configured.
-    {% if node_exporter_enabled | default(true) | bool %}
-    ip  saddr 127.0.0.1 tcp dport {{ node_exporter_port | default(9100) }} accept
-    ip6 saddr ::1        tcp dport {{ node_exporter_port | default(9100) }} accept
-    {% for _addr in node_exporter_scrape_addresses | default([]) %}
-    {% if ":" in _addr %}
-    ip6 saddr {{ _addr }} tcp dport {{ node_exporter_port | default(9100) }} accept
-    {% else %}
-    ip  saddr {{ _addr }} tcp dport {{ node_exporter_port | default(9100) }} accept
-    {% endif %}
-    {% endfor %}
-    {% endif %}
 
     # SSH with dedicated geoip filter (geoip_ssh_allowed_countries, falls back to global)
     {% if geoip.enabled | default(false) | bool and (geoip.ssh_allowed_countries | length > 0) %}
@@ -3435,22 +3535,6 @@ table inet filter {
     {% endif %}
     tcp dport 443 accept
     {% endif %}
-
-  }
-
-  # output: permit all
-  chain output {
-    type filter hook output priority 0;
-    policy accept;
-  }
-
-  # forward: drop (this host is not a router)
-  chain forward {
-    type filter hook forward priority 0;
-    policy drop;
-  }
-
-}
 """,
     'roles/geoip/files/geoip_ingest.py': '''\
 #!/usr/bin/env python3
@@ -4179,6 +4263,16 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
   changed_when: "'already running' not in _postfix_start.stderr"
   failed_when: "_postfix_start.rc != 0 and 'already running' not in _postfix_start.stderr"
   when: ansible_facts.os_family == 'FreeBSD'
+
+- name: Deploy mailserver nftables drop-in
+  template:
+    src: 40-mailserver.nft.j2
+    dest: /etc/nftables.d/input/40-mailserver.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when: ansible_facts.os_family != 'FreeBSD'
+  notify: Reload nftables
 """,
     'roles/mailserver/templates/10-auth.conf.j2': """\
 # Dovecot auth mechanisms - managed by Ansible.
@@ -4334,6 +4428,13 @@ KeyTable {{ _opendkim_dir }}/KeyTable
 SigningTable refile:{{ _opendkim_dir }}/SigningTable
 ExternalIgnoreList {{ _opendkim_dir }}/TrustedHosts
 InternalHosts {{ _opendkim_dir }}/TrustedHosts
+""",
+    'roles/mailserver/templates/40-mailserver.nft.j2': """\
+# managed by ansible - mailserver role
+tcp dport 25  accept
+tcp dport 587 accept
+tcp dport 993 accept
+tcp dport 465 accept
 """,
     'roles/nextcloud/defaults/main.yml': """\
 ---
@@ -5128,6 +5229,18 @@ mounts: []
     - nfs.server.enabled | default(false) | bool
     - ansible_facts.os_family == 'FreeBSD'
 
+- name: Deploy NFS nftables drop-in
+  template:
+    src: 40-nfs.nft.j2
+    dest: /etc/nftables.d/input/40-nfs.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - nfs.server.enabled | default(false) | bool
+  notify: Reload nftables
+
 # Apply server-side export and daemon changes before any client mount tasks
 # in the same play try to use them.
 - meta: flush_handlers
@@ -5308,6 +5421,32 @@ mounts: []
 {{ export.path }}{% for client in export.clients | default([]) %}	{{ client.host }}({{ client.options | default('rw,sync,no_subtree_check') }}){% endfor %}
 
 {% endfor %}""",
+    'roles/nfs/templates/40-nfs.nft.j2': """\
+# managed by ansible - nfs role
+{% set _nfs_clients = [] %}
+{% for _exp in nfs.server.exports | default([]) %}
+{%   for _cli in _exp.clients | default([]) %}
+{%     if _cli.host not in _nfs_clients %}{% set _ = _nfs_clients.append(_cli.host) %}{% endif %}
+{%   endfor %}
+{% endfor %}
+{% for _host in _nfs_clients %}
+{% if ':' in _host %}
+ip6 saddr {{ _host }} tcp dport 2049 accept
+ip6 saddr {{ _host }} udp dport 2049 accept
+{% if 3 in (nfs.server.versions | default([4])) %}
+ip6 saddr {{ _host }} tcp dport 111 accept
+ip6 saddr {{ _host }} udp dport 111 accept
+{% endif %}
+{% else %}
+ip  saddr {{ _host }} tcp dport 2049 accept
+ip  saddr {{ _host }} udp dport 2049 accept
+{% if 3 in (nfs.server.versions | default([4])) %}
+ip  saddr {{ _host }} tcp dport 111 accept
+ip  saddr {{ _host }} udp dport 111 accept
+{% endif %}
+{% endif %}
+{% endfor %}
+""",
     'roles/samba/defaults/main.yml': """\
 ---
 # Samba server configuration.
@@ -5440,6 +5579,18 @@ samba:
   changed_when: "'already running' not in _smbd_start.stderr"
   failed_when: "_smbd_start.rc != 0 and 'already running' not in _smbd_start.stderr"
   when: ansible_facts.os_family == 'FreeBSD'
+
+- name: Deploy Samba nftables drop-in
+  template:
+    src: 40-samba.nft.j2
+    dest: /etc/nftables.d/input/40-samba.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - samba.enabled | default(false) | bool
+  notify: Reload nftables
 """,
     'roles/samba/templates/smb.conf.j2': """\
 # smb.conf - managed by Ansible. Do not edit manually.
@@ -5486,6 +5637,21 @@ samba:
 {% endfor %}
 
 {% endfor %}
+""",
+    'roles/samba/templates/40-samba.nft.j2': """\
+# managed by ansible - samba role
+{% set _smb_hosts = samba.hosts_allow | default([]) %}
+{% if _smb_hosts | length > 0 %}
+{% for _host in _smb_hosts %}
+{% if ':' in _host %}
+ip6 saddr {{ _host }} tcp dport { 139, 445 } accept
+{% else %}
+ip  saddr {{ _host }} tcp dport { 139, 445 } accept
+{% endif %}
+{% endfor %}
+{% else %}
+tcp dport { 139, 445 } accept
+{% endif %}
 """,
     'roles/step_ca/defaults/main.yml': """\
 ---
@@ -5735,6 +5901,28 @@ node_exporter_version: "1.8.2"
     port: "{{ node_exporter_port }}"
     timeout: 15
   when: ansible_facts.os_family == 'FreeBSD'
+
+- name: Deploy node_exporter nftables drop-in
+  template:
+    src: 40-node-exporter.nft.j2
+    dest: /etc/nftables.d/input/40-node-exporter.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when: ansible_facts.os_family != 'FreeBSD'
+  notify: Reload nftables
+""",
+    'roles/node_exporter/templates/40-node-exporter.nft.j2': """\
+# managed by ansible - node_exporter role
+ip  saddr 127.0.0.1 tcp dport {{ node_exporter_port | default(9100) }} accept
+ip6 saddr ::1       tcp dport {{ node_exporter_port | default(9100) }} accept
+{% for _addr in node_exporter_scrape_addresses | default([]) %}
+{% if ":" in _addr %}
+ip6 saddr {{ _addr }} tcp dport {{ node_exporter_port | default(9100) }} accept
+{% else %}
+ip  saddr {{ _addr }} tcp dport {{ node_exporter_port | default(9100) }} accept
+{% endif %}
+{% endfor %}
 """,
     'roles/preflight/tasks/main.yml': """\
 ---
@@ -6144,6 +6332,22 @@ step_ca:
   when:
     - step_ca.trust_root | default(false) | bool
     - ansible_facts.os_family == 'FreeBSD'
+
+- name: Deploy step-ca nftables drop-in
+  template:
+    src: 40-stepca.nft.j2
+    dest: /etc/nftables.d/input/40-stepca.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - step_ca.enabled | default(false) | bool
+  notify: Reload nftables
+""",
+    'roles/step_ca/templates/40-stepca.nft.j2': """\
+# managed by ansible - step_ca role
+tcp dport 9000 accept
 """,
     'roles/openvpn/defaults/main.yml': """\
 ---
@@ -6281,6 +6485,18 @@ openvpn_instances: []
   when:
     - openvpn_instances | default([]) | length > 0
     - ansible_facts.os_family == 'FreeBSD'
+
+- name: Deploy OpenVPN nftables drop-in
+  template:
+    src: 40-openvpn.nft.j2
+    dest: /etc/nftables.d/input/40-openvpn.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - openvpn_instances | default([]) | selectattr('mode', 'equalto', 'server') | list | length > 0
+  notify: Reload nftables
 """,
     'roles/openvpn/tasks/server_instance.yml': """\
 ---
@@ -6526,6 +6742,15 @@ group {{ 'nogroup' if ansible_facts.os_family == 'Debian' else 'nobody' }}
 log {{ _ovpn_conf_dir }}/openvpn-{{ _inst.name }}.log
 verb 3
 """,
+    'roles/openvpn/templates/40-openvpn.nft.j2': """\
+# managed by ansible - openvpn role
+{% for _vpn in openvpn_instances | default([]) %}
+{% if _vpn.mode | default('server') == 'server' %}
+{{ _vpn.proto | default('udp') }} dport {{ _vpn.port | default(1194) }} accept
+
+{% endif %}
+{% endfor %}
+""",
     # ------------------------------------------------------------------ #
     #  WireGuard role -- multi-instance, same pattern as OpenVPN          #
     # ------------------------------------------------------------------ #
@@ -6629,6 +6854,18 @@ wireguard_instances: []
   loop_control:
     loop_var: _inst
 
+- name: Deploy WireGuard nftables drop-in
+  template:
+    src: 40-wireguard.nft.j2
+    dest: /etc/nftables.d/input/40-wireguard.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - wireguard_instances | default([]) | selectattr('listen_port', 'defined') | list | length > 0
+  notify: Reload nftables
+
 # -- FreeBSD: enable and start via rc.d --
 - name: Enable WireGuard at boot (FreeBSD)
   command: >-
@@ -6675,7 +6912,9 @@ PrivateKey = {{ _inst.private_key }}
 {% for _addr in _inst.address %}
 Address = {{ _addr }}
 {% endfor %}
-ListenPort = {{ _inst.listen_port | default(51820) }}
+{% if _inst.listen_port is defined %}
+ListenPort = {{ _inst.listen_port }}
+{% endif %}
 {% if _inst.dns | default([]) | length > 0 %}
 DNS = {{ _inst.dns | join(', ') }}
 {% endif %}
@@ -6705,6 +6944,9 @@ PostDown = {{ _cmd }}
 {% endfor %}
 {% for _peer in _inst.peers | default([]) %}
 
+{% if _peer.name is defined %}
+# {{ _peer.name }}
+{% endif %}
 [Peer]
 PublicKey = {{ _peer.public_key }}
 {% if _peer.preshared_key is defined %}
@@ -6716,6 +6958,15 @@ Endpoint = {{ _peer.endpoint }}
 {% endif %}
 {% if _peer.persistent_keepalive is defined %}
 PersistentKeepalive = {{ _peer.persistent_keepalive }}
+{% endif %}
+{% endfor %}
+""",
+    'roles/wireguard/templates/40-wireguard.nft.j2': """\
+# managed by ansible - wireguard role
+{% for _inst in wireguard_instances | default([]) %}
+{% if _inst.listen_port is defined %}
+udp dport {{ _inst.listen_port }} accept comment "wg {{ _inst.name }}"
+
 {% endif %}
 {% endfor %}
 """,
@@ -6974,6 +7225,18 @@ workloads: []
   loop: "{{ workloads | default([]) | rejectattr('state', 'defined') | list + workloads | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present') | list }}"
   loop_control:
     loop_var: _wl
+
+- name: Deploy workloads nftables drop-in
+  template:
+    src: 40-workloads.nft.j2
+    dest: /etc/nftables.d/input/40-workloads.nft
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - workloads | default([]) | length > 0
+  notify: Reload nftables
 """,
     'roles/workloads/tasks/remove_podman.yml': """\
 ---
@@ -7203,6 +7466,18 @@ TimeoutStartSec=300
 
 [Install]
 WantedBy=multi-user.target default.target
+""",
+    'roles/workloads/templates/40-workloads.nft.j2': """\
+# managed by ansible - workloads role
+{% for _wl in workloads | default([]) %}
+{% if _wl.state | default('present') == 'present' %}
+{% for _p in _wl.ports | default([]) %}
+{% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
+{{ 'udp' if '/udp' in _p else 'tcp' }} dport {{ _host_port }} accept
+
+{% endfor %}
+{% endif %}
+{% endfor %}
 """,
     'roles/workloads/templates/docker.service.j2': """\
 # {{ _wl.name }} - managed by Ansible (Docker)
@@ -8701,6 +8976,9 @@ user_accounts: []
         firewall_enabled | default(false) | bool
         and 'maxmind_nftables' in (_required_providers | default([]))
         )
+    - role: firewall
+      tags: [firewall, nftables]
+      when: firewall_enabled | default(false) | bool
     - role: firewall_geo
       tags: [firewall_geo, firewall, nftables]
       when: firewall_enabled | default(false) | bool

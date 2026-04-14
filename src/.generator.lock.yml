@@ -1,5 +1,5 @@
-source_hash: 5ef8ef4ea56ddb70da45b5aae6c996d5f3dfe5378d472f044410a3c8c55ddaaf
-output_hash: 5e52898bfbd2c4d9ba7bac47459c76d7c9cb74da728ccde881e082b67189126e
+source_hash: c5870759bfacb191ecbdb4f84d43e2cf917d9f28ba40cfb9178904587b95bdea
+output_hash: 72178bd2cab3b21f9dfc85cf30291169a00682c0eae99a682858ade1d981407b
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -40,16 +40,26 @@ generated_files:
   - roles/dns/files/sync_dns_records.py
   - roles/dns/handlers/main.yml
   - roles/dns/tasks/main.yml
+  - roles/dns/templates/40-dns.nft.j2
   - roles/dns/templates/named.conf.local.j2
   - roles/dns/templates/named.conf.options.j2
   - roles/dns/templates/zone.db.j2
   - roles/docker/tasks/main.yml
   - roles/file_copy/defaults/main.yml
   - roles/file_copy/tasks/main.yml
+  - roles/firewall/defaults/main.yml
+  - roles/firewall/handlers/main.yml
+  - roles/firewall/tasks/main.yml
+  - roles/firewall/templates/10-dnat.nft.j2
+  - roles/firewall/templates/10-firewall-accept.nft.j2
+  - roles/firewall/templates/10-forward-dnat.nft.j2
+  - roles/firewall/templates/10-masquerade.nft.j2
+  - roles/firewall/templates/nftables.conf.j2
+  - roles/firewall/templates/pf.conf.j2
   - roles/firewall_geo/handlers/main.yml
   - roles/firewall_geo/tasks/main.yml
-  - roles/firewall_geo/templates/nftables.conf.j2
-  - roles/firewall_geo/templates/pf.conf.j2
+  - roles/firewall_geo/templates/30-geoip-defines.nft.j2
+  - roles/firewall_geo/templates/30-legacy.nft.j2
   - roles/geoip/defaults/main.yml
   - roles/geoip/files/geoip_ingest.py
   - roles/geoip/files/geoip_refresh.sh
@@ -64,6 +74,7 @@ generated_files:
   - roles/mailserver/templates/10-auth.conf.j2
   - roles/mailserver/templates/10-mail.conf.j2
   - roles/mailserver/templates/10-master.conf.j2
+  - roles/mailserver/templates/40-mailserver.nft.j2
   - roles/mailserver/templates/KeyTable.j2
   - roles/mailserver/templates/SigningTable.j2
   - roles/mailserver/templates/TrustedHosts.j2
@@ -79,6 +90,7 @@ generated_files:
   - roles/nfs/defaults/main.yml
   - roles/nfs/handlers/main.yml
   - roles/nfs/tasks/main.yml
+  - roles/nfs/templates/40-nfs.nft.j2
   - roles/nfs/templates/exports.j2
   - roles/nginx/handlers/main.yml
   - roles/nginx/tasks/main.yml
@@ -91,11 +103,13 @@ generated_files:
   - roles/node_exporter/defaults/main.yml
   - roles/node_exporter/handlers/main.yml
   - roles/node_exporter/tasks/main.yml
+  - roles/node_exporter/templates/40-node-exporter.nft.j2
   - roles/openvpn/defaults/main.yml
   - roles/openvpn/handlers/main.yml
   - roles/openvpn/tasks/client_instance.yml
   - roles/openvpn/tasks/main.yml
   - roles/openvpn/tasks/server_instance.yml
+  - roles/openvpn/templates/40-openvpn.nft.j2
   - roles/openvpn/templates/client.conf.j2
   - roles/openvpn/templates/server.conf.j2
   - roles/pfsense/defaults/main.yml
@@ -116,6 +130,7 @@ generated_files:
   - roles/samba/defaults/main.yml
   - roles/samba/handlers/main.yml
   - roles/samba/tasks/main.yml
+  - roles/samba/templates/40-samba.nft.j2
   - roles/samba/templates/smb.conf.j2
   - roles/ssh_hardening/defaults/main.yml
   - roles/ssh_hardening/handlers/main.yml
@@ -124,12 +139,14 @@ generated_files:
   - roles/step_ca/defaults/main.yml
   - roles/step_ca/handlers/main.yml
   - roles/step_ca/tasks/main.yml
+  - roles/step_ca/templates/40-stepca.nft.j2
   - roles/users/defaults/main.yml
   - roles/users/tasks/main.yml
   - roles/wireguard/defaults/main.yml
   - roles/wireguard/handlers/main.yml
   - roles/wireguard/tasks/instance.yml
   - roles/wireguard/tasks/main.yml
+  - roles/wireguard/templates/40-wireguard.nft.j2
   - roles/wireguard/templates/wg.conf.j2
   - roles/workloads/defaults/main.yml
   - roles/workloads/handlers/main.yml
@@ -138,6 +155,7 @@ generated_files:
   - roles/workloads/tasks/podman/instance.yml
   - roles/workloads/tasks/remove_docker.yml
   - roles/workloads/tasks/remove_podman.yml
+  - roles/workloads/templates/40-workloads.nft.j2
   - roles/workloads/templates/docker.service.j2
   - roles/workloads/templates/quadlet.container.j2
   - site.yml

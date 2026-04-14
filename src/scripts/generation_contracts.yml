@@ -147,6 +147,46 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/dns/templates/40-dns.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/templates/nftables.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/templates/10-firewall-accept.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/templates/10-dnat.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/templates/10-forward-dnat.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/templates/10-masquerade.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall/templates/pf.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/firewall_geo/handlers/main.yml:
     source_of_truth:
       - PROMPT.md
@@ -155,7 +195,11 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
-  roles/firewall_geo/templates/nftables.conf.j2:
+  roles/firewall_geo/templates/30-geoip-defines.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/firewall_geo/templates/30-legacy.nft.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -184,6 +228,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/mailserver/templates/10-master.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/40-mailserver.nft.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -239,6 +287,10 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/step_ca/templates/40-stepca.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/samba/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
@@ -252,6 +304,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/samba/templates/smb.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/samba/templates/40-samba.nft.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -271,6 +327,10 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/nfs/templates/40-nfs.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/node_exporter/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
@@ -280,6 +340,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/node_exporter/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/node_exporter/templates/40-node-exporter.nft.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -355,6 +419,10 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/openvpn/templates/40-openvpn.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/wireguard/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
@@ -372,6 +440,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/wireguard/templates/wg.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/wireguard/templates/40-wireguard.nft.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -424,6 +496,10 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/workloads/templates/docker.service.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/workloads/templates/40-workloads.nft.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
@@ -549,10 +625,6 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/grafana/tasks/main.yml:
-    source_of_truth:
-      - PROMPT.md
-      - generate_ansible_enterprise.py
-  roles/firewall_geo/templates/pf.conf.j2:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py

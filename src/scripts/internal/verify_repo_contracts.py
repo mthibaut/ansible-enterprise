@@ -46,6 +46,8 @@ SOURCE_OF_TRUTH_KEY = "source_of_truth"
 
 # Protected files live in build/ (generated from FILE_MANIFEST in src/).
 PROTECTED_FILES = [
+    "roles/firewall/tasks/main.yml",
+    "roles/firewall/handlers/main.yml",
     "roles/firewall_geo/tasks/main.yml",
     "roles/firewall_geo/handlers/main.yml",
     "roles/mailserver/tasks/main.yml",
@@ -76,6 +78,7 @@ REQUIRED_TEST_COVERAGE = {
     "../build/roles/dns/files/dns-bump-serial":        "test_dns_bump_serial.py",
     "scripts/proxmox_infra_render.py":               "test_proxmox_inventory_scaffold.py",
     "scripts/proxmox_inventory_scaffold.py":         "test_proxmox_inventory_scaffold.py",
+    "scripts/wireguard_topology_render.py":          "test_wireguard_topology_render.py",
     "scripts/internal/resolve_service_order.py":      "test_resolve_service_order.py",
     "scripts/internal/validate_services_schema.py":   "test_services_schema.py",
     "scripts/internal/resolve_capabilities.py":       "test_resolve_capabilities.py",

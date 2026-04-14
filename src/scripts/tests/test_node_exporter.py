@@ -116,13 +116,17 @@ class TestNodeExporterRole(unittest.TestCase):
 
 class TestNodeExporterFirewall(unittest.TestCase):
 
-    NFTABLES = BUILD / "roles" / "firewall_geo" / "templates" / "nftables.conf.j2"
+    NFTABLES = BUILD / "roles" / "node_exporter" / "templates" / "40-node-exporter.nft.j2"
+    TASKS = BUILD / "roles" / "node_exporter" / "tasks" / "main.yml"
 
     def _tmpl(self):
         return self.NFTABLES.read_text(encoding="utf-8")
 
+    def _tasks(self):
+        return self.TASKS.read_text(encoding="utf-8")
+
     def test_node_exporter_block_present(self):
-        self.assertIn("node_exporter_enabled", self._tmpl())
+        self.assertIn("# managed by ansible - node_exporter role", self._tmpl())
 
     def test_loopback_ipv4_accepted(self):
         self.assertIn("ip  saddr 127.0.0.1", self._tmpl())
@@ -142,12 +146,11 @@ class TestNodeExporterFirewall(unittest.TestCase):
         # The template has a ':' check to distinguish IPv6
         self.assertIn('if ":" in _addr', text)
 
-    def test_node_exporter_before_ssh_in_ruleset(self):
-        """node_exporter accept rules must appear before the SSH block."""
-        text = self._tmpl()
-        ne_pos  = text.index("node_exporter_enabled")
-        ssh_pos = text.index("tcp dport {{ ssh_port }} accept")
-        self.assertLess(ne_pos, ssh_pos)
+    def test_node_exporter_role_deploys_dedicated_drop_in(self):
+        text = self._tasks()
+        self.assertIn("Deploy node_exporter nftables drop-in", text)
+        self.assertIn("/etc/nftables.d/input/40-node-exporter.nft", text)
+        self.assertIn("notify: Reload nftables", text)
 
 
 class TestNodeExporterSiteYml(unittest.TestCase):

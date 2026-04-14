@@ -3248,3 +3248,20 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      AlmaLinux, Rocky, CentOS, Fedora, Devuan, Arch, openSUSE, and Gentoo.
      openEuler excluded from LXC testing — Proxmox `Setup.pm` cannot detect
      the distro and fails in `post_create_hook`.
+
+208. `checkpoint-208-firewall-dropins-and-wireguard-topology`
+     The Linux firewall stack was refactored away from a monolithic
+     `firewall_geo`-owned nftables template into a base `firewall` role plus
+     per-role drop-ins under `/etc/nftables.d/`. The new `firewall` role owns
+     the nftables skeleton, generic accept/DNAT/masquerade plumbing, immediate
+     apply/reload behavior, and FreeBSD `pf` rendering; `firewall_geo` is now a
+     geoip-focused Linux add-on with transitional legacy rules only.
+     WireGuard, DNS, mailserver, samba, nfs, node_exporter, step_ca, openvpn,
+     and workloads now render their own nftables fragments and notify the
+     shared `Reload nftables` handler. This removes the old stray
+     `default(51820)` behavior and makes service rule ownership explicit.
+     In parallel, the repo gained `src/scripts/wireguard_topology_render.py`,
+     a user-facing helper that reads a topology YAML, writes inventory
+     `host_vars`/vault WireGuard structures, and emits ready-to-use `wg-quick`
+     configs. The distro and role tests were updated to match the new firewall
+     ownership model, and validation once again passes end to end.
