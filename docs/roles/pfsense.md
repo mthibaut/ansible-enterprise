@@ -13,7 +13,7 @@ pfsense:
   aliases:
     - name: trusted_hosts
       type: host
-      addresses: [192.0.2.10, 192.0.2.11]
+      address: [192.0.2.10, 192.0.2.11]
 ```
 
 `host_vars` example:

@@ -1,0 +1,102 @@
+# TRANSITIONAL drop-in -- pasted inside inet filter/input chain by the skeleton.
+# Contains all service + geoip rules from the legacy monolithic template.
+# A follow-up refactor will split each service block out into its own drop-in
+# owned by the corresponding service role.
+
+    # Global allowlist: IPs/CIDRs that bypass all geoip filtering on every port.
+    # Colon presence distinguishes IPv6 from IPv4 without netaddr dependency.
+    {% for _addr in geoip.allowlist | default([]) %}
+    {% if ":" in _addr %}
+    ip6 saddr {{ _addr }} accept
+    {% else %}
+    ip  saddr {{ _addr }} accept
+    {% endif %}
+    {% endfor %}
+
+    # SSH with dedicated geoip filter (geoip_ssh_allowed_countries, falls back to global)
+    {% if geoip.enabled | default(false) | bool and (geoip.ssh_allowed_countries | length > 0) %}
+    ip  saddr != $geoip_ssh_ipv4 tcp dport {{ ssh_port }} drop
+    ip6 saddr != $geoip_ssh_ipv6 tcp dport {{ ssh_port }} drop
+    {% endif %}
+    tcp dport {{ ssh_port }} accept
+
+    # Service port rules with per-port geoip filter.
+    # Per-service security.geoip_allowed_countries overrides the global list
+    # for that port; the union across services is computed by the geoip role.
+    {% set http_open  = namespace(v=false) %}
+    {% set https_open = namespace(v=false) %}
+    {% for svc in services | dict2items | sort(attribute='key') %}
+    {%   if svc.value.enabled | default(false) | bool %}
+    {%     if svc.value.security.expose_http  | default(false) | bool  %}{% set http_open.v  = true %}{% endif %}
+    {%     if svc.value.security.expose_https | default(false) | bool  %}{% set https_open.v = true %}{% endif %}
+    {%   endif %}
+    {% endfor %}
+    {% if http_open.v %}
+    # Per-service geoip_enabled switch: if any http service disables geoip,
+    # skip geoip filtering for port 80 entirely.
+    {% set _http_geoip = namespace(enabled=true) %}
+    {% for _svc in services | dict2items | sort(attribute="key") %}
+    {%   if _svc.value.enabled | default(false) | bool
+           and _svc.value.security.expose_http | default(false) | bool
+           and _svc.value.security.geoip_enabled | default(true) | bool == false %}
+    {%     set _http_geoip.enabled = false %}
+    {%   endif %}
+    {% endfor %}
+    # Per-service allowlist for port 80 (bypasses geoip for that service).
+    {% set _http_al = namespace(addrs=[]) %}
+    {% for _svc in services | dict2items | sort(attribute="key") %}
+    {%   if _svc.value.enabled | default(false) | bool
+           and _svc.value.security.expose_http | default(false) | bool %}
+    {%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
+    {%       if _addr not in _http_al.addrs %}{% set _http_al.addrs = _http_al.addrs + [_addr] %}{% endif %}
+    {%     endfor %}
+    {%   endif %}
+    {% endfor %}
+    {% for _addr in _http_al.addrs %}
+    {% if ":" in _addr %}
+    ip6 saddr {{ _addr }} tcp dport 80 accept
+    {% else %}
+    ip  saddr {{ _addr }} tcp dport 80 accept
+    {% endif %}
+    {% endfor %}
+    {% if geoip.enabled | default(false) | bool and (geoip.allowed_countries | length > 0) and _http_geoip.enabled %}
+    ip  saddr != $geoip_http_ipv4 tcp dport 80 drop
+    ip6 saddr != $geoip_http_ipv6 tcp dport 80 drop
+    {% endif %}
+    tcp dport 80  accept
+    {% endif %}
+
+    {% if https_open.v %}
+    # Per-service geoip_enabled switch: if any https service disables geoip,
+    # skip geoip filtering for port 443 entirely.
+    {% set _https_geoip = namespace(enabled=true) %}
+    {% for _svc in services | dict2items | sort(attribute="key") %}
+    {%   if _svc.value.enabled | default(false) | bool
+           and _svc.value.security.expose_https | default(false) | bool
+           and _svc.value.security.geoip_enabled | default(true) | bool == false %}
+    {%     set _https_geoip.enabled = false %}
+    {%   endif %}
+    {% endfor %}
+    # Per-service allowlist for port 443 (bypasses geoip for that service).
+    {% set _https_al = namespace(addrs=[]) %}
+    {% for _svc in services | dict2items | sort(attribute="key") %}
+    {%   if _svc.value.enabled | default(false) | bool
+           and _svc.value.security.expose_https | default(false) | bool %}
+    {%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
+    {%       if _addr not in _https_al.addrs %}{% set _https_al.addrs = _https_al.addrs + [_addr] %}{% endif %}
+    {%     endfor %}
+    {%   endif %}
+    {% endfor %}
+    {% for _addr in _https_al.addrs %}
+    {% if ":" in _addr %}
+    ip6 saddr {{ _addr }} tcp dport 443 accept
+    {% else %}
+    ip  saddr {{ _addr }} tcp dport 443 accept
+    {% endif %}
+    {% endfor %}
+    {% if geoip.enabled | default(false) | bool and (geoip.allowed_countries | length > 0) and _https_geoip.enabled %}
+    ip  saddr != $geoip_https_ipv4 tcp dport 443 drop
+    ip6 saddr != $geoip_https_ipv6 tcp dport 443 drop
+    {% endif %}
+    tcp dport 443 accept
+    {% endif %}

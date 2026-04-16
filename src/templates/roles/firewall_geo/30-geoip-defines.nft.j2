@@ -1,0 +1,15 @@
+# Top-level geoip set includes (parse-time, outside any table).
+{% if geoip.enabled | default(false) | bool %}
+{% if geoip.ssh_allowed_countries | default([]) | length > 0 %}
+include "{{ _geoip_sets_dir }}/geoip_ssh_ipv4.nft"
+include "{{ _geoip_sets_dir }}/geoip_ssh_ipv6.nft"
+{% endif %}
+{% if geoip.allowed_countries | default([]) | length > 0 %}
+include "{{ _geoip_sets_dir }}/geoip_allowed_ipv4.nft"
+include "{{ _geoip_sets_dir }}/geoip_allowed_ipv6.nft"
+include "{{ _geoip_sets_dir }}/geoip_http_ipv4.nft"
+include "{{ _geoip_sets_dir }}/geoip_http_ipv6.nft"
+include "{{ _geoip_sets_dir }}/geoip_https_ipv4.nft"
+include "{{ _geoip_sets_dir }}/geoip_https_ipv6.nft"
+{% endif %}
+{% endif %}

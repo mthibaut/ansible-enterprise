@@ -174,6 +174,26 @@ class TestDnsBumpSerial(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(serial, datetime.date.today().strftime("%Y%m%d") + "01")
 
+    def test_allow_direct_edit_when_rndc_control_socket_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zone = self._write_zone(tmp)
+            bindir = pathlib.Path(tmp) / "bin"
+            bindir.mkdir()
+            fake_rndc = bindir / "rndc"
+            fake_rndc.write_text(
+                "#!/bin/sh\n"
+                "echo \"rndc: connect failed: 127.0.0.1#953: connection refused\" 1>&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_rndc.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = str(bindir)
+            result = _run_script(tmp, "example.com", env=env)
+            serial = re.search(r"(\d{10})\b", zone.read_text()).group(1)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(serial, datetime.date.today().strftime("%Y%m%d") + "01")
+
 
 if __name__ == "__main__":
     unittest.main()

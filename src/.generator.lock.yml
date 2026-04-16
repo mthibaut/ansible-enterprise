@@ -1,5 +1,5 @@
-source_hash: c5870759bfacb191ecbdb4f84d43e2cf917d9f28ba40cfb9178904587b95bdea
-output_hash: 72178bd2cab3b21f9dfc85cf30291169a00682c0eae99a682858ade1d981407b
+source_hash: 89805f117ca53f031e3c2aeccc25c7b3e043bcbf80927c78c393fa35433aff6a
+output_hash: 92fd57483ec55169f425820eaeaca3044a9382760d96aaf47c6de0a0dd4ebfa7
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -135,6 +135,7 @@ generated_files:
   - roles/ssh_hardening/defaults/main.yml
   - roles/ssh_hardening/handlers/main.yml
   - roles/ssh_hardening/tasks/main.yml
+  - roles/ssh_hardening/templates/99-ansible-enterprise.conf.j2
   - roles/ssh_hardening/templates/sshd_config.j2
   - roles/step_ca/defaults/main.yml
   - roles/step_ca/handlers/main.yml
@@ -169,3 +170,8 @@ source_files:
   - generate_ansible_enterprise.py
   - spec/ai-development-mode.md
   - spec/contracts.md
+  - templates/roles/bootstrap_scripts/bootstrap.sh.j2
+  - templates/roles/firewall/nftables.conf.j2
+  - templates/roles/firewall/pf.conf.j2
+  - templates/roles/firewall_geo/30-geoip-defines.nft.j2
+  - templates/roles/firewall_geo/30-legacy.nft.j2

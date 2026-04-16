@@ -172,6 +172,7 @@ Files in `UNMANAGED_FILES` (e.g. `build/group_vars/all/vault.yml`) are never tou
 ## DNS notes
 
 - Edit DNS behavior in `src/`, not `build/`.
+- The `dns` role is authoritative-oriented. It does not try to provision a recursive/caching resolver.
 - Primary zones support `overwrite: true` to let Ansible rewrite the zone file from inventory content.
 - When overwriting, the role preserves the current SOA serial and only bumps it if the zone actually changed.
 - SOA serials use `YYYYMMDDNN` and must stay within the DNS 32-bit serial range.

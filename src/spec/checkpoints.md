@@ -3242,12 +3242,18 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      Added `bootstrap_commands` variable to `lxc_bootstrap.yml`: a list of
      arbitrary shell commands run via `raw` before Python installation. Enables
      per-host or per-group prep steps for containers that need OS-level fixes
-     before package installation (e.g. Gentoo profile symlink, openSUSE 16.0
+     before package installation (for example openSUSE 16.0
      systemd-networkd config). Fixed zypper `-q` flag not supported on
      openSUSE. Confirmed bootstrap works across Debian, Ubuntu, Alpine,
      AlmaLinux, Rocky, CentOS, Fedora, Devuan, Arch, openSUSE, and Gentoo.
      openEuler excluded from LXC testing — Proxmox `Setup.pm` cannot detect
      the distro and fails in `post_create_hook`.
+     Deferred follow-up: `lxc_bootstrap.yml` is currently named for the first
+     use case that introduced it, but the playbook is increasingly useful for
+     minimal VMs as well because it solves the more general "pre-Python host
+     bootstrap" problem. Keep the current name for now to avoid churn while
+     the workflow settles; revisit a rename later if the VM use case becomes
+     routine enough that the current name is misleading.
 
 208. `checkpoint-208-firewall-dropins-and-wireguard-topology`
      The Linux firewall stack was refactored away from a monolithic
@@ -3265,3 +3271,7 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      `host_vars`/vault WireGuard structures, and emits ready-to-use `wg-quick`
      configs. The distro and role tests were updated to match the new firewall
      ownership model, and validation once again passes end to end.
+     Deferred follow-up: add a separate recursion-oriented DNS resolver
+     workflow/role if that use case is needed. The current `dns` role is
+     authoritative-oriented by design and should stay explicit about not
+     provisioning a generic recursive/caching nameserver.

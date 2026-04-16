@@ -1,0 +1,49 @@
+# Skeleton nftables config -- managed by the firewall role.
+# Per-service rules live as drop-ins under /etc/nftables.d/.
+flush ruleset
+
+# Top-level defines (geoip sets, etc.) must live outside any table.
+include "/etc/nftables.d/defines/*.nft"
+
+table inet filter {
+
+  chain input {
+    type filter hook input priority 0;
+    policy drop;
+
+    ct state established,related accept
+    ct state invalid drop
+    iif lo accept
+
+    ip  protocol icmp      accept
+    ip6 nexthdr  ipv6-icmp accept
+
+    include "/etc/nftables.d/input/*.nft"
+  }
+
+  chain forward {
+    type filter hook forward priority 0;
+    policy drop;
+
+    ct state established,related accept
+    ct state invalid drop
+
+    include "/etc/nftables.d/forward/*.nft"
+  }
+
+  chain output {
+    type filter hook output priority 0;
+    policy accept;
+  }
+}
+
+table ip nat {
+  chain prerouting {
+    type nat hook prerouting priority dstnat;
+    include "/etc/nftables.d/nat-prerouting/*.nft"
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    include "/etc/nftables.d/nat-postrouting/*.nft"
+  }
+}

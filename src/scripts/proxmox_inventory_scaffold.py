@@ -6,11 +6,13 @@ import ipaddress
 import os
 import pathlib
 import sys
+from collections.abc import Sequence
 
 from proxmox_infra_render import (
     build_infra_config,
     env_bool,
     env_int,
+    env_list,
     help_epilog,
     parser_kwargs,
     render_yaml_document,
@@ -43,11 +45,29 @@ def increment_ip(ip_start_cidr: str, offset: int) -> str:
     return f"{new_ip}/{network.prefixlen}"
 
 
+def normalize_node_list(node: str | Sequence[str] | None) -> list[str]:
+    if node is None:
+        return []
+    if isinstance(node, str):
+        parts = [part.strip() for part in node.split(",")]
+    else:
+        parts = [str(part).strip() for part in node]
+    return [part for part in parts if part]
+
+
+def select_node(node: str | Sequence[str] | None, offset: int) -> str | None:
+    nodes = normalize_node_list(node)
+    if not nodes:
+        return None
+    return nodes[offset % len(nodes)]
+
+
 def render_hosts_ini(
     rows: list[tuple[str, str]],
     *,
     ansible_user: str,
     ip_start_cidr: str,
+    node: str | Sequence[str] | None = None,
     ansible_group: str = "all",
     ansible_port: int | None = None,
     ansible_connection: str | None = None,
@@ -58,6 +78,9 @@ def render_hosts_ini(
     for offset, (hostname, _artifact) in enumerate(rows):
         host_ip = str(ipaddress.ip_interface(increment_ip(ip_start_cidr, offset)).ip)
         parts = [f"{hostname} ansible_host={host_ip} ansible_user={ansible_user}"]
+        selected = select_node(node, offset)
+        if selected is not None:
+            parts.append(f"ansible_paramiko_host={selected}")
         if ansible_port is not None:
             parts.append(f"ansible_port={ansible_port}")
         if ansible_connection is not None:
@@ -88,7 +111,7 @@ def write_inventory(
     ansible_connection: str | None,
     ansible_become: bool | None,
     ansible_become_method: str | None,
-    node: str | None,
+    node: str | Sequence[str] | None,
     storage: str | None,
     artifact_storage: str,
     cores: int | None,
@@ -99,6 +122,7 @@ def write_inventory(
     onboot: bool | None,
     started: bool | None,
     unprivileged: bool | None,
+    features: list[str] | None,
     force: bool,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +137,7 @@ def write_inventory(
             rows,
             ansible_user=ansible_user,
             ip_start_cidr=ip_start_cidr,
+            node=node,
             ansible_group=ansible_group,
             ansible_port=ansible_port,
             ansible_connection=ansible_connection,
@@ -138,7 +163,7 @@ def write_inventory(
             bridge=bridge,
             state=state,
             rebuild_on=rebuild_on,
-            node=node,
+            node=select_node(node, offset),
             storage=storage,
             artifact_storage=artifact_storage,
             cores=cores,
@@ -149,6 +174,7 @@ def write_inventory(
             onboot=onboot,
             started=started,
             unprivileged=unprivileged,
+            features=features,
         )
         infra_yml.write_text(render_yaml_document(config), encoding="utf-8")
 
@@ -166,7 +192,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--out-dir", **parser_kwargs(suffix="OUT_DIR", default="inventory-scaffold"))
     parser.add_argument("--gateway", **parser_kwargs(suffix="GATEWAY"))
     parser.add_argument("--bridge", **parser_kwargs(suffix="BRIDGE", default="vmbr0"))
-    parser.add_argument("--state", choices=["present", "absent"], **parser_kwargs(suffix="STATE", default="present"))
+    parser.add_argument("--state", **parser_kwargs(suffix="STATE", default="present"))
     parser.add_argument("--rebuild-on", choices=["never", "config_change", "always"], **parser_kwargs(suffix="REBUILD_ON", default="never"))
     parser.add_argument("--ansible-user", **parser_kwargs(suffix="ANSIBLE_USER", default="root"))
     parser.add_argument("--ansible-group", **parser_kwargs(suffix="ANSIBLE_GROUP", default="all"))
@@ -174,7 +200,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ansible-connection", **parser_kwargs(suffix="ANSIBLE_CONNECTION"))
     parser.add_argument("--ansible-become", action=argparse.BooleanOptionalAction, default=env_bool("ANSIBLE_BECOME"))
     parser.add_argument("--ansible-become-method", **parser_kwargs(suffix="ANSIBLE_BECOME_METHOD"))
-    parser.add_argument("--node", **parser_kwargs(suffix="NODE"))
+    parser.add_argument(
+        "--node",
+        help=(
+            "Proxmox node name, or a comma-separated list of node names for round-robin "
+            "assignment across rows"
+        ),
+        **parser_kwargs(suffix="NODE"),
+    )
     parser.add_argument("--storage", **parser_kwargs(suffix="STORAGE"))
     parser.add_argument("--artifact-storage", **parser_kwargs(suffix="ARTIFACT_STORAGE", default="local:vztmpl"))
     parser.add_argument("--cores", type=int, default=env_int("CORES"))
@@ -185,6 +218,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--onboot", action=argparse.BooleanOptionalAction, default=env_bool("ONBOOT"))
     parser.add_argument("--started", action=argparse.BooleanOptionalAction, default=env_bool("STARTED"))
     parser.add_argument("--unprivileged", action=argparse.BooleanOptionalAction, default=env_bool("UNPRIVILEGED"))
+    parser.add_argument(
+        "--feature",
+        dest="features",
+        action="append",
+        default=env_list("FEATURES"),
+        help="LXC feature to enable, e.g. --feature nesting=1. Repeat as needed.",
+    )
+    parser.add_argument(
+        "--nesting",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Convenience flag for LXC nesting feature (adds nesting=1 when enabled).",
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args(argv)
 
@@ -195,6 +241,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             f"unsupported provider '{args.provider}'; supported providers: {', '.join(sorted(SUPPORTED_PROVIDERS))}"
         )
+    features = list(args.features or [])
+    if args.nesting is True and "nesting=1" not in features:
+        features.append("nesting=1")
+    if args.nesting is False:
+        features = [feature for feature in features if feature != "nesting=1"]
     rows = parse_rows(sys.stdin.read())
     write_inventory(
         rows=rows,
@@ -224,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         onboot=args.onboot,
         started=args.started,
         unprivileged=args.unprivileged,
+        features=features or None,
         force=args.force,
     )
     return 0

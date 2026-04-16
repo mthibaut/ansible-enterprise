@@ -555,6 +555,10 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/ssh_hardening/templates/99-ansible-enterprise.conf.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/users/defaults/main.yml:
     source_of_truth:
       - PROMPT.md

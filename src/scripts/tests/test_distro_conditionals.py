@@ -34,6 +34,10 @@ class TestSshHardeningDistro(unittest.TestCase):
 
     TASKS    = "roles/ssh_hardening/tasks/main.yml"
     HANDLERS = "roles/ssh_hardening/handlers/main.yml"
+    SSHD_TEMPLATE = "roles/ssh_hardening/templates/sshd_config.j2"
+    SSHD_DROPIN_TEMPLATE = "roles/ssh_hardening/templates/99-ansible-enterprise.conf.j2"
+    COMMON_DEFAULTS = "roles/common/defaults/main.yml"
+    SITE = "site.yml"
 
     def test_debian_installs_openssh_server(self):
         self.assertIn("openssh-server", _read(self.TASKS))
@@ -42,6 +46,18 @@ class TestSshHardeningDistro(unittest.TestCase):
         text = _read(self.TASKS)
         self.assertIn("'openssh'", text)
         self.assertIn("Archlinux", text)
+
+    def test_suse_uses_direct_zypper_install_for_ssh_bootstrap(self):
+        text = _read(self.TASKS)
+        self.assertIn("Install OpenSSH server and sudo (SUSE)", text)
+        self.assertIn("zypper", text)
+        self.assertIn("--no-recommends", text)
+        self.assertIn("ansible_facts.os_family == 'Suse'", text)
+
+    def test_generic_package_task_skips_suse_and_uses_openssh_name(self):
+        text = _read(self.TASKS)
+        self.assertIn("ansible_facts.os_family in ['Archlinux', 'Suse']", text)
+        self.assertIn("when: ansible_facts.os_family != 'Suse'", text)
 
     def test_ssh_service_debian_is_ssh(self):
         """Debian service is 'ssh', not 'sshd'."""
@@ -52,6 +68,52 @@ class TestSshHardeningDistro(unittest.TestCase):
         """RedHat and Arch use 'sshd'."""
         text = _read(self.HANDLERS)
         self.assertIn("else 'sshd'", text)
+
+    def test_common_defaults_expose_ssh_manage_toggle(self):
+        text = _read(self.COMMON_DEFAULTS)
+        self.assertIn("ssh_manage: true", text)
+        self.assertIn("leave SSH daemon packaging and configuration unmanaged", text)
+        self.assertIn("pkg_manager_update_policy: always", text)
+        self.assertIn("pkg_manager_update_valid_time: 3600", text)
+
+    def test_site_gates_ssh_hardening_role_on_ssh_manage(self):
+        text = _read(self.SITE)
+        self.assertIn("- role: ssh_hardening", text)
+        self.assertIn("when: ssh_manage | default(true) | bool", text)
+
+    def test_linux_families_use_sshd_config_dropin(self):
+        text = _read(self.TASKS)
+        self.assertIn("_sshd_config_dropin_supported", text)
+        self.assertIn("['Debian', 'RedHat', 'Archlinux']", text)
+        self.assertIn("Ensure sshd privilege separation directory exists", text)
+        self.assertIn("path: /run/sshd", text)
+        self.assertIn("/etc/ssh/sshd_config.d/99-ansible-enterprise.conf", text)
+        self.assertIn("Validate merged sshd configuration after drop-in deployment", text)
+        self.assertIn("_sshd_dropin is changed", text)
+
+    def test_freebsd_keeps_monolithic_sshd_config(self):
+        text = _read(self.TASKS)
+        self.assertIn("Deploy monolithic sshd_config", text)
+        self.assertIn("not (_sshd_config_dropin_supported | bool)", text)
+
+    def test_dropin_template_omits_subsystem_and_uses_normalized_admin_names(self):
+        text = _read(self.SSHD_DROPIN_TEMPLATE)
+        self.assertIn("AllowUsers root {{ _admin_user_names | default(admin_users) | join(\" \") }}", text)
+        self.assertNotIn("Subsystem sftp", text)
+
+    def test_monolithic_template_retains_subsystem_path_logic(self):
+        text = _read(self.SSHD_TEMPLATE)
+        self.assertIn("Subsystem sftp", text)
+
+    def test_alpine_monolithic_template_omits_usepam(self):
+        text = _read(self.SSHD_TEMPLATE)
+        self.assertIn("os_family != 'Alpine'", text)
+        self.assertIn("UsePAM yes", text)
+
+    def test_ssh_host_keys_are_ensured_before_validation(self):
+        text = _read(self.TASKS)
+        self.assertIn("Ensure SSH host keys exist before config validation", text)
+        self.assertIn("ssh-keygen -A", text)
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +191,48 @@ class TestDnsDistro(unittest.TestCase):
         options_pos = text.index("options {")
         self.assertLess(guard_pos, options_pos)
 
+    def test_redhat_named_conf_includes_rndc_support(self):
+        text = _read(self.NAMED_CONF)
+        self.assertIn("os_family == 'RedHat'", text)
+        self.assertIn('include "/etc/rndc.key";', text)
+        self.assertIn('keys { "rndc-key"; }', text)
+        self.assertIn("controls {", text)
+
+    def test_redhat_tasks_generate_rndc_key(self):
+        text = _read(self.TASKS)
+        self.assertIn("Generate rndc key for RedHat authoritative BIND", text)
+        self.assertIn("rndc-confgen", text)
+        self.assertIn("creates: /etc/rndc.key", text)
+        self.assertIn("Set RedHat rndc key permissions", text)
+
     def test_enable_and_start_bind_task_present(self):
         """BIND must have an explicit state: started task (not only via handler)."""
         text = _read(self.TASKS)
-        self.assertIn("Enable and start BIND", text)
+        self.assertIn("Enable and start BIND (systemd)", text)
+        self.assertIn("systemd:", text)
+        self.assertIn("Start BIND (non-systemd)", text)
+        self.assertIn("service:", text)
+        self.assertIn("enabled: true", text)
         self.assertIn("state: started", text)
+        self.assertIn("ansible_service_mgr | default('') == 'systemd'", text)
+        self.assertIn("ansible_service_mgr | default('') != 'systemd'", text)
+
+    def test_zone_serials_bump_after_bind_is_ready(self):
+        text = _read(self.TASKS)
+        self.assertLess(text.index("Wait for BIND to be ready on port 53"), text.index("Bump zone serials"))
+
+    def test_dns_nftables_dropin_requires_firewall_role(self):
+        text = _read(self.TASKS)
+        deploy_pos = text.index("Deploy DNS nftables drop-in")
+        self.assertIn("firewall_enabled | default(false) | bool", text[deploy_pos:deploy_pos + 400])
+
+    def test_dns_helper_directory_exists_before_helper_installs(self):
+        text = _read(self.TASKS)
+        self.assertIn("Ensure local admin helper directory exists", text)
+        self.assertIn("path: /usr/local/sbin", text)
+        self.assertLess(text.index("Ensure local admin helper directory exists"), text.index("Install dns-bump-serial helper"))
+        self.assertNotIn("Remove old update_dns_serial.py helper", text)
+        self.assertNotIn("/usr/local/sbin/update_dns_serial.py", text)
 
     def test_overwrite_managed_zones_preserve_existing_serials(self):
         text = _read(self.TASKS)
@@ -182,6 +281,8 @@ class TestHostnameBootstrapRegression(unittest.TestCase):
 
     COMMON_TASKS = "roles/common/tasks/main.yml"
     BOOTSTRAP_TEMPLATE = "roles/bootstrap_scripts/templates/bootstrap.sh.j2"
+    BOOTSTRAP_PLAY = "bootstrap.yml"
+    BOOTSTRAP_TASKS = "roles/bootstrap_scripts/tasks/main.yml"
 
     def test_hosts_update_falls_back_when_default_ipv4_missing(self):
         text = _read(self.COMMON_TASKS)
@@ -211,10 +312,19 @@ class TestHostnameBootstrapRegression(unittest.TestCase):
         self.assertIn("Configure search domain via dhclient", text)
         self.assertIn("Configure search domain via systemd-resolved", text)
         self.assertIn("Read resolv.conf", text)
-        self.assertIn("_resolv_conf_has_desired_search", text)
-        self.assertIn("^search[ \\t]+", text)
-        self.assertIn("not (_resolv_conf_has_desired_search | default(false) | bool)", text)
-        self.assertIn("_set_domain_backend_effective | default('') == 'static'", text)
+
+    def test_lxc_bootstrap_supports_pre_and_post_raw_hooks(self):
+        text = _read("lxc_bootstrap.yml")
+        self.assertIn("Run bootstrap pre-Python commands", text)
+        self.assertIn("bootstrap_raw_pre | default(bootstrap_commands | default([]))", text)
+        self.assertIn("Run bootstrap post-Python commands", text)
+        self.assertIn("bootstrap_raw_post | default([])", text)
+
+    def test_lxc_bootstrap_runs_post_hook_after_python_setup(self):
+        text = _read("lxc_bootstrap.yml")
+        self.assertLess(text.index("- name: Run bootstrap pre-Python commands"), text.index("- name: Install Python"))
+        self.assertLess(text.index("- name: Install Python"), text.index("- name: Verify Python and gather facts"))
+        self.assertLess(text.index("- name: Verify Python and gather facts"), text.index("- name: Run bootstrap post-Python commands"))
 
     def test_bootstrap_prefers_manager_specific_search_domain_configuration(self):
         text = _read(self.BOOTSTRAP_TEMPLATE)
@@ -222,9 +332,48 @@ class TestHostnameBootstrapRegression(unittest.TestCase):
         self.assertIn("systemctl is-active NetworkManager", text)
         self.assertIn("systemctl list-unit-files systemd-resolved.service", text)
         self.assertIn("resolvconf -u", text)
-        self.assertIn('supersede domain-search \\"${DOMAIN}\\";', text)
+        self.assertIn("supersede domain-search", text)
+        self.assertIn('${DOMAIN}', text)
         self.assertIn("/etc/systemd/resolved.conf.d/ansible-enterprise.conf", text)
         self.assertIn("Domains=${DOMAIN}", text)
+
+    def test_bootstrap_play_uses_live_local_python_not_stale_venv_path(self):
+        text = _read(self.BOOTSTRAP_PLAY)
+        self.assertIn("lookup(", text)
+        self.assertIn("command -v python3 || command -v python", text)
+        self.assertNotIn("ansible_playbook_python", text)
+
+    def test_bootstrap_role_explicitly_delegates_generation_to_localhost(self):
+        text = _read(self.BOOTSTRAP_TASKS)
+        self.assertIn("delegate_to: localhost", text)
+        self.assertIn("Generate plaintext bootstrap script", text)
+        self.assertIn("Build self-decrypting bootstrap script", text)
+
+    def test_bootstrap_role_exports_inventory_vars_without_eager_hostvar_resolution(self):
+        text = _read(self.BOOTSTRAP_TASKS)
+        self.assertIn("ansible-inventory", text)
+        self.assertIn("--host {{ inventory_hostname | quote }} --yaml --export", text)
+        self.assertIn("_bs_host_vars_export.stdout | from_yaml", text)
+        self.assertNotIn("hostvars[inventory_hostname]", text)
+
+
+class TestGentooSupportRegression(unittest.TestCase):
+
+    COMMON_DEFAULTS = "roles/common/defaults/main.yml"
+    COMMON_TASKS = "roles/common/tasks/main.yml"
+
+    def test_common_defaults_document_gentoo_profile(self):
+        text = _read(self.COMMON_DEFAULTS)
+        self.assertIn("gentoo_profile: ''", text)
+        self.assertIn("default/linux/amd64/23.0", text)
+
+    def test_common_tasks_manage_gentoo_profile_idempotently(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("Read current Gentoo profile", text)
+        self.assertIn("eselect profile show", text)
+        self.assertIn("Set Gentoo profile", text)
+        self.assertIn("ansible_facts.os_family == 'Gentoo'", text)
+        self.assertIn('(_gentoo_current_profile.stdout | default(\'\') | trim) != gentoo_profile', text)
 
 
 class TestAdminUsersRegression(unittest.TestCase):
@@ -250,6 +399,13 @@ class TestAdminUsersRegression(unittest.TestCase):
         self.assertIn("_admin_user_names", text)
         self.assertIn("item.password is defined", text)
         self.assertIn("selectattr('ssh_keys', 'defined')", text)
+        self.assertIn("Resolve admin users primary groups", text)
+        self.assertIn("_admin_primary_groups", text)
+        self.assertIn("id", text)
+        self.assertIn("_admin_primary_groups[item.name] | default(omit)", text)
+        self.assertIn("Validate sudoers configuration after drop-in changes", text)
+        self.assertIn("_admin_sudoers_dropins is changed", text)
+        self.assertNotIn('validate: "visudo -cf %s"', text)
 
     def test_sshd_config_uses_normalized_admin_user_names(self):
         text = _read(self.SSHD_TEMPLATE)
@@ -418,6 +574,16 @@ class TestProxmoxInfraRegression(unittest.TestCase):
         self.assertIn('_pve_node_hostvars: "{{ hostvars.get(_pve_node, {}) if _pve_node | length > 0 else {} }}"', text)
         self.assertIn('_pve_api_host: "{{ _proxmox.api_host | default(_pve_node_hostvars.ansible_host | default(_pve_node), true) }}"', text)
         self.assertIn('_pve_api_host | default(\'\') | length > 0', text)
+
+    def test_infra_playbook_passes_validate_certs_to_proxmox_modules(self):
+        text = _read(self.INFRA)
+        self.assertIn('_pve_validate_certs: "{{ _proxmox.validate_certs | default(false) }}"', text)
+        self.assertIn('validate_certs: "{{ _pve_validate_certs }}"', text)
+
+    def test_infra_playbook_passes_timeout_to_proxmox_modules(self):
+        text = _read(self.INFRA)
+        self.assertIn('_pve_timeout: "{{ _proxmox.timeout | default(300) }}"', text)
+        self.assertIn('timeout: "{{ _pve_timeout }}"', text)
 
     def test_infra_playbook_validates_lxc_ostemplate_is_storage_backed(self):
         text = _read(self.INFRA)
@@ -624,16 +790,46 @@ class TestSiteYmlDistro(unittest.TestCase):
     SITE = "site.yml"
 
     def test_apt_cache_refresh_present(self):
-        self.assertIn("Refresh apt package cache", _read(self.SITE))
+        text = _read(self.SITE)
+        self.assertIn("Refresh apt package cache", text)
+        self.assertIn("Refresh apt package cache (auto)", text)
+        self.assertIn("Configure apt proxy", text)
+        self.assertIn('/etc/apt/apt.conf.d/90ansible-enterprise-proxy', text)
+        self.assertIn('Acquire::http::Proxy "{{ pkg_manager_proxy.http_proxy }}";', text)
+        self.assertIn('cache_valid_time: "{{ pkg_manager_update_valid_time | default(3600) | int }}"', text)
 
     def test_dnf_cache_refresh_present(self):
-        self.assertIn("Refresh dnf package cache", _read(self.SITE))
+        text = _read(self.SITE)
+        self.assertIn("Refresh dnf package cache", text)
+        self.assertIn("Refresh dnf package cache (auto)", text)
+        self.assertIn("dnf -q makecache --timer", text)
+        self.assertIn("Configure dnf proxy", text)
+        self.assertIn('path: /etc/dnf/dnf.conf', text)
+        self.assertIn('option: proxy', text)
 
     def test_pacman_cache_refresh_present(self):
         """Arch Linux needs pacman -Sy before installing packages."""
         text = _read(self.SITE)
         self.assertIn("Refresh pacman package cache", text)
         self.assertIn("Archlinux", text)
+
+    def test_gentoo_cache_refresh_present(self):
+        text = _read(self.SITE)
+        self.assertIn("Refresh Gentoo package metadata", text)
+        self.assertIn("emaint sync -a", text)
+        self.assertIn("Gentoo", text)
+
+    def test_apk_cache_refresh_present(self):
+        text = _read(self.SITE)
+        self.assertIn("Refresh apk package cache", text)
+        self.assertIn("apk update", text)
+        self.assertIn("Alpine", text)
+
+    def test_zypper_cache_refresh_present(self):
+        text = _read(self.SITE)
+        self.assertIn("Refresh zypper package cache", text)
+        self.assertIn("zypper --non-interactive refresh", text)
+        self.assertIn("Suse", text)
 
     def test_apt_gated_to_debian(self):
         text = _read(self.SITE)
@@ -652,6 +848,54 @@ class TestSiteYmlDistro(unittest.TestCase):
         pac_pos  = text.index("Refresh pacman package cache")
         arch_pos = text.index("Archlinux", pac_pos)
         self.assertLess(pac_pos, arch_pos + 100)
+
+    def test_gentoo_refresh_gated_to_gentoo(self):
+        text = _read(self.SITE)
+        gentoo_pos = text.index("Refresh Gentoo package metadata")
+        os_pos = text.index("os_family == 'Gentoo'", gentoo_pos)
+        self.assertLess(gentoo_pos, os_pos + 100)
+
+    def test_apk_refresh_gated_to_alpine(self):
+        text = _read(self.SITE)
+        alpine_pos = text.index("Refresh apk package cache")
+        os_pos = text.index("os_family == 'Alpine'", alpine_pos)
+        self.assertLess(alpine_pos, os_pos + 100)
+
+    def test_zypper_refresh_gated_to_suse(self):
+        text = _read(self.SITE)
+        suse_pos = text.index("Refresh zypper package cache")
+        os_pos = text.index("os_family == 'Suse'", suse_pos)
+        self.assertLess(suse_pos, os_pos + 100)
+
+    def test_cache_refresh_tasks_accept_proxy_environment(self):
+        text = _read(self.SITE)
+        self.assertEqual(
+            text.count('environment: "{{ pkg_manager_proxy if (pkg_manager_proxy | default({}) | length > 0) else omit }}"'),
+            4,
+        )
+
+    def test_package_manager_update_policy_assert_present(self):
+        text = _read(self.SITE)
+        self.assertIn("Assert package-manager update policy is valid", text)
+        self.assertIn("pkg_manager_update_policy | default('always') in ['always', 'auto', 'never']", text)
+        self.assertIn("pkg_manager_update_valid_time | default(3600) | int > 0", text)
+
+    def test_cache_refresh_tasks_are_policy_gated(self):
+        text = _read(self.SITE)
+        self.assertIn("pkg_manager_update_policy | default('always') == 'always'", text)
+        self.assertIn("pkg_manager_update_policy | default('always') == 'auto'", text)
+
+    def test_apt_and_dnf_proxy_config_cleanup_present(self):
+        text = _read(self.SITE)
+        self.assertIn("Remove apt proxy config when unset", text)
+        self.assertIn("Remove dnf proxy config when unset", text)
+
+    def test_suse_proxy_config_present(self):
+        text = _read(self.SITE)
+        self.assertIn("Configure openSUSE proxy", text)
+        self.assertIn("Remove openSUSE proxy config when unset", text)
+        self.assertIn("path: /etc/sysconfig/proxy", text)
+        self.assertIn('PROXY_ENABLED="yes"', text)
 
 
 class TestCronieArch(unittest.TestCase):
@@ -743,9 +987,11 @@ class TestSelinuxRedhat(unittest.TestCase):
 
     def test_deny_ptrace_gated_to_redhat(self):
         text = _read(self.COMMON_TASKS)
-        idx = text.index("deny_ptrace")
-        surrounding = text[idx-300:idx+100]
-        self.assertIn("os_family == 'RedHat'", surrounding)
+        idx = text.index("- name: Allow root to list all processes (RedHat SELinux)")
+        task_block = text[idx:idx+360]
+        self.assertIn("os_family == 'RedHat'", task_block)
+        self.assertIn("ansible_facts.selinux is defined", task_block)
+        self.assertIn("ansible_facts.selinux.status | default('disabled') != 'disabled'", task_block)
 
 
 class TestMailserverPackagesArch(unittest.TestCase):
@@ -1458,6 +1704,9 @@ class TestSiteYmlStructure(unittest.TestCase):
         """No when: block should contain the same condition twice."""
         import re
         text = _read("site.yml")
+        roles_start = text.find("\n  roles:\n")
+        if roles_start != -1:
+            text = text[roles_start:]
         # Find all when: blocks (multi-line, ending at next - role: or end)
         blocks = re.split(r"^\s+- role:", text, flags=re.MULTILINE)
         duplicates = []

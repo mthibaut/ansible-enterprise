@@ -11,6 +11,21 @@ import yaml
 
 ENV_PREFIX = "PROXMOX_"
 SUPPORTED_PROVIDERS = {"proxmox"}
+
+
+class DoubleQuotedString(str):
+    """YAML helper for values that should always be emitted with double quotes."""
+
+
+class InfraDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_double_quoted_string(dumper: yaml.SafeDumper, data: DoubleQuotedString):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style='"')
+
+
+InfraDumper.add_representer(DoubleQuotedString, _represent_double_quoted_string)
 COMMON_ENV_SUFFIXES = [
     "PROVIDER",
     "TYPE",
@@ -29,11 +44,12 @@ COMMON_ENV_SUFFIXES = [
     "ONBOOT",
     "STARTED",
     "UNPRIVILEGED",
+    "FEATURES",
 ]
 ENV_DESCRIPTIONS = {
     "PROVIDER": "Infra provider name. Currently only 'proxmox' is supported.",
     "TYPE": "Instance type: 'lxc' or 'vm'.",
-    "STATE": "Desired lifecycle state: 'present' or 'absent'.",
+    "STATE": "Desired lifecycle state. Use 'present' or 'absent', or provide a variable name that should default to 'present'.",
     "REBUILD_ON": "Rebuild policy: 'never', 'config_change', or 'always'.",
     "NODE": "Target Proxmox node name.",
     "GATEWAY": "Default gateway IP for the primary network.",
@@ -48,6 +64,7 @@ ENV_DESCRIPTIONS = {
     "ONBOOT": "Whether the guest should start automatically with the host.",
     "STARTED": "Whether the guest should be running after provisioning.",
     "UNPRIVILEGED": "Whether to create an unprivileged LXC.",
+    "FEATURES": "Comma-separated LXC feature list such as nesting=1,keyctl=1.",
     "ID": "Guest numeric ID for the single rendered infra block.",
     "ARTIFACT": "LXC template artifact or VM template name.",
     "IP": "Primary guest IP/CIDR, such as 192.0.2.10/24.",
@@ -87,6 +104,14 @@ def env_bool(suffix: str) -> bool | None:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{env_name(suffix)} must be a boolean value")
+
+
+def env_list(suffix: str) -> list[str] | None:
+    value = env_string(suffix)
+    if value is None:
+        return None
+    items = [item.strip() for item in value.split(",")]
+    return [item for item in items if item]
 
 
 def parser_kwargs(*, suffix: str, default=None, required: bool = False) -> dict:
@@ -137,6 +162,12 @@ def _normalize_lxc_artifact_storage(artifact_storage: str) -> str:
     return storage
 
 
+def _normalize_state(state: str) -> str:
+    if state in {"present", "absent"}:
+        return state
+    return DoubleQuotedString("{{ " + state + " | default('present') }}")
+
+
 def build_infra_config(
     *,
     provider: str = "proxmox",
@@ -159,6 +190,7 @@ def build_infra_config(
     onboot: bool | None = None,
     started: bool | None = None,
     unprivileged: bool | None = None,
+    features: list[str] | None = None,
 ) -> dict:
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(
@@ -166,10 +198,9 @@ def build_infra_config(
         )
     if instance_type not in {"lxc", "vm"}:
         raise ValueError("type must be 'lxc' or 'vm'")
-    if state not in {"present", "absent"}:
-        raise ValueError("state must be 'present' or 'absent'")
     if rebuild_on not in {"never", "config_change", "always"}:
         raise ValueError("rebuild_on must be one of: never, config_change, always")
+    normalized_state = _normalize_state(state)
 
     proxmox: dict = {
         "net": {
@@ -203,6 +234,8 @@ def build_infra_config(
             proxmox["disk"] = disk
         if unprivileged is not None:
             proxmox["unprivileged"] = unprivileged
+        if features:
+            proxmox["features"] = features
     else:
         proxmox["template_name"] = artifact
 
@@ -210,14 +243,14 @@ def build_infra_config(
         "provider": provider,
         "type": instance_type,
         "id": instance_id,
-        "state": state,
+        "state": normalized_state,
         "rebuild_on": rebuild_on,
         "proxmox": proxmox,
     }
 
 
 def render_yaml_document(data: dict) -> str:
-    return yaml.safe_dump({"infra": data}, sort_keys=False)
+    return yaml.dump({"infra": data}, Dumper=InfraDumper, sort_keys=False)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -233,7 +266,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ip", dest="ip_cidr", help="Primary IP with CIDR, e.g. 192.0.2.10/24", **parser_kwargs(suffix="IP", required=True))
     parser.add_argument("--gateway", **parser_kwargs(suffix="GATEWAY"))
     parser.add_argument("--bridge", **parser_kwargs(suffix="BRIDGE", default="vmbr0"))
-    parser.add_argument("--state", choices=["present", "absent"], **parser_kwargs(suffix="STATE", default="present"))
+    parser.add_argument("--state", **parser_kwargs(suffix="STATE", default="present"))
     parser.add_argument("--rebuild-on", choices=["never", "config_change", "always"], **parser_kwargs(suffix="REBUILD_ON", default="never"))
     parser.add_argument("--node", **parser_kwargs(suffix="NODE"))
     parser.add_argument("--storage", **parser_kwargs(suffix="STORAGE"))
@@ -246,11 +279,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--onboot", action=argparse.BooleanOptionalAction, default=env_bool("ONBOOT"))
     parser.add_argument("--started", action=argparse.BooleanOptionalAction, default=env_bool("STARTED"))
     parser.add_argument("--unprivileged", action=argparse.BooleanOptionalAction, default=env_bool("UNPRIVILEGED"))
+    parser.add_argument(
+        "--feature",
+        dest="features",
+        action="append",
+        default=env_list("FEATURES"),
+        help="LXC feature to enable, e.g. --feature nesting=1. Repeat as needed.",
+    )
+    parser.add_argument(
+        "--nesting",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Convenience flag for LXC nesting feature (adds nesting=1 when enabled).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    features = list(args.features or [])
+    if args.nesting is True and "nesting=1" not in features:
+        features.append("nesting=1")
+    if args.nesting is False:
+        features = [feature for feature in features if feature != "nesting=1"]
     data = build_infra_config(
         provider=args.provider,
         instance_type=args.instance_type,
@@ -272,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         onboot=args.onboot,
         started=args.started,
         unprivileged=args.unprivileged,
+        features=features or None,
     )
     sys.stdout.write(render_yaml_document(data))
     return 0

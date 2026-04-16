@@ -10,7 +10,8 @@
 #            gitignored; always regenerated from src/
 #
 # HOW TO UPDATE A MANAGED FILE:
-#   1. Edit the content in FILE_MANIFEST below.
+#   1. Edit the content in FILE_MANIFEST below, or in a generator-owned source
+#      asset under src/templates/ when FILE_MANIFEST loads it from disk.
 #   2. make generate   (or: cd src && python3 generate_ansible_enterprise.py)
 #   3. make validate   (or: cd src && python3 scripts/internal/verify_repo_contracts.py)
 #   4. Commit the src/ change (build/ is gitignored).
@@ -93,6 +94,11 @@ LOCK_SOURCE_FILES = sorted({
     "generate_ansible_enterprise.py",
     "spec/contracts.md",
     "spec/ai-development-mode.md",
+    "templates/roles/bootstrap_scripts/bootstrap.sh.j2",
+    "templates/roles/firewall/nftables.conf.j2",
+    "templates/roles/firewall/pf.conf.j2",
+    "templates/roles/firewall_geo/30-geoip-defines.nft.j2",
+    "templates/roles/firewall_geo/30-legacy.nft.j2",
 })
 
 FILE_MANIFEST: Dict[str, str] = {
@@ -130,6 +136,12 @@ FILE_MANIFEST: Dict[str, str] = {
 
 # -- Environment (default: production, in roles/common/defaults) --------------
 # deployment_environment: production
+#
+# Optional package-manager proxy environment for cache refresh/bootstrap use.
+# pkg_manager_proxy:
+#   http_proxy:  http://proxy.example.internal:3128
+#   https_proxy: http://proxy.example.internal:3128
+#   no_proxy:    localhost,127.0.0.1,.example.internal
 
 # -- Services (default: {}, in roles/common/defaults) ------------------------
 # services: {}
@@ -557,6 +569,11 @@ collections:
 # SSH port. Override in inventory host_vars for non-standard ports.
 ssh_port: 22
 
+# Set false to leave SSH daemon packaging and configuration unmanaged on this host.
+# Useful when SSH is controlled externally or when you do not want Ansible to
+# modify sshd_config / sshd_config.d.
+ssh_manage: true
+
 # Privileged admin accounts with sudo + SSH access.
 # Supports simple strings (backwards compatible) or dicts:
 #   admin_users:
@@ -606,6 +623,12 @@ grafana_enabled: false
 # Leave empty to keep the current hostname unchanged.
 set_hostname: ''
 
+# Gentoo profile to select via `eselect profile set`.
+# Leave empty to keep the current profile unchanged.
+# Use the profile name/path reported by `eselect profile show`, for example:
+#   gentoo_profile: default/linux/amd64/23.0
+gentoo_profile: ''
+
 # Domain name (search domain). This is managed through the active resolver
 # backend rather than by writing /etc/resolv.conf directly when a higher-level
 # manager is present.
@@ -617,6 +640,28 @@ set_domain_name: ''
 # auto prefers the active host manager in this order:
 #   NetworkManager -> systemd-resolved -> resolvconf -> dhclient -> static
 set_domain_backend: auto
+
+# Optional environment variables passed to package-cache refresh tasks.
+# Useful for HTTP(S) proxying on slow or bandwidth-constrained links.
+# Example:
+# pkg_manager_proxy:
+#   http_proxy: http://proxy.example.internal:3128
+#   https_proxy: http://proxy.example.internal:3128
+#   no_proxy: localhost,127.0.0.1,.example.internal
+pkg_manager_proxy: {}
+
+# Package metadata refresh policy before roles run.
+# Valid values:
+#   always - eager refresh on every run (current behavior)
+#   auto   - use package-manager-native lightweight refresh when available
+#            (APT cache_valid_time, DNF makecache --timer); skip eager refresh
+#            on managers without a safe lightweight equivalent
+#   never  - do not refresh metadata in site.yml pre_tasks
+pkg_manager_update_policy: always
+
+# Cache validity window in seconds for package managers that support TTL-based
+# refresh behavior in auto mode (currently APT).
+pkg_manager_update_valid_time: 3600
 
 # Services dict. Declare application services in inventory group_vars
 # or host_vars. Each entry drives nginx, DNS, TLS, and firewall config.
@@ -1233,6 +1278,26 @@ fi
   set_fact:
     _root_group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
 
+- name: Read current Gentoo profile
+  command: eselect profile show
+  register: _gentoo_current_profile
+  changed_when: false
+  when:
+    - ansible_facts.os_family == 'Gentoo'
+    - gentoo_profile | default('') | length > 0
+
+- name: Set Gentoo profile
+  command:
+    argv:
+      - eselect
+      - profile
+      - set
+      - "{{ gentoo_profile }}"
+  when:
+    - ansible_facts.os_family == 'Gentoo'
+    - gentoo_profile | default('') | length > 0
+    - (_gentoo_current_profile.stdout | default('') | trim) != gentoo_profile
+
 # -- Set hostname ----------------------------------------
 - name: Set system hostname
   hostname:
@@ -1602,7 +1667,10 @@ fi
     name: deny_ptrace
     state: false
     persistent: true
-  when: ansible_facts.os_family == 'RedHat'
+  when:
+    - ansible_facts.os_family == 'RedHat'
+    - ansible_facts.selinux is defined
+    - ansible_facts.selinux.status | default('disabled') != 'disabled'
 
 - name: Install cron daemon (Arch Linux)
   package:
@@ -1985,12 +2053,20 @@ def rndc(action, zone_name, allow_direct_edit=False):
         # explicitly opted in. Typical safe fallback cases:
         # - zone is static ("not dynamic")
         # - zone file exists but named has not loaded it yet ("no matching zone")
+        # - rndc control socket is not reachable yet during first boot
+        # - rndc is unavailable because the platform does not ship a default key
         if action == "freeze" and allow_direct_edit and (
-            "not dynamic" in stderr_lower or "no matching zone" in stderr_lower
+            "not dynamic" in stderr_lower
+            or "no matching zone" in stderr_lower
+            or "connect failed" in stderr_lower
+            or "neither /etc/rndc.conf nor /etc/rndc.key was found" in stderr_lower
         ):
             return True
         if action == "thaw" and allow_direct_edit and (
-            "not frozen" in stderr_lower or "no matching zone" in stderr_lower
+            "not frozen" in stderr_lower
+            or "no matching zone" in stderr_lower
+            or "connect failed" in stderr_lower
+            or "neither /etc/rndc.conf nor /etc/rndc.key was found" in stderr_lower
         ):
             return True
         print("ERROR: rndc {} {} failed: {}".format(
@@ -2183,17 +2259,42 @@ if __name__ == "__main__":
     - _dns_local_zones | length > 0
     - ansible_facts.os_family != 'Debian'
 
+- name: Generate rndc key for RedHat authoritative BIND
+  command:
+    argv:
+      - rndc-confgen
+      - -a
+      - -c
+      - /etc/rndc.key
+  args:
+    creates: /etc/rndc.key
+  when:
+    - _dns_local_zones | length > 0
+    - ansible_facts.os_family == 'RedHat'
+
+- name: Set RedHat rndc key permissions
+  file:
+    path: /etc/rndc.key
+    owner: root
+    group: named
+    mode: "0640"
+  when:
+    - _dns_local_zones | length > 0
+    - ansible_facts.os_family == 'RedHat'
+
+- name: Ensure local admin helper directory exists
+  file:
+    path: /usr/local/sbin
+    state: directory
+    mode: "0755"
+  when: _dns_local_zones | length > 0
+
 - name: Install dns-bump-serial helper
   copy:
     src: dns-bump-serial
     dest: /usr/local/sbin/dns-bump-serial
     mode: "0755"
   when: _dns_local_zones | length > 0
-
-- name: Remove old update_dns_serial.py helper
-  file:
-    path: /usr/local/sbin/update_dns_serial.py
-    state: absent
 
 - name: Install DNS record sync helper
   copy:
@@ -2495,17 +2596,6 @@ if __name__ == "__main__":
         ) | unique | sort
       }}
 
-- name: Bump zone serials
-  command: >
-    /usr/local/sbin/dns-bump-serial
-    --zone-dir {{ _bind_zone_dir }}
-    --allow-direct-edit
-    {{ _dns_zones_to_bump | join(' ') }}
-  register: _serial_update
-  changed_when: "'CHANGED' in _serial_update.stdout"
-  notify: Validate and Restart DNS
-  when: _dns_zones_to_bump | default([]) | length > 0
-
 # Push records to remote_primary zones via nsupdate.
 - name: Push records to remote_primary zones via nsupdate
   command: >
@@ -2598,15 +2688,24 @@ if __name__ == "__main__":
     label: "{{ item.name }}"
   changed_when: false
 
-- name: Enable and start BIND
+- name: Enable and start BIND (systemd)
   systemd:
     name: "{{ 'bind9' if ansible_facts.os_family == 'Debian' else 'named' }}"
     enabled: true
     state: started
-    daemon_reload: true
   when:
     - _dns_local_zones | length > 0
     - ansible_facts.os_family != 'FreeBSD'
+    - ansible_service_mgr | default('') == 'systemd'
+
+- name: Start BIND (non-systemd)
+  service:
+    name: "{{ 'bind9' if ansible_facts.os_family == 'Debian' else 'named' }}"
+    state: started
+  when:
+    - _dns_local_zones | length > 0
+    - ansible_facts.os_family != 'FreeBSD'
+    - ansible_service_mgr | default('') != 'systemd'
 
 - name: Enable BIND at boot (FreeBSD)
   command: sysrc named_enable=YES
@@ -2631,6 +2730,17 @@ if __name__ == "__main__":
     timeout: 30
   when: _dns_local_zones | length > 0
 
+- name: Bump zone serials
+  command: >
+    /usr/local/sbin/dns-bump-serial
+    --zone-dir {{ _bind_zone_dir }}
+    --allow-direct-edit
+    {{ _dns_zones_to_bump | join(' ') }}
+  register: _serial_update
+  changed_when: "'CHANGED' in _serial_update.stdout"
+  notify: Validate and Restart DNS
+  when: _dns_zones_to_bump | default([]) | length > 0
+
 # Flush handlers now so that dependent roles (certbot, etc.) see a
 # restarted BIND with all zone and config changes applied.
 - name: Flush DNS handlers
@@ -2646,6 +2756,7 @@ if __name__ == "__main__":
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - _dns_local_zones | length > 0
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/dns/templates/named.conf.options.j2': """\
@@ -2671,6 +2782,14 @@ options {
     'roles/dns/templates/named.conf.local.j2': """\
 {% if ansible_facts.os_family != 'Debian' %}
 // On non-Debian systems this file IS the complete named.conf.
+{% if ansible_facts.os_family == 'RedHat' %}
+include "/etc/rndc.key";
+
+controls {
+    inet 127.0.0.1 allow { 127.0.0.1; } keys { "rndc-key"; };
+};
+
+{% endif %}
 options {
     directory "{{ '/usr/local/etc/namedb' if ansible_facts.os_family == 'FreeBSD' else '/var/named' }}";
     recursion {{ 'yes' if dns.recursion | default(dns_defaults.recursion | default(false)) | bool else 'no' }};
@@ -3055,57 +3174,7 @@ firewall_extra_forward: []
   changed_when: false
   when: ansible_facts.os_family == 'FreeBSD'
 """,
-    'roles/firewall/templates/nftables.conf.j2': """\
-# Skeleton nftables config -- managed by the firewall role.
-# Per-service rules live as drop-ins under /etc/nftables.d/.
-flush ruleset
-
-# Top-level defines (geoip sets, etc.) must live outside any table.
-include "/etc/nftables.d/defines/*.nft"
-
-table inet filter {
-
-  chain input {
-    type filter hook input priority 0;
-    policy drop;
-
-    ct state established,related accept
-    ct state invalid drop
-    iif lo accept
-
-    ip  protocol icmp      accept
-    ip6 nexthdr  ipv6-icmp accept
-
-    include "/etc/nftables.d/input/*.nft"
-  }
-
-  chain forward {
-    type filter hook forward priority 0;
-    policy drop;
-
-    ct state established,related accept
-    ct state invalid drop
-
-    include "/etc/nftables.d/forward/*.nft"
-  }
-
-  chain output {
-    type filter hook output priority 0;
-    policy accept;
-  }
-}
-
-table ip nat {
-  chain prerouting {
-    type nat hook prerouting priority dstnat;
-    include "/etc/nftables.d/nat-prerouting/*.nft"
-  }
-  chain postrouting {
-    type nat hook postrouting priority srcnat;
-    include "/etc/nftables.d/nat-postrouting/*.nft"
-  }
-}
-""",
+    'roles/firewall/templates/nftables.conf.j2': (SRC / "templates/roles/firewall/nftables.conf.j2").read_text(encoding="utf-8"),
     'roles/firewall/templates/10-firewall-accept.nft.j2': """\
 # firewall_accept entries -- pasted inside inet filter/input chain.
 {% for _r in firewall_accept | default([]) %}
@@ -3196,346 +3265,10 @@ ip saddr {{ _m.saddr }} oifname "{{ _m.oif }}" masquerade{% if _m.comment is def
     mode: "0644"
   notify: Reload nftables
 """,
-    'roles/firewall/templates/pf.conf.j2': """\
-# pf firewall rules - managed by Ansible.
-# FreeBSD pf: default-drop input, stateful, explicit accepts.
+    'roles/firewall/templates/pf.conf.j2': (SRC / "templates/roles/firewall/pf.conf.j2").read_text(encoding="utf-8"),
 
-# Macros
-ssh_port = "{{ ssh_port | default(22) }}"
-
-# Global allowlist table: IPs/CIDRs that bypass all filtering.
-table <allowlist> persist { 127.0.0.1, ::1
-{% for _addr in geoip.allowlist | default([]) %}
-, {{ _addr }}
-{% endfor %}
-}
-
-{% if geoip.enabled | default(false) | bool %}
-{% if geoip.ssh_allowed_countries | default([]) | length > 0 %}
-# GeoIP SSH allowlist tables (populated by geoip_ingest.py)
-table <geoip_ssh_ipv4> persist file "/etc/pf.d/geoip/geoip_ssh_ipv4.txt"
-table <geoip_ssh_ipv6> persist file "/etc/pf.d/geoip/geoip_ssh_ipv6.txt"
-{% endif %}
-{% if geoip.allowed_countries | default([]) | length > 0 %}
-# GeoIP HTTP/HTTPS tables
-table <geoip_http_ipv4>  persist file "/etc/pf.d/geoip/geoip_http_ipv4.txt"
-table <geoip_http_ipv6>  persist file "/etc/pf.d/geoip/geoip_http_ipv6.txt"
-table <geoip_https_ipv4> persist file "/etc/pf.d/geoip/geoip_https_ipv4.txt"
-table <geoip_https_ipv6> persist file "/etc/pf.d/geoip/geoip_https_ipv6.txt"
-{% endif %}
-{% endif %}
-
-# Scrape addresses for node_exporter
-{% if node_exporter_enabled | default(true) | bool
-      and node_exporter_scrape_addresses | default([]) | length > 0 %}
-table <ne_scrape> persist { \
-{% for _addr in node_exporter_scrape_addresses %}
-{{ _addr }}{% if not loop.last %}, {% endif %}
-{% endfor %}
-}
-{% endif %}
-
-# Normalise incoming traffic
-scrub in all
-
-# Default policies
-block in  log all
-pass  out all keep state
-
-# Loopback
-pass in  on lo0 all
-pass out on lo0 all
-
-# Global allowlist bypasses all rules
-pass in from <allowlist> to any keep state
-
-# ICMP
-pass in inet  proto icmp  all
-pass in inet6 proto icmp6 all
-
-# Established / related (stateful)
-pass in all keep state
-
-# SSH
-{% if geoip.enabled | default(false) | bool
-      and geoip.ssh_allowed_countries | default([]) | length > 0 %}
-# SSH: allow only from GeoIP-permitted countries
-block in  proto tcp from !<geoip_ssh_ipv4> to any port $ssh_port
-block in inet6 proto tcp from !<geoip_ssh_ipv6> to any port $ssh_port
-{% endif %}
-pass in proto tcp to any port $ssh_port keep state
-
-# Mail ports (when mailserver is active)
-{% if mailserver.enabled | default(false) | bool
-      or 'mailserver' in (_required_providers | default([])) %}
-pass in proto tcp to any port { 25, 587, 465, 993 } keep state
-{% endif %}
-
-# DNS (when BIND is active)
-{% set _dns_active = namespace(v=false) %}
-{% if dns_hidden_primary_zones | default([]) | length > 0
-      or certbot_dns_local | default(false) | bool %}
-{%   set _dns_active.v = true %}
-{% endif %}
-{% for _svc in services | default({}) | dict2items %}
-{%   if _svc.value.enabled | default(false) | bool
-         and _svc.value.domain | default('') %}
-{%     set _dns_active.v = true %}
-{%   endif %}
-{% endfor %}
-{% if _dns_active.v %}
-{% if dns_public | default(false) | bool %}
-pass in proto { tcp, udp } to any port 53 keep state
-{% else %}
-pass in proto { tcp, udp } from 127.0.0.1 to any port 53 keep state
-pass in proto { tcp, udp } from ::1        to any port 53 keep state
-{% for _sec in ((dns_secondaries | default([])) + (dns_defaults.secondaries | default([]))) | unique %}
-pass in proto { tcp, udp } from {{ _sec }} to any port 53 keep state
-{% endfor %}
-{% for _adm in dns_admin_ips | default([]) %}
-pass in proto { tcp, udp } from {{ _adm }} to any port 53 keep state
-{% endfor %}
-{% endif %}
-{% endif %}
-
-# OpenVPN port
-{% for _vpn in openvpn_instances | default([]) %}
-{% if _vpn.mode | default('server') == 'server' %}
-pass in proto {{ _vpn.proto | default('udp') }} to any port {{ _vpn.port | default(1194) }} keep state
-{% endif %}
-{% endfor %}
-{% for _wg in wireguard_instances | default([]) %}
-pass in proto udp to any port {{ _wg.listen_port | default(51820) }} keep state
-{% endfor %}
-{% for _wl in workloads | default([]) %}
-{% if _wl.state | default('present') == 'present' %}
-{% for _p in _wl.ports | default([]) %}
-{% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
-{% set _proto = 'udp' if '/udp' in _p else 'tcp' %}
-pass in proto {{ _proto }} to any port {{ _host_port }} keep state
-{% endfor %}
-{% endif %}
-{% endfor %}
-
-# Step CA ACME port 9000
-{% if step_ca.enabled | default(false) | bool %}
-pass in proto tcp to any port 9000 keep state
-{% endif %}
-
-# Step CA ACME port 9000
-{% if step_ca.enabled | default(false) | bool %}
-pass in proto tcp to any port 9000 keep state
-{% endif %}
-
-# Samba ports 139/445
-{% if samba.enabled | default(false) | bool %}
-{% set _smb_hosts = samba.hosts_allow | default([]) %}
-{% if _smb_hosts | length > 0 %}
-{% for _host in _smb_hosts %}
-pass in proto tcp from {{ _host }} to any port { 139, 445 } keep state
-{% endfor %}
-{% else %}
-pass in proto tcp to any port { 139, 445 } keep state
-{% endif %}
-{% endif %}
-
-# NFS server ports (2049 + rpcbind 111 for NFSv3)
-{% if nfs.server.enabled | default(false) | bool %}
-{% set _nfs_clients = [] %}
-{% for _exp in nfs.server.exports | default([]) %}
-{%   for _cli in _exp.clients | default([]) %}
-{%     if _cli.host not in _nfs_clients %}{% set _ = _nfs_clients.append(_cli.host) %}{% endif %}
-{%   endfor %}
-{% endfor %}
-{% for _host in _nfs_clients %}
-pass in proto { tcp, udp } from {{ _host }} to any port 2049 keep state
-{% if 3 in (nfs.server.versions | default([4])) %}
-pass in proto { tcp, udp } from {{ _host }} to any port 111 keep state
-{% endif %}
-{% endfor %}
-{% endif %}
-
-# node_exporter scrape port
-{% if node_exporter_enabled | default(true) | bool %}
-pass in proto tcp from 127.0.0.1 to any port {{ node_exporter_port | default(9100) }} keep state
-pass in proto tcp from ::1        to any port {{ node_exporter_port | default(9100) }} keep state
-{% if node_exporter_scrape_addresses | default([]) | length > 0 %}
-pass in proto tcp from <ne_scrape> to any port {{ node_exporter_port | default(9100) }} keep state
-{% endif %}
-{% endif %}
-
-# HTTP (port 80) - when any service exposes http
-{% set _http_open = namespace(v=false) %}
-{% for _svc in services | default({}) | dict2items %}
-{%   if _svc.value.enabled | default(false) | bool
-         and _svc.value.security.expose_http | default(false) | bool %}
-{%     set _http_open.v = true %}
-{%   endif %}
-{% endfor %}
-{% if _http_open.v %}
-{% for _svc in services | default({}) | dict2items %}
-{%   if _svc.value.enabled | default(false) | bool
-         and _svc.value.security.expose_http | default(false) | bool %}
-{%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
-pass in proto tcp from {{ _addr }} to any port 80 keep state
-{%     endfor %}
-{%   endif %}
-{% endfor %}
-{% if geoip.enabled | default(false) | bool
-      and geoip.allowed_countries | default([]) | length > 0 %}
-block in  proto tcp from !<geoip_http_ipv4> to any port 80
-block in inet6 proto tcp from !<geoip_http_ipv6> to any port 80
-{% endif %}
-pass in proto tcp to any port 80  keep state
-{% endif %}
-
-# HTTPS (port 443) - when any service exposes https
-{% set _https_open = namespace(v=false) %}
-{% for _svc in services | default({}) | dict2items %}
-{%   if _svc.value.enabled | default(false) | bool
-         and _svc.value.security.expose_https | default(false) | bool %}
-{%     set _https_open.v = true %}
-{%   endif %}
-{% endfor %}
-{% if _https_open.v %}
-{% for _svc in services | default({}) | dict2items %}
-{%   if _svc.value.enabled | default(false) | bool
-         and _svc.value.security.expose_https | default(false) | bool %}
-{%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
-pass in proto tcp from {{ _addr }} to any port 443 keep state
-{%     endfor %}
-{%   endif %}
-{% endfor %}
-{% if geoip.enabled | default(false) | bool
-      and geoip.allowed_countries | default([]) | length > 0 %}
-block in  proto tcp from !<geoip_https_ipv4> to any port 443
-block in inet6 proto tcp from !<geoip_https_ipv6> to any port 443
-{% endif %}
-pass in proto tcp to any port 443 keep state
-{% endif %}
-""",
-
-    'roles/firewall_geo/templates/30-geoip-defines.nft.j2': """\
-# Top-level geoip set includes (parse-time, outside any table).
-{% if geoip.enabled | default(false) | bool %}
-{% if geoip.ssh_allowed_countries | default([]) | length > 0 %}
-include "{{ _geoip_sets_dir }}/geoip_ssh_ipv4.nft"
-include "{{ _geoip_sets_dir }}/geoip_ssh_ipv6.nft"
-{% endif %}
-{% if geoip.allowed_countries | default([]) | length > 0 %}
-include "{{ _geoip_sets_dir }}/geoip_allowed_ipv4.nft"
-include "{{ _geoip_sets_dir }}/geoip_allowed_ipv6.nft"
-include "{{ _geoip_sets_dir }}/geoip_http_ipv4.nft"
-include "{{ _geoip_sets_dir }}/geoip_http_ipv6.nft"
-include "{{ _geoip_sets_dir }}/geoip_https_ipv4.nft"
-include "{{ _geoip_sets_dir }}/geoip_https_ipv6.nft"
-{% endif %}
-{% endif %}
-""",
-    'roles/firewall_geo/templates/30-legacy.nft.j2': """\
-# TRANSITIONAL drop-in -- pasted inside inet filter/input chain by the skeleton.
-# Contains all service + geoip rules from the legacy monolithic template.
-# A follow-up refactor will split each service block out into its own drop-in
-# owned by the corresponding service role.
-
-    # Global allowlist: IPs/CIDRs that bypass all geoip filtering on every port.
-    # Colon presence distinguishes IPv6 from IPv4 without netaddr dependency.
-    {% for _addr in geoip.allowlist | default([]) %}
-    {% if ":" in _addr %}
-    ip6 saddr {{ _addr }} accept
-    {% else %}
-    ip  saddr {{ _addr }} accept
-    {% endif %}
-    {% endfor %}
-
-    # SSH with dedicated geoip filter (geoip_ssh_allowed_countries, falls back to global)
-    {% if geoip.enabled | default(false) | bool and (geoip.ssh_allowed_countries | length > 0) %}
-    ip  saddr != $geoip_ssh_ipv4 tcp dport {{ ssh_port }} drop
-    ip6 saddr != $geoip_ssh_ipv6 tcp dport {{ ssh_port }} drop
-    {% endif %}
-    tcp dport {{ ssh_port }} accept
-
-    # Service port rules with per-port geoip filter.
-    # Per-service security.geoip_allowed_countries overrides the global list
-    # for that port; the union across services is computed by the geoip role.
-    {% set http_open  = namespace(v=false) %}
-    {% set https_open = namespace(v=false) %}
-    {% for svc in services | dict2items | sort(attribute='key') %}
-    {%   if svc.value.enabled | default(false) | bool %}
-    {%     if svc.value.security.expose_http  | default(false) | bool  %}{% set http_open.v  = true %}{% endif %}
-    {%     if svc.value.security.expose_https | default(false) | bool  %}{% set https_open.v = true %}{% endif %}
-    {%   endif %}
-    {% endfor %}
-    {% if http_open.v %}
-    # Per-service geoip_enabled switch: if any http service disables geoip,
-    # skip geoip filtering for port 80 entirely.
-    {% set _http_geoip = namespace(enabled=true) %}
-    {% for _svc in services | dict2items | sort(attribute="key") %}
-    {%   if _svc.value.enabled | default(false) | bool
-           and _svc.value.security.expose_http | default(false) | bool
-           and _svc.value.security.geoip_enabled | default(true) | bool == false %}
-    {%     set _http_geoip.enabled = false %}
-    {%   endif %}
-    {% endfor %}
-    # Per-service allowlist for port 80 (bypasses geoip for that service).
-    {% set _http_al = namespace(addrs=[]) %}
-    {% for _svc in services | dict2items | sort(attribute="key") %}
-    {%   if _svc.value.enabled | default(false) | bool
-           and _svc.value.security.expose_http | default(false) | bool %}
-    {%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
-    {%       if _addr not in _http_al.addrs %}{% set _http_al.addrs = _http_al.addrs + [_addr] %}{% endif %}
-    {%     endfor %}
-    {%   endif %}
-    {% endfor %}
-    {% for _addr in _http_al.addrs %}
-    {% if ":" in _addr %}
-    ip6 saddr {{ _addr }} tcp dport 80 accept
-    {% else %}
-    ip  saddr {{ _addr }} tcp dport 80 accept
-    {% endif %}
-    {% endfor %}
-    {% if geoip.enabled | default(false) | bool and (geoip.allowed_countries | length > 0) and _http_geoip.enabled %}
-    ip  saddr != $geoip_http_ipv4 tcp dport 80 drop
-    ip6 saddr != $geoip_http_ipv6 tcp dport 80 drop
-    {% endif %}
-    tcp dport 80  accept
-    {% endif %}
-
-    {% if https_open.v %}
-    # Per-service geoip_enabled switch: if any https service disables geoip,
-    # skip geoip filtering for port 443 entirely.
-    {% set _https_geoip = namespace(enabled=true) %}
-    {% for _svc in services | dict2items | sort(attribute="key") %}
-    {%   if _svc.value.enabled | default(false) | bool
-           and _svc.value.security.expose_https | default(false) | bool
-           and _svc.value.security.geoip_enabled | default(true) | bool == false %}
-    {%     set _https_geoip.enabled = false %}
-    {%   endif %}
-    {% endfor %}
-    # Per-service allowlist for port 443 (bypasses geoip for that service).
-    {% set _https_al = namespace(addrs=[]) %}
-    {% for _svc in services | dict2items | sort(attribute="key") %}
-    {%   if _svc.value.enabled | default(false) | bool
-           and _svc.value.security.expose_https | default(false) | bool %}
-    {%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
-    {%       if _addr not in _https_al.addrs %}{% set _https_al.addrs = _https_al.addrs + [_addr] %}{% endif %}
-    {%     endfor %}
-    {%   endif %}
-    {% endfor %}
-    {% for _addr in _https_al.addrs %}
-    {% if ":" in _addr %}
-    ip6 saddr {{ _addr }} tcp dport 443 accept
-    {% else %}
-    ip  saddr {{ _addr }} tcp dport 443 accept
-    {% endif %}
-    {% endfor %}
-    {% if geoip.enabled | default(false) | bool and (geoip.allowed_countries | length > 0) and _https_geoip.enabled %}
-    ip  saddr != $geoip_https_ipv4 tcp dport 443 drop
-    ip6 saddr != $geoip_https_ipv6 tcp dport 443 drop
-    {% endif %}
-    tcp dport 443 accept
-    {% endif %}
-""",
+    'roles/firewall_geo/templates/30-geoip-defines.nft.j2': (SRC / "templates/roles/firewall_geo/30-geoip-defines.nft.j2").read_text(encoding="utf-8"),
+    'roles/firewall_geo/templates/30-legacy.nft.j2': (SRC / "templates/roles/firewall_geo/30-legacy.nft.j2").read_text(encoding="utf-8"),
     'roles/geoip/files/geoip_ingest.py': '''\
 #!/usr/bin/env python3
 # Downloads MaxMind GeoLite2-Country-CSV and generates nftables set files.
@@ -8186,6 +7919,15 @@ write_config("Ansible: update firewall aliases");
 """,
     'roles/ssh_hardening/tasks/main.yml': """\
 ---
+- name: Install OpenSSH server and sudo (SUSE)
+  command:
+    argv: >-
+      {{
+        ['zypper', '--non-interactive', 'install', '--no-recommends', 'openssh']
+        + (['sudo'] if sudo_enabled | default(true) | bool else [])
+      }}
+  when: ansible_facts.os_family == 'Suse'
+
 - name: Install OpenSSH server and sudo
   package:
     name: >-
@@ -8193,10 +7935,11 @@ write_config("Ansible: update firewall aliases");
         (['sudo'] if sudo_enabled | default(true) | bool else [])
         if ansible_facts.os_family == 'FreeBSD' else
         ['openssh'] + (['sudo'] if sudo_enabled | default(true) | bool else [])
-        if ansible_facts.os_family == 'Archlinux' else
+        if ansible_facts.os_family in ['Archlinux', 'Suse'] else
         ['openssh-server'] + (['sudo'] if sudo_enabled | default(true) | bool else [])
       }}
     state: present
+  when: ansible_facts.os_family != 'Suse'
 
 - name: Assert admin_users entries are strings or named mappings
   assert:
@@ -8258,18 +8001,72 @@ write_config("Ansible: update firewall aliases");
     content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
     dest: "{{ '/usr/local/etc/sudoers.d/' if ansible_facts.os_family == 'FreeBSD' else '/etc/sudoers.d/' }}{{ item.name }}"
     mode: "0440"
-    validate: "visudo -cf %s"
   loop: "{{ _admin_users }}"
   loop_control:
     label: "{{ item.name }}"
+  register: _admin_sudoers_dropins
   when: sudo_enabled | default(true) | bool
 
-- name: Deploy sshd_config
+- name: Validate sudoers configuration after drop-in changes
+  command:
+    argv:
+      - visudo
+      - -cf
+      - "{{ '/usr/local/etc/sudoers' if ansible_facts.os_family == 'FreeBSD' else '/etc/sudoers' }}"
+  changed_when: false
+  when:
+    - sudo_enabled | default(true) | bool
+    - _admin_sudoers_dropins is changed
+
+- name: Ensure SSH host keys exist before config validation
+  command: ssh-keygen -A
+  changed_when: false
+
+- name: Detect distros that ship sshd_config.d as the primary extension point
+  set_fact:
+    _sshd_config_dropin_supported: "{{ ansible_facts.os_family in ['Debian', 'RedHat', 'Archlinux'] }}"
+
+- name: Ensure sshd privilege separation directory exists
+  file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+  when: ansible_facts.os_family != 'FreeBSD'
+
+- name: Ensure sshd_config.d exists on drop-in managed distros
+  file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+  when: _sshd_config_dropin_supported | bool
+
+- name: Deploy sshd_config drop-in
+  template:
+    src: 99-ansible-enterprise.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-ansible-enterprise.conf
+    mode: "0600"
+  register: _sshd_dropin
+  when: _sshd_config_dropin_supported | bool
+  notify: Restart SSH
+
+- name: Validate merged sshd configuration after drop-in deployment
+  command: sshd -t
+  changed_when: false
+  when:
+    - _sshd_config_dropin_supported | bool
+    - _sshd_dropin is changed
+
+- name: Deploy monolithic sshd_config
   template:
     src: sshd_config.j2
     dest: /etc/ssh/sshd_config
     mode: "0600"
     validate: "sshd -t -f %s"
+  when: not (_sshd_config_dropin_supported | bool)
   notify: Restart SSH
 
 - meta: flush_handlers
@@ -8291,6 +8088,30 @@ write_config("Ansible: update firewall aliases");
     update_password: always
   when: admin_dev_password_hash | default('') | length > 0
 
+- name: Resolve admin users primary groups
+  command:
+    argv:
+      - id
+      - -gn
+      - "{{ item.name }}"
+  loop: "{{ _admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _admin_primary_group_results
+  changed_when: false
+
+- name: Build admin user primary group map
+  set_fact:
+    _admin_primary_groups: >-
+      {{
+        _admin_primary_groups | default({}) | combine({
+          item.item.name: (item.stdout | default('') | trim)
+        })
+      }}
+  loop: "{{ _admin_primary_group_results.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
 # Ensure .ssh directory exists with correct ownership before deploying keys.
 # This is done separately so authorized_key with manage_dir: false is
 # idempotent and works in check mode (path: is explicit).
@@ -8299,7 +8120,7 @@ write_config("Ansible: update firewall aliases");
     path: "{{ '/root/.ssh' if item.name == 'root' else '/home/' + item.name + '/.ssh' }}"
     state: directory
     owner: "{{ item.name }}"
-    group: "{{ item.name }}"
+    group: "{{ _admin_primary_groups[item.name] | default(omit) }}"
     mode: "0700"
   loop: "{{ _admin_users }}"
   loop_control:
@@ -8333,6 +8154,16 @@ write_config("Ansible: update firewall aliases");
   loop_control:
     label: "{{ item.0.name }}"
 """,
+    'roles/ssh_hardening/templates/99-ansible-enterprise.conf.j2': """\
+# managed by ansible - ssh_hardening role
+Port {{ ssh_port }}
+# Password auth enabled in dev/staging when admin_dev_password_hash is set.
+# Production always uses key-only auth.
+PasswordAuthentication {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'no' }}
+PubkeyAuthentication yes
+PermitRootLogin {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' }}
+AllowUsers root {{ _admin_user_names | default(admin_users) | join(" ") }}
+""",
     'roles/ssh_hardening/templates/sshd_config.j2': """\
 Port {{ ssh_port }}
 # Password auth enabled in dev/staging when admin_dev_password_hash is set.
@@ -8340,7 +8171,9 @@ Port {{ ssh_port }}
 PasswordAuthentication {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'no' }}
 PubkeyAuthentication yes
 PermitRootLogin {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' }}
+{% if ansible_facts.os_family != 'Alpine' %}
 UsePAM yes
+{% endif %}
 AllowUsers root {{ _admin_user_names | default(admin_users) | join(" ") }}
 Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family == 'RedHat' else '/usr/libexec/sftp-server' if ansible_facts.os_family == 'FreeBSD' else '/usr/lib/openssh/sftp-server' if ansible_facts.os_family == 'Debian' else '/usr/lib/ssh/sftp-server' }}
 """,
@@ -8530,6 +8363,8 @@ user_accounts: []
     _pve_api_user: "{{ _proxmox.api_user | default('root@pam') }}"
     _pve_api_token_id: "{{ vault_proxmox_api_token_id }}"
     _pve_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+    _pve_validate_certs: "{{ _proxmox.validate_certs | default(false) }}"
+    _pve_timeout: "{{ _proxmox.timeout | default(300) }}"
     _proxmox_default_cores: "{{ 2 if _infra_type == 'vm' else 2 }}"
     _proxmox_default_memory: "{{ 4096 if _infra_type == 'vm' else 2048 }}"
 
@@ -8691,6 +8526,7 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         node: "{{ _pve_node }}"
         vmid: "{{ _infra_id }}"
         name: "{{ inventory_hostname }}"
@@ -8698,7 +8534,7 @@ user_accounts: []
         newid: "{{ _infra_id }}"
         full: true
         state: present
-        timeout: 300
+        timeout: "{{ _pve_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -8711,6 +8547,7 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         node: "{{ _pve_node }}"
         vmid: "{{ _infra_id }}"
         name: "{{ inventory_hostname }}"
@@ -8722,6 +8559,7 @@ user_accounts: []
           net0: "virtio,bridge={{ _proxmox.net.bridge | default('vmbr0') }}"
         update: true
         state: present
+        timeout: "{{ _pve_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -8734,6 +8572,7 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         node: "{{ _pve_node }}"
         vmid: "{{ _infra_id }}"
         ciuser: root
@@ -8745,6 +8584,7 @@ user_accounts: []
         searchdomains: "{{ _proxmox.searchdomain | default(omit) }}"
         update: true
         state: present
+        timeout: "{{ _pve_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -8757,6 +8597,7 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         vmid: "{{ _infra_id }}"
         disk: "{{ item.disk | default('scsi' + (idx | string)) }}"
         size: "{{ item.size }}"
@@ -8777,9 +8618,11 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         node: "{{ _pve_node }}"
         vmid: "{{ _infra_id }}"
         state: started
+        timeout: "{{ _pve_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -8792,6 +8635,7 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         node: "{{ _pve_node }}"
         vmid: "{{ _infra_id }}"
         hostname: "{{ inventory_hostname }}"
@@ -8811,6 +8655,7 @@ user_accounts: []
         unprivileged: "{{ _proxmox.unprivileged | default(true) }}"
         features: "{{ _proxmox.features | default(omit) }}"
         state: present
+        timeout: "{{ _pve_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -8823,9 +8668,11 @@ user_accounts: []
         api_user: "{{ _pve_api_user }}"
         api_token_id: "{{ _pve_api_token_id }}"
         api_token_secret: "{{ _pve_api_token_secret }}"
+        validate_certs: "{{ _pve_validate_certs }}"
         node: "{{ _pve_node }}"
         vmid: "{{ _infra_id }}"
         state: started
+        timeout: "{{ _pve_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -8891,10 +8738,10 @@ user_accounts: []
       changed_when: false
       when: _python_check.rc != 0
 
-    - name: Run bootstrap prep commands
+    - name: Run bootstrap pre-Python commands
       raw: "/bin/sh -c '{{ item }}'"
-      loop: "{{ bootstrap_commands }}"
-      when: bootstrap_commands is defined and bootstrap_commands | length > 0
+      loop: "{{ bootstrap_raw_pre | default(bootstrap_commands | default([])) }}"
+      when: (bootstrap_raw_pre | default(bootstrap_commands | default([]))) | length > 0
 
     - name: Install Python
       raw: "/bin/sh -c 'if command -v apk >/dev/null 2>&1; then apk add --no-cache python3; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q python3; elif command -v yum >/dev/null 2>&1; then yum install -y -q python3; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq python3; elif command -v zypper >/dev/null 2>&1; then zypper install -y python3; elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm python; elif command -v emerge >/dev/null 2>&1; then emerge --quiet dev-lang/python; elif command -v pkg >/dev/null 2>&1; then pkg install -y python3; elif command -v xbps-install >/dev/null 2>&1; then xbps-install -Sy python3; else echo ERROR_NO_PACKAGE_MANAGER >&2; exit 1; fi'"
@@ -8902,6 +8749,11 @@ user_accounts: []
 
     - name: Verify Python and gather facts
       setup:
+
+    - name: Run bootstrap post-Python commands
+      raw: "/bin/sh -c '{{ item }}'"
+      loop: "{{ bootstrap_raw_post | default([]) }}"
+      when: (bootstrap_raw_post | default([])) | length > 0
 """,
     'site.yml': """\
 ---
@@ -8914,25 +8766,167 @@ user_accounts: []
       include_role:
         name: preflight
 
+    - name: Assert package-manager update policy is valid
+      assert:
+        that:
+          - pkg_manager_update_policy | default('always') in ['always', 'auto', 'never']
+          - pkg_manager_update_valid_time | default(3600) | int > 0
+        fail_msg: "pkg_manager_update_policy must be one of: always, auto, never; pkg_manager_update_valid_time must be > 0"
+
+    - name: Configure apt proxy
+      copy:
+        dest: /etc/apt/apt.conf.d/90ansible-enterprise-proxy
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          // managed by ansible-enterprise
+          {% if pkg_manager_proxy.http_proxy | default('') | length > 0 %}
+          Acquire::http::Proxy "{{ pkg_manager_proxy.http_proxy }}";
+          {% endif %}
+          {% if pkg_manager_proxy.https_proxy | default('') | length > 0 %}
+          Acquire::https::Proxy "{{ pkg_manager_proxy.https_proxy }}";
+          {% endif %}
+      when: >-
+        ansible_facts.os_family == 'Debian'
+        and (
+          pkg_manager_proxy.http_proxy | default('') | length > 0
+          or pkg_manager_proxy.https_proxy | default('') | length > 0
+        )
+
+    - name: Remove apt proxy config when unset
+      file:
+        path: /etc/apt/apt.conf.d/90ansible-enterprise-proxy
+        state: absent
+      when: >-
+        ansible_facts.os_family == 'Debian'
+        and pkg_manager_proxy.http_proxy | default('') | length == 0
+        and pkg_manager_proxy.https_proxy | default('') | length == 0
+
+    - name: Configure dnf proxy
+      ini_file:
+        path: /etc/dnf/dnf.conf
+        section: main
+        option: proxy
+        value: "{{ pkg_manager_proxy.http_proxy | default(pkg_manager_proxy.https_proxy | default('')) }}"
+        mode: "0644"
+      when: >-
+        ansible_facts.os_family == 'RedHat'
+        and (
+          pkg_manager_proxy.http_proxy | default('') | length > 0
+          or pkg_manager_proxy.https_proxy | default('') | length > 0
+        )
+
+    - name: Remove dnf proxy config when unset
+      ini_file:
+        path: /etc/dnf/dnf.conf
+        section: main
+        option: proxy
+        state: absent
+        mode: "0644"
+      when: >-
+        ansible_facts.os_family == 'RedHat'
+        and pkg_manager_proxy.http_proxy | default('') | length == 0
+        and pkg_manager_proxy.https_proxy | default('') | length == 0
+
+    - name: Configure openSUSE proxy
+      copy:
+        dest: /etc/sysconfig/proxy
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          ## managed by ansible-enterprise
+          PROXY_ENABLED="yes"
+          HTTP_PROXY="{{ pkg_manager_proxy.http_proxy | default('') }}"
+          HTTPS_PROXY="{{ pkg_manager_proxy.https_proxy | default('') }}"
+          FTP_PROXY=""
+          GOPHER_PROXY=""
+          SOCKS_PROXY=""
+          SOCKS5_SERVER=""
+          NO_PROXY="{{ pkg_manager_proxy.no_proxy | default('localhost,127.0.0.1') }}"
+      when: >-
+        ansible_facts.os_family == 'Suse'
+        and (
+          pkg_manager_proxy.http_proxy | default('') | length > 0
+          or pkg_manager_proxy.https_proxy | default('') | length > 0
+        )
+
+    - name: Remove openSUSE proxy config when unset
+      file:
+        path: /etc/sysconfig/proxy
+        state: absent
+      when: >-
+        ansible_facts.os_family == 'Suse'
+        and pkg_manager_proxy.http_proxy | default('') | length == 0
+        and pkg_manager_proxy.https_proxy | default('') | length == 0
+
     - name: Refresh apt package cache
       apt:
         update_cache: true
-        cache_valid_time: 3600
-      when: ansible_facts.os_family == 'Debian'
+      when:
+        - ansible_facts.os_family == 'Debian'
+        - pkg_manager_update_policy | default('always') == 'always'
+
+    - name: Refresh apt package cache (auto)
+      apt:
+        update_cache: true
+        cache_valid_time: "{{ pkg_manager_update_valid_time | default(3600) | int }}"
+      when:
+        - ansible_facts.os_family == 'Debian'
+        - pkg_manager_update_policy | default('always') == 'auto'
 
     - name: Refresh dnf package cache
       dnf:
         update_cache: true
-      when: ansible_facts.os_family == 'RedHat'
+      when:
+        - ansible_facts.os_family == 'RedHat'
+        - pkg_manager_update_policy | default('always') == 'always'
+
+    - name: Refresh dnf package cache (auto)
+      command: dnf -q makecache --timer
+      when:
+        - ansible_facts.os_family == 'RedHat'
+        - pkg_manager_update_policy | default('always') == 'auto'
+      changed_when: false
 
     - name: Refresh pacman package cache
       pacman:
         update_cache: true
-      when: ansible_facts.os_family == 'Archlinux'
+      environment: "{{ pkg_manager_proxy if (pkg_manager_proxy | default({}) | length > 0) else omit }}"
+      when:
+        - ansible_facts.os_family == 'Archlinux'
+        - pkg_manager_update_policy | default('always') == 'always'
+
+    - name: Refresh Gentoo package metadata
+      command: emaint sync -a
+      environment: "{{ pkg_manager_proxy if (pkg_manager_proxy | default({}) | length > 0) else omit }}"
+      when:
+        - ansible_facts.os_family == 'Gentoo'
+        - pkg_manager_update_policy | default('always') == 'always'
+      changed_when: false
+
+    - name: Refresh apk package cache
+      command: apk update
+      environment: "{{ pkg_manager_proxy if (pkg_manager_proxy | default({}) | length > 0) else omit }}"
+      when:
+        - ansible_facts.os_family == 'Alpine'
+        - pkg_manager_update_policy | default('always') == 'always'
+      changed_when: false
+
+    - name: Refresh zypper package cache
+      command: zypper --non-interactive refresh
+      when:
+        - ansible_facts.os_family == 'Suse'
+        - pkg_manager_update_policy | default('always') == 'always'
+      changed_when: false
 
     - name: Refresh pkg package cache (FreeBSD)
       command: pkg update
-      when: ansible_facts.os_family == 'FreeBSD'
+      environment: "{{ pkg_manager_proxy if (pkg_manager_proxy | default({}) | length > 0) else omit }}"
+      when:
+        - ansible_facts.os_family == 'FreeBSD'
+        - pkg_manager_update_policy | default('always') == 'always'
       changed_when: false
 
     # Resolve which provider roles are required by enabled services.
@@ -8966,6 +8960,7 @@ user_accounts: []
       tags: [common, always]
     - role: ssh_hardening
       tags: [ssh_hardening, ssh]
+      when: ssh_manage | default(true) | bool
     - role: users
       tags: [users]
     - role: geoip
@@ -9093,7 +9088,7 @@ user_accounts: []
   connection: local
   become: false
   vars:
-    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    ansible_python_interpreter: "{{ lookup('pipe', 'command -v python3 || command -v python') }}"
 
   roles:
     - role: bootstrap_scripts
@@ -9725,25 +9720,30 @@ bootstrap_repo_uri: ""
     path: "{{ bootstrap_output_dir }}"
     state: directory
     mode: "0700"
+  delegate_to: localhost
   run_once: true
 
 - name: Check if bootstrap encryption key exists
   stat:
     path: "{{ bootstrap_output_dir }}/.bootstrap_key"
+  delegate_to: localhost
   register: _bootstrap_key_stat
 
 - name: Generate bootstrap encryption key
   shell: openssl rand -base64 32 > "{{ bootstrap_output_dir }}/.bootstrap_key" && chmod 0600 "{{ bootstrap_output_dir }}/.bootstrap_key"
+  delegate_to: localhost
   when: not _bootstrap_key_stat.stat.exists
 
 - name: Read bootstrap encryption key
   slurp:
     src: "{{ bootstrap_output_dir }}/.bootstrap_key"
+  delegate_to: localhost
   register: _bootstrap_key_raw
 
 - name: Set bootstrap key fact
   set_fact:
     _bootstrap_key: "{{ _bootstrap_key_raw.content | b64decode | trim }}"
+  delegate_to: localhost
 
 - name: Normalize bootstrap admin_users
   set_fact:
@@ -9757,10 +9757,12 @@ bootstrap_repo_uri: ""
       {%-   endif -%}
       {%- endfor -%}
       {{ normalized }}
+  delegate_to: localhost
 
 - name: Derive normalized bootstrap admin user names
   set_fact:
     _bootstrap_admin_user_names: "{{ _bootstrap_admin_users | map(attribute='name') | list }}"
+  delegate_to: localhost
 
 # Collect the variables the template needs into a single dict so the
 # template stays readable.
@@ -9775,28 +9777,43 @@ bootstrap_repo_uri: ""
       admin_ssh_public_key: "{{ admin_ssh_public_key | default('') }}"
       admin_dev_password_hash: "{{ admin_dev_password_hash | default('') }}"
       repo_uri: "{{ bootstrap_repo_uri_override | default(bootstrap_repo_uri) | default('') }}"
+  delegate_to: localhost
 
 # Collect all host variables excluding Ansible internals and bootstrap
 # vars. These are bundled into the script so the playbook has a complete
 # set of vars when running on the target.
+- name: Export raw host inventory variables for bundling
+  shell: >-
+    ansible-inventory
+    {% for _src in ansible_inventory_sources | default([]) %}
+    -i {{ _src | quote }}
+    {% endfor %}
+    --host {{ inventory_hostname | quote }} --yaml --export
+  changed_when: false
+  delegate_to: localhost
+  register: _bs_host_vars_export
+
 - name: Collect host variables for bundling
   set_fact:
     _bs_host_vars: >-
-      {{ hostvars[inventory_hostname]
+      {{ (_bs_host_vars_export.stdout | from_yaml)
          | dict2items
          | rejectattr('key', 'match', '^(ansible_|_|module_|inventory_|role_|playbook_|bootstrap_)')
          | rejectattr('key', 'in', ['group_names', 'groups', 'omit', 'environment'])
          | items2dict }}
+  delegate_to: localhost
 
 - name: Encode host variables as base64 YAML
   set_fact:
     _bs_vars_b64: "{{ _bs_host_vars | to_nice_yaml | b64encode }}"
+  delegate_to: localhost
 
 - name: Generate plaintext bootstrap script
   template:
     src: bootstrap.sh.j2
     dest: "{{ bootstrap_output_dir }}/{{ inventory_hostname }}-bootstrap.sh"
     mode: "0700"
+  delegate_to: localhost
   vars:
     _encrypted_mode: false
 
@@ -9805,6 +9822,7 @@ bootstrap_repo_uri: ""
     src: bootstrap.sh.j2
     dest: "{{ bootstrap_output_dir }}/{{ inventory_hostname }}-bootstrap.sh.enc.tmp"
     mode: "0700"
+  delegate_to: localhost
   vars:
     _encrypted_mode: true
   register: _enc_template
@@ -9832,6 +9850,7 @@ bootstrap_repo_uri: ""
     rm -f "$TMPFILE"
   args:
     executable: /bin/bash
+  delegate_to: localhost
   when: _enc_template is changed
 
 - name: Bootstrap scripts generated
@@ -9841,439 +9860,9 @@ bootstrap_repo_uri: ""
       {{ bootstrap_output_dir }}/. Copy the .bootstrap_key file
       separately via a secure channel -- never bundle it with the
       script.
+  delegate_to: localhost
 """,
-    'roles/bootstrap_scripts/templates/bootstrap.sh.j2': """\
-#!/usr/bin/env bash
-# Bootstrap script for {{ inventory_hostname }}
-# Generated by ansible-enterprise bootstrap_scripts role.
-#
-{% if _encrypted_mode %}
-# ENCRYPTED MODE: secrets are in an openssl-encrypted payload at the
-# end of this script. Run with:
-#   ./{{ inventory_hostname }}-bootstrap.sh.enc --key /path/to/bootstrap_key [--uri <repo>]
-{% else %}
-# PLAINTEXT MODE: all values including secrets are embedded directly.
-# Handle this file as you would a vault -- delete after use.
-#   ./{{ inventory_hostname }}-bootstrap.sh [--uri <repo>]
-{% endif %}
-set -euo pipefail
-
-# -------------------------------------------------------------------------
-# Argument parsing
-# -------------------------------------------------------------------------
-{% if _encrypted_mode %}
-KEYFILE=""
-{% endif %}
-URI_OVERRIDE=""
-VERBOSE=0
-RUN_PLAYBOOK="yes"
-
-usage() {
-{% if _encrypted_mode %}
-    echo "Usage: $0 --key /path/to/bootstrap_key [--uri <repo-uri>] [--run-playbook yes|no] [--verbose]"
-{% else %}
-    echo "Usage: $0 [--uri <repo-uri>] [--run-playbook yes|no] [--verbose]"
-{% endif %}
-    exit 1
-}
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-{% if _encrypted_mode %}
-        --key|-k)
-            [ $# -ge 2 ] || usage
-            KEYFILE="$2"; shift 2 ;;
-{% endif %}
-        --uri|-u)
-            [ $# -ge 2 ] || usage
-            URI_OVERRIDE="$2"; shift 2 ;;
-        --run-playbook)
-            [ $# -ge 2 ] || usage
-            RUN_PLAYBOOK="$2"; shift 2 ;;
-        --verbose|-v)
-            VERBOSE=1; shift ;;
-        -h|--help)
-            usage ;;
-        *)
-{% if _encrypted_mode %}
-            # Legacy: bare first argument treated as key file
-            if [ -z "$KEYFILE" ]; then
-                KEYFILE="$1"; shift
-            else
-                echo "Unknown argument: $1"; usage
-            fi ;;
-{% else %}
-            echo "Unknown argument: $1"; usage ;;
-{% endif %}
-    esac
-done
-
-# When verbose, show every command that runs.
-if [ "$VERBOSE" -eq 1 ]; then
-    set -x
-fi
-
-{% if _encrypted_mode %}
-[ -n "$KEYFILE" ] || { echo "ERROR: --key is required"; usage; }
-[ -f "$KEYFILE" ] || { echo "ERROR: key file not found: $KEYFILE"; exit 1; }
-{% endif %}
-
-# -------------------------------------------------------------------------
-# Platform detection
-# -------------------------------------------------------------------------
-detect_platform() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        case "$ID" in
-            debian|ubuntu)    PLATFORM=Debian ;;
-            rocky|alma|rhel|centos|fedora) PLATFORM=RedHat ;;
-            arch|manjaro)     PLATFORM=Archlinux ;;
-            *)                PLATFORM=Unknown ;;
-        esac
-    elif [ "$(uname)" = "FreeBSD" ]; then
-        PLATFORM=FreeBSD
-    else
-        PLATFORM=Unknown
-    fi
-}
-detect_platform
-echo "Detected platform: $PLATFORM"
-[ "$PLATFORM" != "Unknown" ] || { echo "ERROR: unsupported platform"; exit 1; }
-
-{% if _encrypted_mode %}
-# -------------------------------------------------------------------------
-# Decrypt secrets payload
-# -------------------------------------------------------------------------
-# The encrypted payload follows the __ENCRYPTED_PAYLOAD__ marker.
-SELF="$(realpath "$0")"
-PAYLOAD=$(sed -n '/^__ENCRYPTED_PAYLOAD__$/,$ { /^__ENCRYPTED_PAYLOAD__$/d; p; }' "$SELF")
-eval "$(echo "$PAYLOAD" | openssl enc -aes-256-cbc -pbkdf2 -a -d -salt -pass "file:$KEYFILE")"
-{% else %}
-# -------------------------------------------------------------------------
-# Secrets (plaintext)
-# -------------------------------------------------------------------------
-#---BEGIN SECRETS---
-ADMIN_SSH_PUBLIC_KEY='{{ _bs.admin_ssh_public_key }}'
-ADMIN_DEV_PASSWORD_HASH='{{ _bs.admin_dev_password_hash }}'
-BOOTSTRAP_VARS_B64='{{ _bs_vars_b64 }}'
-#---END SECRETS---
-{% endif %}
-
-# -------------------------------------------------------------------------
-# Configuration
-# -------------------------------------------------------------------------
-HOSTNAME='{{ _bs.hostname }}'
-DOMAIN='{{ _bs.domain }}'
-SSH_PORT='{{ _bs.ssh_port }}'
-ADMIN_USERS=({{ _bs.admin_user_names | join(' ') }})
-REPO_URI="${URI_OVERRIDE:-{{ _bs.repo_uri }}}"
-
-{% if _encrypted_mode %}
-#---BEGIN SECRETS---
-ADMIN_SSH_PUBLIC_KEY='{{ _bs.admin_ssh_public_key }}'
-ADMIN_DEV_PASSWORD_HASH='{{ _bs.admin_dev_password_hash }}'
-BOOTSTRAP_VARS_B64='{{ _bs_vars_b64 }}'
-#---END SECRETS---
-{% endif %}
-
-# -------------------------------------------------------------------------
-# 1. Install prerequisites
-# -------------------------------------------------------------------------
-echo "==> Installing prerequisites..."
-case "$PLATFORM" in
-    Debian)
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq python3 sudo openssh-server curl ;;
-    RedHat)
-        dnf install -y python3 sudo openssh-server curl ;;
-    Archlinux)
-        pacman -Sy --noconfirm python sudo openssh curl ;;
-    FreeBSD)
-        pkg install -y python311 sudo bash curl openssh-portable ;;
-esac
-
-# -------------------------------------------------------------------------
-# 2. Set hostname and domain
-# -------------------------------------------------------------------------
-if [ -n "$HOSTNAME" ]; then
-    echo "==> Setting hostname to $HOSTNAME..."
-    case "$PLATFORM" in
-        FreeBSD)
-            sysrc hostname="$HOSTNAME"
-            hostname "$HOSTNAME" ;;
-        *)
-            hostnamectl set-hostname "$HOSTNAME" ;;
-    esac
-
-    # Update /etc/hosts
-    if [ -n "$DOMAIN" ]; then
-        FQDN="${HOSTNAME}.${DOMAIN}"
-    else
-        FQDN="$HOSTNAME"
-    fi
-    # Use the real IP instead of 127.0.1.1 (which is not an interface
-    # address and causes problems with BIND and other services).
-    PRIMARY_IP=$(ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
-    [ -z "$PRIMARY_IP" ] && PRIMARY_IP=$(ifconfig 2>/dev/null | awk '/inet / && !/127\\.0\\.0\\.1/ {print $2; exit}')
-    # Remove any legacy 127.0.1.1 entry
-    sed -i.bak '/^127\\.0\\.1\\.1[[:space:]]/d' /etc/hosts 2>/dev/null || true
-    if [ -n "$PRIMARY_IP" ]; then
-        if grep -q "^${PRIMARY_IP}[[:space:]]" /etc/hosts 2>/dev/null; then
-            sed -i.bak "s/^${PRIMARY_IP}[[:space:]].*$/${PRIMARY_IP}  ${FQDN}  ${HOSTNAME}/" /etc/hosts
-        else
-            echo "${PRIMARY_IP}  ${FQDN}  ${HOSTNAME}" >> /etc/hosts
-        fi
-    fi
-fi
-
-if [ -n "$DOMAIN" ]; then
-    echo "==> Setting search domain to $DOMAIN..."
-    DOMAIN_IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
-    DOMAIN_BACKEND=""
-    if command -v nmcli >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
-        ACTIVE_CONN=""
-        if [ -n "$DOMAIN_IFACE" ]; then
-            ACTIVE_CONN=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | awk -F: -v iface="$DOMAIN_IFACE" '$2 == iface { print $1; exit }')
-        fi
-        [ -z "$ACTIVE_CONN" ] && ACTIVE_CONN=$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n1)
-        if [ -n "$ACTIVE_CONN" ]; then
-            nmcli connection modify "$ACTIVE_CONN" ipv4.dns-search "$DOMAIN" ipv6.dns-search "$DOMAIN" || true
-            if [ -n "$DOMAIN_IFACE" ]; then
-                nmcli device reapply "$DOMAIN_IFACE" || nmcli connection up "$ACTIVE_CONN" || true
-            else
-                nmcli connection up "$ACTIVE_CONN" || true
-            fi
-            DOMAIN_BACKEND="networkmanager"
-        fi
-    fi
-    if [ -z "$DOMAIN_BACKEND" ] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files systemd-resolved.service >/dev/null 2>&1; then
-        mkdir -p /etc/systemd/resolved.conf.d
-        cat > /etc/systemd/resolved.conf.d/ansible-enterprise.conf <<EOF
-[Resolve]
-Domains=${DOMAIN}
-EOF
-        systemctl restart systemd-resolved || true
-        DOMAIN_BACKEND="systemd-resolved"
-    fi
-    if [ -z "$DOMAIN_BACKEND" ] && command -v resolvconf >/dev/null 2>&1; then
-        mkdir -p /etc/resolvconf/resolv.conf.d
-        if grep -q "^search " /etc/resolvconf/resolv.conf.d/base 2>/dev/null; then
-            sed -i.bak "s/^search .*/search ${DOMAIN}/" /etc/resolvconf/resolv.conf.d/base
-        else
-            echo "search ${DOMAIN}" >> /etc/resolvconf/resolv.conf.d/base
-        fi
-        resolvconf -u || true
-        DOMAIN_BACKEND="resolvconf"
-    fi
-    if [ -z "$DOMAIN_BACKEND" ] && [ -f /etc/dhcp/dhclient.conf ]; then
-        if grep -q '^supersede domain-search ' /etc/dhcp/dhclient.conf 2>/dev/null; then
-            sed -i.bak "s/^supersede domain-search .*/supersede domain-search \\"${DOMAIN}\\";/" /etc/dhcp/dhclient.conf
-        else
-            echo "supersede domain-search \\"${DOMAIN}\\";" >> /etc/dhcp/dhclient.conf
-        fi
-        DOMAIN_BACKEND="dhclient"
-    fi
-    if [ -z "$DOMAIN_BACKEND" ] && grep -q "^search " /etc/resolv.conf 2>/dev/null; then
-        sed -i.bak "s/^search .*/search ${DOMAIN}/" /etc/resolv.conf
-        DOMAIN_BACKEND="static"
-    fi
-    if [ -z "$DOMAIN_BACKEND" ]; then
-        echo "search ${DOMAIN}" >> /etc/resolv.conf
-        DOMAIN_BACKEND="static"
-    fi
-fi
-
-# -------------------------------------------------------------------------
-# 3. Create admin users with sudo
-# -------------------------------------------------------------------------
-echo "==> Creating admin users..."
-{% for _admin in _bs.admin_users %}
-USER={{ _admin.name | quote }}
-USER_SHELL={{ _admin.shell | default('/bin/bash') | quote }}
-USER_PASSWORD_HASH={{ _admin.password | default(_bs.admin_dev_password_hash) | default('') | quote }}
-    if ! id "$USER" >/dev/null 2>&1; then
-        useradd -m -s "$USER_SHELL" "$USER" 2>/dev/null || \
-            pw useradd "$USER" -m -s "$USER_SHELL" 2>/dev/null || true
-    fi
-
-    # Passwordless sudo
-    case "$PLATFORM" in
-        FreeBSD)
-            SUDOERS_DIR="/usr/local/etc/sudoers.d"
-            mkdir -p "$SUDOERS_DIR" ;;
-        *)
-            SUDOERS_DIR="/etc/sudoers.d" ;;
-    esac
-    echo "$USER ALL=(ALL) NOPASSWD:ALL" > "${SUDOERS_DIR}/${USER}"
-    chmod 0440 "${SUDOERS_DIR}/${USER}"
-
-    # SSH authorized_keys
-    if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]{% if _admin.ssh_keys | default([]) | length > 0 %} || true{% endif %}; then
-        SSH_DIR="$(eval echo ~"$USER")/.ssh"
-        mkdir -p "$SSH_DIR"
-        : > "${SSH_DIR}/authorized_keys"
-        if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
-            printf '%s\n' "$ADMIN_SSH_PUBLIC_KEY" >> "${SSH_DIR}/authorized_keys"
-        fi
-{% for _key in _admin.ssh_keys | default([]) %}
-        printf '%s\n' {{ _key | quote }} >> "${SSH_DIR}/authorized_keys"
-{% endfor %}
-        chmod 0700 "$SSH_DIR"
-        chmod 0600 "${SSH_DIR}/authorized_keys"
-        chown -R "$USER" "$SSH_DIR"
-    fi
-
-    # Console password (optional)
-    if [ -n "$USER_PASSWORD_HASH" ]; then
-        case "$PLATFORM" in
-            FreeBSD)
-                echo "${USER_PASSWORD_HASH}" | pw usermod "$USER" -H 0 ;;
-            *)
-                usermod -p "$USER_PASSWORD_HASH" "$USER" ;;
-        esac
-    fi
-{% endfor %}
-
-# Deploy SSH key and console password for root as well.
-if [ -n "$ADMIN_SSH_PUBLIC_KEY" ]; then
-    mkdir -p /root/.ssh
-    echo "$ADMIN_SSH_PUBLIC_KEY" > /root/.ssh/authorized_keys
-    chmod 0700 /root/.ssh
-    chmod 0600 /root/.ssh/authorized_keys
-    chown -R root /root/.ssh
-fi
-if [ -n "$ADMIN_DEV_PASSWORD_HASH" ]; then
-    case "$PLATFORM" in
-        FreeBSD)
-            echo "${ADMIN_DEV_PASSWORD_HASH}" | pw usermod root -H 0 ;;
-        *)
-            usermod -p "$ADMIN_DEV_PASSWORD_HASH" root ;;
-    esac
-fi
-
-# -------------------------------------------------------------------------
-# 4. Configure SSH
-# -------------------------------------------------------------------------
-echo "==> Configuring SSH on port $SSH_PORT..."
-SSHD_CONFIG="/etc/ssh/sshd_config"
-
-# Set port
-sed -i.bak "s/^#*Port .*/Port ${SSH_PORT}/" "$SSHD_CONFIG"
-if ! grep -q "^Port " "$SSHD_CONFIG"; then
-    echo "Port ${SSH_PORT}" >> "$SSHD_CONFIG"
-fi
-
-# Key-only auth
-sed -i.bak "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSHD_CONFIG"
-sed -i.bak "s/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/" "$SSHD_CONFIG"
-
-# AllowUsers
-ALLOW_LINE="AllowUsers root {{ _bs.admin_user_names | join(' ') }}"
-if grep -q "^AllowUsers " "$SSHD_CONFIG"; then
-    sed -i.bak "s/^AllowUsers .*/${ALLOW_LINE}/" "$SSHD_CONFIG"
-else
-    echo "$ALLOW_LINE" >> "$SSHD_CONFIG"
-fi
-
-# Restart SSH
-echo "==> Restarting SSH..."
-case "$PLATFORM" in
-    Debian)     systemctl daemon-reload && systemctl restart ssh ;;
-    RedHat)     systemctl daemon-reload && systemctl restart sshd ;;
-    Archlinux)  systemctl daemon-reload && systemctl restart sshd ;;
-    FreeBSD)    service sshd restart ;;
-esac
-
-# -------------------------------------------------------------------------
-# 5. Provision Ansible repo (optional)
-# -------------------------------------------------------------------------
-REPO_DIR="/opt/ansible-enterprise"
-if [ -n "$REPO_URI" ]; then
-    echo "==> Provisioning Ansible repo from $REPO_URI..."
-
-    # Determine URI type and provision
-    case "$REPO_URI" in
-        /*)
-            # Local path -- copy
-            echo "    Copying from local path..."
-            if [ -d "$REPO_DIR" ]; then
-                rm -rf "$REPO_DIR"
-            fi
-            cp -a "$REPO_URI" "$REPO_DIR"
-            ;;
-        https://*|http://*|ssh://*|git@*)
-            # Remote -- git clone
-            echo "    Cloning from remote..."
-            if [ -d "$REPO_DIR/.git" ]; then
-                cd "$REPO_DIR" && git pull
-            else
-                rm -rf "$REPO_DIR"
-                git clone "$REPO_URI" "$REPO_DIR"
-            fi
-            ;;
-        *)
-            echo "WARNING: unrecognised repo URI format: $REPO_URI (skipping)"
-            ;;
-    esac
-fi
-
-# -------------------------------------------------------------------------
-# 6. Generate build/ and run playbook
-# -------------------------------------------------------------------------
-if [ -n "$REPO_URI" ] && [ "$RUN_PLAYBOOK" = "yes" ]; then
-    echo "==> Installing Ansible and build dependencies..."
-    case "$PLATFORM" in
-        Debian)
-            apt-get install -y -qq git ansible python3-yaml make ;;
-        RedHat)
-            dnf install -y git ansible-core python3-pyyaml make ;;
-        Archlinux)
-            pacman -S --noconfirm git ansible python-yaml make ;;
-        FreeBSD)
-            pkg install -y git py311-ansible py311-yaml gmake ;;
-    esac
-
-    echo "==> Generating build tree..."
-    cd "$REPO_DIR"
-    MAKE_CMD="make"
-    [ "$PLATFORM" = "FreeBSD" ] && MAKE_CMD="gmake"
-    $MAKE_CMD generate
-
-    echo "==> Writing bundled host variables..."
-    echo "$BOOTSTRAP_VARS_B64" | base64 -d > "$REPO_DIR/build/bootstrap_vars.yml"
-
-    echo "==> Installing Ansible collections..."
-    ansible-galaxy collection install -r build/requirements.yml
-
-    echo "==> Running playbook..."
-    cd "$REPO_DIR/build"
-    ansible-playbook -i inventory/pull.ini site.yml \
-        --connection local \
-        -e "@bootstrap_vars.yml"
-    cd /
-fi
-
-echo ""
-echo "========================================="
-echo "  Bootstrap complete for $HOSTNAME"
-echo "  SSH port: $SSH_PORT"
-echo "  Admin users: ${ADMIN_USERS[*]}"
-if [ -n "$REPO_URI" ]; then
-echo "  Repo: $REPO_DIR"
-fi
-echo "========================================="
-echo ""
-echo "This host is now ready for Ansible management."
-
-{% if _encrypted_mode %}
-# This marker must be the last line before the encrypted payload.
-# Do not add anything after it -- the build task appends encrypted
-# data here.
-exit 0
-__ENCRYPTED_PAYLOAD__
-{% endif %}
-""",
+    'roles/bootstrap_scripts/templates/bootstrap.sh.j2': (SRC / "templates/roles/bootstrap_scripts/bootstrap.sh.j2").read_text(encoding="utf-8"),
 }
 
 def ascii_check() -> None:

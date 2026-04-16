@@ -1,0 +1,216 @@
+# pf firewall rules - managed by Ansible.
+# FreeBSD pf: default-drop input, stateful, explicit accepts.
+
+# Macros
+ssh_port = "{{ ssh_port | default(22) }}"
+
+# Global allowlist table: IPs/CIDRs that bypass all filtering.
+table <allowlist> persist { 127.0.0.1, ::1
+{% for _addr in geoip.allowlist | default([]) %}
+, {{ _addr }}
+{% endfor %}
+}
+
+{% if geoip.enabled | default(false) | bool %}
+{% if geoip.ssh_allowed_countries | default([]) | length > 0 %}
+# GeoIP SSH allowlist tables (populated by geoip_ingest.py)
+table <geoip_ssh_ipv4> persist file "/etc/pf.d/geoip/geoip_ssh_ipv4.txt"
+table <geoip_ssh_ipv6> persist file "/etc/pf.d/geoip/geoip_ssh_ipv6.txt"
+{% endif %}
+{% if geoip.allowed_countries | default([]) | length > 0 %}
+# GeoIP HTTP/HTTPS tables
+table <geoip_http_ipv4>  persist file "/etc/pf.d/geoip/geoip_http_ipv4.txt"
+table <geoip_http_ipv6>  persist file "/etc/pf.d/geoip/geoip_http_ipv6.txt"
+table <geoip_https_ipv4> persist file "/etc/pf.d/geoip/geoip_https_ipv4.txt"
+table <geoip_https_ipv6> persist file "/etc/pf.d/geoip/geoip_https_ipv6.txt"
+{% endif %}
+{% endif %}
+
+# Scrape addresses for node_exporter
+{% if node_exporter_enabled | default(true) | bool
+      and node_exporter_scrape_addresses | default([]) | length > 0 %}
+table <ne_scrape> persist { \
+{% for _addr in node_exporter_scrape_addresses %}
+{{ _addr }}{% if not loop.last %}, {% endif %}
+{% endfor %}
+}
+{% endif %}
+
+# Normalise incoming traffic
+scrub in all
+
+# Default policies
+block in  log all
+pass  out all keep state
+
+# Loopback
+pass in  on lo0 all
+pass out on lo0 all
+
+# Global allowlist bypasses all rules
+pass in from <allowlist> to any keep state
+
+# ICMP
+pass in inet  proto icmp  all
+pass in inet6 proto icmp6 all
+
+# Established / related (stateful)
+pass in all keep state
+
+# SSH
+{% if geoip.enabled | default(false) | bool
+      and geoip.ssh_allowed_countries | default([]) | length > 0 %}
+# SSH: allow only from GeoIP-permitted countries
+block in  proto tcp from !<geoip_ssh_ipv4> to any port $ssh_port
+block in inet6 proto tcp from !<geoip_ssh_ipv6> to any port $ssh_port
+{% endif %}
+pass in proto tcp to any port $ssh_port keep state
+
+# Mail ports (when mailserver is active)
+{% if mailserver.enabled | default(false) | bool
+      or 'mailserver' in (_required_providers | default([])) %}
+pass in proto tcp to any port { 25, 587, 465, 993 } keep state
+{% endif %}
+
+# DNS (when BIND is active)
+{% set _dns_active = namespace(v=false) %}
+{% if dns_hidden_primary_zones | default([]) | length > 0
+      or certbot_dns_local | default(false) | bool %}
+{%   set _dns_active.v = true %}
+{% endif %}
+{% for _svc in services | default({}) | dict2items %}
+{%   if _svc.value.enabled | default(false) | bool
+         and _svc.value.domain | default('') %}
+{%     set _dns_active.v = true %}
+{%   endif %}
+{% endfor %}
+{% if _dns_active.v %}
+{% if dns_public | default(false) | bool %}
+pass in proto { tcp, udp } to any port 53 keep state
+{% else %}
+pass in proto { tcp, udp } from 127.0.0.1 to any port 53 keep state
+pass in proto { tcp, udp } from ::1        to any port 53 keep state
+{% for _sec in ((dns_secondaries | default([])) + (dns_defaults.secondaries | default([]))) | unique %}
+pass in proto { tcp, udp } from {{ _sec }} to any port 53 keep state
+{% endfor %}
+{% for _adm in dns_admin_ips | default([]) %}
+pass in proto { tcp, udp } from {{ _adm }} to any port 53 keep state
+{% endfor %}
+{% endif %}
+{% endif %}
+
+# OpenVPN port
+{% for _vpn in openvpn_instances | default([]) %}
+{% if _vpn.mode | default('server') == 'server' %}
+pass in proto {{ _vpn.proto | default('udp') }} to any port {{ _vpn.port | default(1194) }} keep state
+{% endif %}
+{% endfor %}
+{% for _wg in wireguard_instances | default([]) %}
+pass in proto udp to any port {{ _wg.listen_port | default(51820) }} keep state
+{% endfor %}
+{% for _wl in workloads | default([]) %}
+{% if _wl.state | default('present') == 'present' %}
+{% for _p in _wl.ports | default([]) %}
+{% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
+{% set _proto = 'udp' if '/udp' in _p else 'tcp' %}
+pass in proto {{ _proto }} to any port {{ _host_port }} keep state
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+# Step CA ACME port 9000
+{% if step_ca.enabled | default(false) | bool %}
+pass in proto tcp to any port 9000 keep state
+{% endif %}
+
+# Step CA ACME port 9000
+{% if step_ca.enabled | default(false) | bool %}
+pass in proto tcp to any port 9000 keep state
+{% endif %}
+
+# Samba ports 139/445
+{% if samba.enabled | default(false) | bool %}
+{% set _smb_hosts = samba.hosts_allow | default([]) %}
+{% if _smb_hosts | length > 0 %}
+{% for _host in _smb_hosts %}
+pass in proto tcp from {{ _host }} to any port { 139, 445 } keep state
+{% endfor %}
+{% else %}
+pass in proto tcp to any port { 139, 445 } keep state
+{% endif %}
+{% endif %}
+
+# NFS server ports (2049 + rpcbind 111 for NFSv3)
+{% if nfs.server.enabled | default(false) | bool %}
+{% set _nfs_clients = [] %}
+{% for _exp in nfs.server.exports | default([]) %}
+{%   for _cli in _exp.clients | default([]) %}
+{%     if _cli.host not in _nfs_clients %}{% set _ = _nfs_clients.append(_cli.host) %}{% endif %}
+{%   endfor %}
+{% endfor %}
+{% for _host in _nfs_clients %}
+pass in proto { tcp, udp } from {{ _host }} to any port 2049 keep state
+{% if 3 in (nfs.server.versions | default([4])) %}
+pass in proto { tcp, udp } from {{ _host }} to any port 111 keep state
+{% endif %}
+{% endfor %}
+{% endif %}
+
+# node_exporter scrape port
+{% if node_exporter_enabled | default(true) | bool %}
+pass in proto tcp from 127.0.0.1 to any port {{ node_exporter_port | default(9100) }} keep state
+pass in proto tcp from ::1        to any port {{ node_exporter_port | default(9100) }} keep state
+{% if node_exporter_scrape_addresses | default([]) | length > 0 %}
+pass in proto tcp from <ne_scrape> to any port {{ node_exporter_port | default(9100) }} keep state
+{% endif %}
+{% endif %}
+
+# HTTP (port 80) - when any service exposes http
+{% set _http_open = namespace(v=false) %}
+{% for _svc in services | default({}) | dict2items %}
+{%   if _svc.value.enabled | default(false) | bool
+         and _svc.value.security.expose_http | default(false) | bool %}
+{%     set _http_open.v = true %}
+{%   endif %}
+{% endfor %}
+{% if _http_open.v %}
+{% for _svc in services | default({}) | dict2items %}
+{%   if _svc.value.enabled | default(false) | bool
+         and _svc.value.security.expose_http | default(false) | bool %}
+{%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
+pass in proto tcp from {{ _addr }} to any port 80 keep state
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+{% if geoip.enabled | default(false) | bool
+      and geoip.allowed_countries | default([]) | length > 0 %}
+block in  proto tcp from !<geoip_http_ipv4> to any port 80
+block in inet6 proto tcp from !<geoip_http_ipv6> to any port 80
+{% endif %}
+pass in proto tcp to any port 80  keep state
+{% endif %}
+
+# HTTPS (port 443) - when any service exposes https
+{% set _https_open = namespace(v=false) %}
+{% for _svc in services | default({}) | dict2items %}
+{%   if _svc.value.enabled | default(false) | bool
+         and _svc.value.security.expose_https | default(false) | bool %}
+{%     set _https_open.v = true %}
+{%   endif %}
+{% endfor %}
+{% if _https_open.v %}
+{% for _svc in services | default({}) | dict2items %}
+{%   if _svc.value.enabled | default(false) | bool
+         and _svc.value.security.expose_https | default(false) | bool %}
+{%     for _addr in _svc.value.security.geoip_allowlist | default([]) %}
+pass in proto tcp from {{ _addr }} to any port 443 keep state
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+{% if geoip.enabled | default(false) | bool
+      and geoip.allowed_countries | default([]) | length > 0 %}
+block in  proto tcp from !<geoip_https_ipv4> to any port 443
+block in inet6 proto tcp from !<geoip_https_ipv6> to any port 443
+{% endif %}
+pass in proto tcp to any port 443 keep state
+{% endif %}

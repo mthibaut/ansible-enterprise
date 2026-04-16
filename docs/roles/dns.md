@@ -1,6 +1,8 @@
 # dns
 
-Manages BIND configuration, TSIG keys, explicit zone files, and service-derived records.
+Manages authoritative BIND configuration, TSIG keys, explicit zone files, and service-derived records.
+
+This role is intentionally not a recursive resolver/caching nameserver role. It is aimed at authoritative service for the zones you declare here. If you want a recursing nameserver, that should be a separate future workflow/role rather than an extension of this one.
 
 `group_vars` example:
 ```yaml
