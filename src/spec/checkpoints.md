@@ -3275,3 +3275,50 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      workflow/role if that use case is needed. The current `dns` role is
      authoritative-oriented by design and should stay explicit about not
      provisioning a generic recursive/caching nameserver.
+
+209. `checkpoint-209-template-extraction-and-test-expansion`
+     Deferred follow-up from the contract audit: continue reducing
+     distro-by-distro duplication where one family-level mechanism already
+     exists. Two working contracts now apply across the repo:
+     1. when fixing a distro-specific bug, check sibling systems in the same
+        family and apply the fix family-wide if the same mechanism is valid;
+     2. when one task can serve multiple distros cleanly, prefer that shared
+        task over copy-pasted per-distro variants.
+     Current high-value follow-ups:
+     - `apache2`: collapse near-identical distro-specific listen/ports tasks
+       into a shared task with computed destination/path variables where
+       possible.
+     - `docker`: reduce Debian/RedHat/Arch duplication and prefer shared
+       family-level tasks unless a real repository or packaging difference
+       forces a split.
+     - `step_ca`: consolidate installation flows across distro families where
+       one package/repository mechanism can be shared cleanly.
+     - More broadly, keep auditing roles such as `mailserver`, `nfs`, and
+       `openvpn` for cases where family-level handling is possible but not yet
+       used.
+
+210. `checkpoint-210-bootstrap-mirrors-host-env-lxc-export`
+     Consolidates the post-209 dirty tree into a single checkpoint covering
+     performance tuning, distro-agnostic package mirror rewriting before
+     Python bootstrap, persistent host environment variables, composable
+     lxc_bootstrap hooks, and a new Proxmox export playbook.
+     - ansible.cfg: forks = 20, strategy = free (parallelise 17-host runs)
+     - New default vars: pkg_manager_mirror, host_environment
+     - site.yml: /etc/environment + /etc/profile.d/ansible-enterprise.sh
+       (FreeBSD variant at /usr/local/etc/profile.d/); absent when unset
+     - site.yml: remove dnf makecache --timer from auto mode (unsafe eager
+       refresh; APT TTL is the only supported lightweight native refresh)
+     - lxc_bootstrap.yml: single raw/sed mirror task using /etc/os-release
+       case statement runs before Python install (covers ubuntu, debian,
+       devuan, alpine, fedora, rocky, almalinux, opensuse*/sles)
+     - lxc_bootstrap.yml: bootstrap_environment dict injected into all
+       raw commands via _bootstrap_env_str; bootstrap_raw_pre_host and
+       bootstrap_raw_post_host composable with group-level hooks;
+       bootstrap_cache_urls for archive download/extract
+     - lxc_export.yml: new playbook -- vzdump export with --storage,
+       --mode, --compress, rename, vztmpl template move, optional scp
+       fetch; contract entry added in generation_contracts.yml
+     - dns: Alpine BIND paths; switch to ansible_facts.service_mgr
+     - ssh_hardening: explicit systemd/OpenRC/FreeBSD enable+start tasks
+     - test_distro_conditionals.py: TestBootstrapMirrorSetup class +
+       updates for service_mgr, bootstrap_raw_pre_host

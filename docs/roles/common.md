@@ -18,6 +18,10 @@ pkg_manager_proxy:
   no_proxy: localhost,127.0.0.1,.example.internal
 pkg_manager_update_policy: auto
 pkg_manager_update_valid_time: 3600
+pkg_manager_mirror:
+  alpine: http://mirror.example.internal/alpine
+  devuan: http://mirror.example.internal/devuan
+  fedora: http://mirror.example.internal/fedora/linux
 
 Debian-family hosts get a managed `/etc/apt/apt.conf.d/90ansible-enterprise-proxy`
 with `Acquire::http::Proxy` / `Acquire::https::Proxy`. RedHat-family hosts get a
@@ -28,10 +32,15 @@ still receive the proxy through task environment variables.
 `pkg_manager_update_policy` controls whether `site.yml` refreshes package
 metadata before roles run:
 - `always`: eager refresh on every run
-- `auto`: use lightweight/native refresh where available (`apt` TTL, `dnf makecache --timer`)
+- `auto`: use lightweight/native refresh where available (`apt` TTL); skip eager refresh on other managers
 - `never`: skip eager refresh in `site.yml`
 
 `pkg_manager_update_valid_time` is the APT TTL used in `auto` mode.
+
+Package mirrors are rewritten during `lxc_bootstrap.yml` before Python
+installation, not in `site.yml`. Supported bootstrap mirror keys currently
+include `ubuntu`, `debian`, `devuan`, `alpine`, `fedora`, `rocky`, `alma`,
+and `opensuse`.
 ```
 
 `host_vars` example:

@@ -1,5 +1,5 @@
-source_hash: 89805f117ca53f031e3c2aeccc25c7b3e043bcbf80927c78c393fa35433aff6a
-output_hash: 92fd57483ec55169f425820eaeaca3044a9382760d96aaf47c6de0a0dd4ebfa7
+source_hash: fb50f3086c5602dc5438ef7862abe1849f80ad8e7fb62be4cad8e89b7f017daa
+output_hash: ee935ac0710ac104d6446d867686fc8091d811d3a07c7cbc7670cd8102cf66a8
 generated_files:
   - bootstrap.yml
   - group_vars/all/main.yml
@@ -10,6 +10,7 @@ generated_files:
   - inventory/hosts.ini.example
   - inventory/pull.ini
   - lxc_bootstrap.yml
+  - lxc_export.yml
   - molecule/default/converge.yml
   - molecule/default/molecule.yml
   - molecule/default/verify.yml

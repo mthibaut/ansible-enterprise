@@ -650,12 +650,37 @@ set_domain_backend: auto
 #   no_proxy: localhost,127.0.0.1,.example.internal
 pkg_manager_proxy: {}
 
+# Persistent environment variables written to /etc/environment and
+# /etc/profile.d/ansible-enterprise.sh on the managed host.
+# Applied early in site.yml pre_tasks so all subsequent tasks and
+# interactive shells inherit them.
+# Example:
+# host_environment:
+#   http_proxy: http://192.168.40.10:3128/
+#   https_proxy: http://192.168.40.10:3128/
+#   no_proxy: localhost,127.0.0.1
+host_environment: {}
+
+# Override default package mirror per distribution (lowercase ansible_facts.distribution).
+# Only the main archive URL is replaced; security repositories are left untouched.
+# Example:
+# pkg_manager_mirror:
+#   ubuntu: http://ftp.belnet.be/ubuntu.com/ubuntu
+#   debian: http://ftp.belnet.be/debian
+#   devuan: http://mirror.example.org/devuan
+#   alpine: http://mirror.example.org/alpine
+#   fedora: http://mirror.example.org/fedora/linux
+#   rocky: http://ftp.belnet.be/mirror/rockylinux
+#   alma: http://ftp.belnet.be/mirror/almalinux
+#   opensuse: http://ftp.uni-erlangen.de/opensuse
+pkg_manager_mirror: {}
+
 # Package metadata refresh policy before roles run.
 # Valid values:
 #   always - eager refresh on every run (current behavior)
 #   auto   - use package-manager-native lightweight refresh when available
-#            (APT cache_valid_time, DNF makecache --timer); skip eager refresh
-#            on managers without a safe lightweight equivalent
+#            (APT cache_valid_time); skip eager refresh on managers without
+#            a safe lightweight equivalent
 #   never  - do not refresh metadata in site.yml pre_tasks
 pkg_manager_update_policy: always
 
@@ -2217,14 +2242,16 @@ if __name__ == "__main__":
   set_fact:
     _bind_zone_dir: >-
       {{ '/var/lib/bind'        if ansible_facts.os_family == 'Debian'
+         else '/var/bind'       if ansible_facts.os_family == 'Alpine'
          else '/usr/local/etc/namedb' if ansible_facts.os_family == 'FreeBSD'
          else '/var/named' }}
     _bind_conf_dest: >-
       {{ '/etc/bind/named.conf.local' if ansible_facts.os_family == 'Debian'
+         else '/etc/bind/named.conf'  if ansible_facts.os_family == 'Alpine'
          else '/usr/local/etc/namedb/named.conf' if ansible_facts.os_family == 'FreeBSD'
          else '/etc/named.conf' }}
     _bind_conf_dir: >-
-      {{ '/etc/bind'             if ansible_facts.os_family == 'Debian'
+      {{ '/etc/bind'             if ansible_facts.os_family in ['Debian', 'Alpine']
          else '/usr/local/etc/namedb' if ansible_facts.os_family == 'FreeBSD'
          else '/etc' }}
     _bind_zone_group: >-
@@ -2696,16 +2723,16 @@ if __name__ == "__main__":
   when:
     - _dns_local_zones | length > 0
     - ansible_facts.os_family != 'FreeBSD'
-    - ansible_service_mgr | default('') == 'systemd'
+    - ansible_facts.service_mgr == 'systemd'
 
-- name: Start BIND (non-systemd)
+- name: Enable and start BIND (OpenRC)
   service:
-    name: "{{ 'bind9' if ansible_facts.os_family == 'Debian' else 'named' }}"
+    name: named
+    enabled: true
     state: started
   when:
     - _dns_local_zones | length > 0
-    - ansible_facts.os_family != 'FreeBSD'
-    - ansible_service_mgr | default('') != 'systemd'
+    - ansible_facts.service_mgr == 'openrc'
 
 - name: Enable BIND at boot (FreeBSD)
   command: sysrc named_enable=YES
@@ -8069,6 +8096,25 @@ write_config("Ansible: update firewall aliases");
   when: not (_sshd_config_dropin_supported | bool)
   notify: Restart SSH
 
+- name: Enable and start sshd (systemd)
+  ansible.builtin.systemd:
+    name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+    enabled: true
+    state: started
+  when: ansible_facts.service_mgr == 'systemd'
+
+- name: Enable and start sshd (OpenRC)
+  service:
+    name: sshd
+    enabled: true
+    state: started
+  when: ansible_facts.service_mgr == 'openrc'
+
+- name: Enable sshd (FreeBSD)
+  command: sysrc sshd_enable=YES
+  changed_when: false
+  when: ansible_facts.os_family == 'FreeBSD'
+
 - meta: flush_handlers
 
 - name: Set Unix password for admin users
@@ -8721,12 +8767,94 @@ user_accounts: []
 #
 # Requires no Python on the target -- uses the raw module exclusively.
 # Skips hosts that already have a working Python interpreter.
+#
+# Variables:
+#   bootstrap_environment:       dict of env vars injected into all raw commands
+#                                (e.g. http_proxy, https_proxy, no_proxy)
+#   bootstrap_raw_pre:           list of shell commands run before Python install
+#   bootstrap_raw_pre_host:      per-host additions (appended to bootstrap_raw_pre)
+#   bootstrap_raw_post:          list of shell commands run after Python install
+#   bootstrap_raw_post_host:     per-host additions (appended to bootstrap_raw_post)
+#   bootstrap_cache_urls:        list of dicts to download and optionally extract:
+#     - url: http://...          remote URL to fetch
+#       dest: /var/db/repos/     destination directory
+#       extract: true            optional, unarchive after download (default false)
+#       creates: /var/db/repos/gentoo  optional, skip if this path exists
 
 - name: Bootstrap Python on LXC containers
   hosts: all
   gather_facts: false
 
+  vars:
+    _bootstrap_env_str: >-
+      {% for k, v in (bootstrap_environment | default({})).items() %}
+      export {{ k }}={{ v }};
+      {% endfor %}
+
   tasks:
+    - name: Set package manager mirrors (bootstrap)
+      raw: |
+        /bin/sh -c '
+        . /etc/os-release 2>/dev/null || exit 0
+        case "$ID" in
+          ubuntu)
+            M="{{ pkg_manager_mirror.ubuntu | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            sed -E -i "s%https?://[^/]*archive\\.ubuntu\\.com/ubuntu%$M%g" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null
+            ;;
+          debian)
+            M="{{ pkg_manager_mirror.debian | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            sed -E -i "s%https?://deb\\.debian\\.org/debian%$M%g" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null
+            ;;
+          devuan)
+            M="{{ pkg_manager_mirror.devuan | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            sed -E -i "s%https?://(deb|pkgmaster)\\.devuan\\.org/merged%$M%g" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null
+            ;;
+          alpine)
+            M="{{ pkg_manager_mirror.alpine | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            sed -E -i "s%https?://[^/]+/alpine%$M%g" /etc/apk/repositories 2>/dev/null
+            ;;
+          fedora)
+            M="{{ pkg_manager_mirror.fedora | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            command -v dnf >/dev/null 2>&1 || exit 0
+            dnf -qy install dnf-plugins-core >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=fedora.metalink= --setopt=fedora.mirrorlist= --setopt=fedora.baseurl=$M/releases/\\$releasever/Everything/\\$basearch/os/ fedora >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=updates.metalink= --setopt=updates.mirrorlist= --setopt=updates.baseurl=$M/updates/\\$releasever/Everything/\\$basearch/ updates >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=updates-testing.metalink= --setopt=updates-testing.mirrorlist= --setopt=updates-testing.baseurl=$M/updates/testing/\\$releasever/Everything/\\$basearch/ updates-testing >/dev/null 2>&1 || true
+            ;;
+          rocky)
+            M="{{ pkg_manager_mirror.rocky | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            command -v dnf >/dev/null 2>&1 || exit 0
+            dnf -qy install dnf-plugins-core >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=baseos.mirrorlist= --setopt=baseos.baseurl=$M/\\$releasever/BaseOS/\\$basearch/os/ baseos >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=appstream.mirrorlist= --setopt=appstream.baseurl=$M/\\$releasever/AppStream/\\$basearch/os/ appstream >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=crb.mirrorlist= --setopt=crb.baseurl=$M/\\$releasever/CRB/\\$basearch/os/ crb >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=extras.mirrorlist= --setopt=extras.baseurl=$M/\\$releasever/extras/\\$basearch/os/ extras >/dev/null 2>&1 || true
+            ;;
+          almalinux)
+            M="{{ pkg_manager_mirror.alma | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            command -v dnf >/dev/null 2>&1 || exit 0
+            dnf -qy install dnf-plugins-core >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=baseos.mirrorlist= --setopt=baseos.baseurl=$M/\\$releasever/BaseOS/\\$basearch/os/ baseos >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=appstream.mirrorlist= --setopt=appstream.baseurl=$M/\\$releasever/AppStream/\\$basearch/os/ appstream >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=crb.mirrorlist= --setopt=crb.baseurl=$M/\\$releasever/CRB/\\$basearch/os/ crb >/dev/null 2>&1 || true
+            dnf config-manager --save --setopt=extras.mirrorlist= --setopt=extras.baseurl=$M/\\$releasever/extras/\\$basearch/os/ extras >/dev/null 2>&1 || true
+            ;;
+          opensuse*|sles)
+            M="{{ pkg_manager_mirror.opensuse | default('') | regex_replace('/$', '') }}"
+            [ -z "$M" ] && exit 0
+            sed -E -i "s%https?://download\\.opensuse\\.org%$M%g" /etc/zypp/repos.d/*.repo 2>/dev/null
+            ;;
+        esac
+        true'
+      when: pkg_manager_mirror | default({}) | length > 0
+
     - name: Check for existing Python interpreter
       raw: command -v python3 || command -v python
       register: _python_check
@@ -8734,26 +8862,53 @@ user_accounts: []
       failed_when: false
 
     - name: Wait for package manager locks
-      raw: "/bin/sh -c 'i=0; while [ $i -lt 30 ]; do if command -v apt-get >/dev/null 2>&1; then fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then fuser /var/run/yum.pid >/dev/null 2>&1 || fuser /var/cache/dnf/metadata_lock.pid >/dev/null 2>&1 || break; else break; fi; i=$((i+1)); sleep 2; done'"
+      raw: "/bin/sh -c '{{ _bootstrap_env_str }}i=0; while [ $i -lt 30 ]; do if command -v apt-get >/dev/null 2>&1; then fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then fuser /var/run/yum.pid >/dev/null 2>&1 || fuser /var/cache/dnf/metadata_lock.pid >/dev/null 2>&1 || break; else break; fi; i=$((i+1)); sleep 2; done'"
       changed_when: false
       when: _python_check.rc != 0
 
     - name: Run bootstrap pre-Python commands
-      raw: "/bin/sh -c '{{ item }}'"
-      loop: "{{ bootstrap_raw_pre | default(bootstrap_commands | default([])) }}"
-      when: (bootstrap_raw_pre | default(bootstrap_commands | default([]))) | length > 0
+      raw: "/bin/sh -c '{{ _bootstrap_env_str }}{{ item }}'"
+      loop: "{{ (bootstrap_raw_pre | default([])) + (bootstrap_raw_pre_host | default([])) }}"
+      when: ((bootstrap_raw_pre | default([])) + (bootstrap_raw_pre_host | default([]))) | length > 0
 
     - name: Install Python
-      raw: "/bin/sh -c 'if command -v apk >/dev/null 2>&1; then apk add --no-cache python3; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q python3; elif command -v yum >/dev/null 2>&1; then yum install -y -q python3; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq python3; elif command -v zypper >/dev/null 2>&1; then zypper install -y python3; elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm python; elif command -v emerge >/dev/null 2>&1; then emerge --quiet dev-lang/python; elif command -v pkg >/dev/null 2>&1; then pkg install -y python3; elif command -v xbps-install >/dev/null 2>&1; then xbps-install -Sy python3; else echo ERROR_NO_PACKAGE_MANAGER >&2; exit 1; fi'"
+      raw: "/bin/sh -c '{{ _bootstrap_env_str }}if command -v apk >/dev/null 2>&1; then apk add --no-cache python3; elif command -v dnf >/dev/null 2>&1; then dnf install -y -q python3; elif command -v yum >/dev/null 2>&1; then yum install -y -q python3; elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq python3; elif command -v zypper >/dev/null 2>&1; then zypper install -y python3; elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm python; elif command -v emerge >/dev/null 2>&1; then emerge --quiet dev-lang/python; elif command -v pkg >/dev/null 2>&1; then pkg install -y python3; elif command -v xbps-install >/dev/null 2>&1; then xbps-install -Sy python3; else echo ERROR_NO_PACKAGE_MANAGER >&2; exit 1; fi'"
       when: _python_check.rc != 0
 
     - name: Verify Python and gather facts
       setup:
 
     - name: Run bootstrap post-Python commands
-      raw: "/bin/sh -c '{{ item }}'"
-      loop: "{{ bootstrap_raw_post | default([]) }}"
-      when: (bootstrap_raw_post | default([])) | length > 0
+      raw: "/bin/sh -c '{{ _bootstrap_env_str }}{{ item }}'"
+      loop: "{{ (bootstrap_raw_post | default([])) + (bootstrap_raw_post_host | default([])) }}"
+      when: ((bootstrap_raw_post | default([])) + (bootstrap_raw_post_host | default([]))) | length > 0
+
+    - name: Download bootstrap cache archives
+      get_url:
+        url: "{{ item.url }}"
+        dest: "/tmp/{{ item.url | basename }}"
+        mode: "0644"
+      environment: "{{ bootstrap_environment | default({}) }}"
+      loop: "{{ bootstrap_cache_urls | default([]) }}"
+      loop_control:
+        label: "{{ item.url | basename }}"
+      register: _cache_downloads
+      when:
+        - bootstrap_cache_urls | default([]) | length > 0
+        - item.creates | default('') == '' or not (item.creates | default('') is exists)
+
+    - name: Extract bootstrap cache archives
+      unarchive:
+        src: "/tmp/{{ item.item.url | basename }}"
+        dest: "{{ item.item.dest }}"
+        remote_src: true
+      loop: "{{ _cache_downloads.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.url | basename }}"
+      when:
+        - item is not skipped
+        - item is changed
+        - item.item.extract | default(false) | bool
 """,
     'site.yml': """\
 ---
@@ -8765,6 +8920,58 @@ user_accounts: []
     - name: Run preflight validation
       include_role:
         name: preflight
+
+    - name: Set persistent host environment variables
+      copy:
+        dest: /etc/environment
+        owner: root
+        group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
+        mode: "0644"
+        content: |
+          # managed by ansible-enterprise
+          {% for k, v in host_environment.items() %}
+          {{ k }}={{ v }}
+          {% endfor %}
+      when: host_environment | default({}) | length > 0
+
+    - name: Set host environment for interactive shells
+      copy:
+        dest: /etc/profile.d/ansible-enterprise.sh
+        owner: root
+        group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
+        mode: "0644"
+        content: |
+          # managed by ansible-enterprise
+          {% for k, v in host_environment.items() %}
+          export {{ k }}="{{ v }}"
+          {% endfor %}
+      when:
+        - host_environment | default({}) | length > 0
+        - ansible_facts.os_family != 'FreeBSD'
+
+    - name: Set host environment for interactive shells (FreeBSD)
+      copy:
+        dest: /usr/local/etc/profile.d/ansible-enterprise.sh
+        owner: root
+        group: wheel
+        mode: "0644"
+        content: |
+          # managed by ansible-enterprise
+          {% for k, v in host_environment.items() %}
+          export {{ k }}="{{ v }}"
+          {% endfor %}
+      when:
+        - host_environment | default({}) | length > 0
+        - ansible_facts.os_family == 'FreeBSD'
+
+    - name: Remove host environment when unset
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/profile.d/ansible-enterprise.sh
+        - /usr/local/etc/profile.d/ansible-enterprise.sh
+      when: host_environment | default({}) | length == 0
 
     - name: Assert package-manager update policy is valid
       assert:
@@ -8882,13 +9089,6 @@ user_accounts: []
       when:
         - ansible_facts.os_family == 'RedHat'
         - pkg_manager_update_policy | default('always') == 'always'
-
-    - name: Refresh dnf package cache (auto)
-      command: dnf -q makecache --timer
-      when:
-        - ansible_facts.os_family == 'RedHat'
-        - pkg_manager_update_policy | default('always') == 'auto'
-      changed_when: false
 
     - name: Refresh pacman package cache
       pacman:
@@ -9092,6 +9292,149 @@ user_accounts: []
 
   roles:
     - role: bootstrap_scripts
+""",
+    'lxc_export.yml': """\
+---
+# lxc_export.yml - Export LXC containers to reusable tarballs via vzdump.
+#
+# Usage:
+#   ansible-playbook -i inventory ansible-enterprise/build/lxc_export.yml --limit ubuntu-24-04
+#   ansible-playbook -i inventory ansible-enterprise/build/lxc_export.yml --limit lxc_testing
+#
+# Save as reusable template (moves tarball to vztmpl/ so pct create can use it):
+#   ansible-playbook -i inventory ansible-enterprise/build/lxc_export.yml --limit lxc_testing \\
+#     -e lxc_export_type=template -e lxc_export_name='{{ inventory_hostname }}-bootstrapped'
+#
+# Variables:
+#   lxc_export_compress:  compression format: zstd (default), lzo, gzip, none
+#   lxc_export_storage:   Proxmox storage target (default: local)
+#   lxc_export_mode:      vzdump mode: stop (default) or snapshot
+#   lxc_export_name:      custom filename without extension (default: vzdump auto-name)
+#                         e.g. "ubuntu-24-04-base" produces ubuntu-24-04-base.tar.zst
+#   lxc_export_type:      backup (default) or template
+#                         template moves the tarball to the vztmpl directory so it can
+#                         be used as ostemplate in pct create / infra.proxmox.ostemplate
+#   lxc_export_dest:      optional local directory to fetch the tarball to
+#
+# Requires: infra.id (VMID) and infra.proxmox.node in host_vars.
+
+- name: Export LXC containers
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    _vmid: "{{ infra.id }}"
+    _node: "{{ infra.proxmox.node }}"
+    _compress: "{{ lxc_export_compress | default('zstd') }}"
+    _storage: "{{ lxc_export_storage | default('local') }}"
+    _mode: "{{ lxc_export_mode | default('stop') }}"
+    _type: "{{ lxc_export_type | default('backup') }}"
+    _ext_map:
+      zstd: tar.zst
+      lzo: tar.lzo
+      gzip: tar.gz
+      none: tar
+    _ext: "{{ _ext_map[_compress] | default('tar.zst') }}"
+
+  tasks:
+    - name: Validate infra dict is defined
+      assert:
+        that:
+          - infra.id is defined
+          - infra.proxmox.node is defined
+        fail_msg: "Host must have infra.id and infra.proxmox.node defined"
+
+    - name: Stop container before export
+      delegate_to: localhost
+      command: ssh {{ _node }} pct stop {{ _vmid }}
+      register: _stop
+      failed_when:
+        - _stop.rc != 0
+        - "'not running' not in _stop.stderr"
+      changed_when: "'not running' not in _stop.stderr"
+      when: _mode == 'stop'
+
+    - name: Run vzdump on Proxmox node
+      delegate_to: localhost
+      command: >-
+        ssh {{ _node }}
+        vzdump {{ _vmid }}
+        --compress {{ _compress }}
+        --storage {{ _storage }}
+        --mode {{ _mode }}
+      register: _vzdump
+
+    - name: Extract dump filename from vzdump output
+      set_fact:
+        _dump_file: "{{ _vzdump.stdout | regex_search(\\\"creating vzdump archive '(.+?)'\\\", '\\\\1') | first }}"
+      when: _vzdump.stdout is search('creating vzdump archive')
+
+    - name: Rename dump to custom name
+      delegate_to: localhost
+      command: >-
+        ssh {{ _node }}
+        mv {{ _dump_file }}
+        {{ _dump_file | dirname }}/{{ lxc_export_name }}.{{ _ext }}
+      when:
+        - _dump_file is defined
+        - lxc_export_name | default('') | length > 0
+
+    - name: Set final export path
+      set_fact:
+        _export_file: >-
+          {{ (lxc_export_name | default('') | length > 0)
+             | ternary(
+                 (_dump_file | default('') | dirname) + '/' + lxc_export_name | default('') + '.' + _ext,
+                 _dump_file | default('unknown'))
+          }}
+
+    - name: Resolve vztmpl directory on storage
+      delegate_to: localhost
+      command: ssh {{ _node }} pvesm path {{ _storage }}:vztmpl/probe.tar
+      register: _vztmpl_probe
+      when: _type == 'template'
+
+    - name: Move tarball to vztmpl directory
+      delegate_to: localhost
+      vars:
+        _vztmpl_dir: "{{ _vztmpl_probe.stdout | dirname }}"
+        _final_name: "{{ _export_file | basename }}"
+      command: >-
+        ssh {{ _node }}
+        mv {{ _export_file }} {{ _vztmpl_dir }}/{{ _final_name }}
+      when:
+        - _type == 'template'
+        - _export_file is defined
+      register: _mv_template
+
+    - name: Update export path after template move
+      set_fact:
+        _export_file: "{{ (_vztmpl_probe.stdout | dirname) + '/' + (_export_file | basename) }}"
+        _template_ref: "{{ _storage }}:vztmpl/{{ _export_file | basename }}"
+      when:
+        - _type == 'template'
+        - _mv_template is not skipped
+
+    - name: Start container after export
+      delegate_to: localhost
+      command: ssh {{ _node }} pct start {{ _vmid }}
+      when: _mode == 'stop'
+
+    - name: Display export result
+      debug:
+        msg: >-
+          Exported {{ inventory_hostname }} (VMID {{ _vmid }}) on {{ _node }}: {{ _export_file }}
+          {{ (_type == 'template') | ternary('  ostemplate: ' + _template_ref | default(''), '') }}
+
+    - name: Fetch tarball to local destination
+      delegate_to: localhost
+      command: >-
+        scp {{ _node }}:{{ _export_file }}
+        {{ lxc_export_dest }}/
+      when:
+        - lxc_export_dest | default('') | length > 0
+        - _export_file is defined
 """,
     'templates/bind/.gitkeep': """\
 """,

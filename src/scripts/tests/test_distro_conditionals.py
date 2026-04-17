@@ -210,12 +210,12 @@ class TestDnsDistro(unittest.TestCase):
         text = _read(self.TASKS)
         self.assertIn("Enable and start BIND (systemd)", text)
         self.assertIn("systemd:", text)
-        self.assertIn("Start BIND (non-systemd)", text)
+        self.assertIn("Enable and start BIND (OpenRC)", text)
         self.assertIn("service:", text)
         self.assertIn("enabled: true", text)
         self.assertIn("state: started", text)
-        self.assertIn("ansible_service_mgr | default('') == 'systemd'", text)
-        self.assertIn("ansible_service_mgr | default('') != 'systemd'", text)
+        self.assertIn("ansible_facts.service_mgr == 'systemd'", text)
+        self.assertIn("ansible_facts.service_mgr == 'openrc'", text)
 
     def test_zone_serials_bump_after_bind_is_ready(self):
         text = _read(self.TASKS)
@@ -316,9 +316,11 @@ class TestHostnameBootstrapRegression(unittest.TestCase):
     def test_lxc_bootstrap_supports_pre_and_post_raw_hooks(self):
         text = _read("lxc_bootstrap.yml")
         self.assertIn("Run bootstrap pre-Python commands", text)
-        self.assertIn("bootstrap_raw_pre | default(bootstrap_commands | default([]))", text)
+        self.assertIn("bootstrap_raw_pre | default([])", text)
+        self.assertIn("bootstrap_raw_pre_host | default([])", text)
         self.assertIn("Run bootstrap post-Python commands", text)
         self.assertIn("bootstrap_raw_post | default([])", text)
+        self.assertIn("bootstrap_raw_post_host | default([])", text)
 
     def test_lxc_bootstrap_runs_post_hook_after_python_setup(self):
         text = _read("lxc_bootstrap.yml")
@@ -801,8 +803,6 @@ class TestSiteYmlDistro(unittest.TestCase):
     def test_dnf_cache_refresh_present(self):
         text = _read(self.SITE)
         self.assertIn("Refresh dnf package cache", text)
-        self.assertIn("Refresh dnf package cache (auto)", text)
-        self.assertIn("dnf -q makecache --timer", text)
         self.assertIn("Configure dnf proxy", text)
         self.assertIn('path: /etc/dnf/dnf.conf', text)
         self.assertIn('option: proxy', text)
@@ -884,6 +884,7 @@ class TestSiteYmlDistro(unittest.TestCase):
         text = _read(self.SITE)
         self.assertIn("pkg_manager_update_policy | default('always') == 'always'", text)
         self.assertIn("pkg_manager_update_policy | default('always') == 'auto'", text)
+        self.assertNotIn("makecache --timer", text)
 
     def test_apt_and_dnf_proxy_config_cleanup_present(self):
         text = _read(self.SITE)
@@ -896,6 +897,65 @@ class TestSiteYmlDistro(unittest.TestCase):
         self.assertIn("Remove openSUSE proxy config when unset", text)
         self.assertIn("path: /etc/sysconfig/proxy", text)
         self.assertIn('PROXY_ENABLED="yes"', text)
+
+    def test_site_does_not_mutate_package_mirrors(self):
+        text = _read(self.SITE)
+        self.assertNotIn("Find apt source files", text)
+        self.assertNotIn("Set apt mirror for Ubuntu", text)
+        self.assertNotIn("Set apt mirror for Debian", text)
+        self.assertNotIn("Find yum repo files", text)
+        self.assertNotIn("Set dnf baseurl for Rocky Linux", text)
+        self.assertNotIn("Set dnf baseurl for AlmaLinux", text)
+        self.assertNotIn("Find zypper repo files", text)
+        self.assertNotIn("Set zypper mirror for openSUSE", text)
+
+
+class TestBootstrapMirrorSetup(unittest.TestCase):
+
+    BOOTSTRAP = "lxc_bootstrap.yml"
+
+    def test_bootstrap_mirror_uses_os_release_detection(self):
+        """Single mirror task uses /etc/os-release case statement."""
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("Set package manager mirrors (bootstrap)", text)
+        self.assertIn(". /etc/os-release", text)
+        self.assertIn('case "$ID" in', text)
+
+    def test_bootstrap_mirror_covers_all_distro_families(self):
+        """The case statement handles all supported distro IDs."""
+        text = _read(self.BOOTSTRAP)
+        for distro_id in ("ubuntu", "debian", "devuan", "alpine",
+                          "fedora", "rocky", "almalinux", "opensuse*|sles"):
+            self.assertIn(distro_id + ")", text,
+                          f"missing case branch for {distro_id}")
+
+    def test_bootstrap_mirror_before_python_install(self):
+        text = _read(self.BOOTSTRAP)
+        mirror_idx = text.index("- name: Set package manager mirrors (bootstrap)")
+        check_python_idx = text.index("- name: Check for existing Python interpreter")
+        install_idx = text.index("- name: Install Python")
+        self.assertLess(mirror_idx, check_python_idx)
+        self.assertLess(mirror_idx, install_idx)
+
+    def test_bootstrap_mirror_apt_sed_patterns(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("archive\\.ubuntu\\.com/ubuntu", text)
+        self.assertIn("deb\\.debian\\.org/debian", text)
+        self.assertIn("devuan\\.org/merged", text)
+        self.assertIn("/alpine", text)
+
+    def test_bootstrap_mirror_dnf_config_manager(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("dnf config-manager --save", text)
+        for repo in ("fedora.baseurl=", "baseos.baseurl=",
+                      "appstream.baseurl=", "crb.baseurl=",
+                      "extras.baseurl="):
+            self.assertIn(repo, text)
+
+    def test_bootstrap_mirror_zypper(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("download\\.opensuse\\.org", text)
+        self.assertIn("/etc/zypp/repos.d/*.repo", text)
 
 
 class TestCronieArch(unittest.TestCase):
@@ -1188,15 +1248,17 @@ class TestSystemdModuleEnforcement(unittest.TestCase):
                 yield from tasks.glob("*.yml")
 
     def test_no_service_module_with_enabled_and_started(self):
-        """Non-FreeBSD tasks must use systemd: module with enabled: true.
-        FreeBSD service: tasks are allowed when gated os_family == 'FreeBSD'."""
+        """Non-FreeBSD/non-OpenRC tasks must use systemd: module with enabled: true.
+        service: tasks are allowed when gated to FreeBSD or OpenRC."""
         violations = []
         for path in self._tasks_files():
             text = path.read_text(encoding="utf-8")
             for block in text.split("- name:"):
                 if "service:" in block and "enabled: true" in block and "state: started" in block:
-                    # Allow service: tasks explicitly gated to FreeBSD
+                    # Allow service: tasks explicitly gated to FreeBSD or OpenRC
                     if "os_family == 'FreeBSD'" in block:
+                        continue
+                    if "service_mgr == 'openrc'" in block:
                         continue
                     lines = block.splitlines()
                     for line in lines:
