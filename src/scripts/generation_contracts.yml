@@ -43,6 +43,10 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  ansible.cfg:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   requirements.yml:
     source_of_truth:
       - PROMPT.md

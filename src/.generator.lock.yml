@@ -1,6 +1,7 @@
-source_hash: fb50f3086c5602dc5438ef7862abe1849f80ad8e7fb62be4cad8e89b7f017daa
-output_hash: ee935ac0710ac104d6446d867686fc8091d811d3a07c7cbc7670cd8102cf66a8
+source_hash: 5906baba6be86f02244cc3f9f833139f7f5f90751819a4f81d26b3f4eed740e4
+output_hash: 2564e0ac6321870fc92ab634c6197b439fd89b617da56c561245111818941fd6
 generated_files:
+  - ansible.cfg
   - bootstrap.yml
   - group_vars/all/main.yml
   - group_vars/all/vault.yml.example

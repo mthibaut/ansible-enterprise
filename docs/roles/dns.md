@@ -4,6 +4,8 @@ Manages authoritative BIND configuration, TSIG keys, explicit zone files, and se
 
 This role is intentionally not a recursive resolver/caching nameserver role. It is aimed at authoritative service for the zones you declare here. If you want a recursing nameserver, that should be a separate future workflow/role rather than an extension of this one.
 
+See also: [dns-install-layout.md](dns-install-layout.md) for a repo-vs-package matrix of distro-specific BIND/named paths and defaults.
+
 `group_vars` example:
 ```yaml
 dns:

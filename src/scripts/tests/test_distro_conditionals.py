@@ -56,7 +56,7 @@ class TestSshHardeningDistro(unittest.TestCase):
 
     def test_generic_package_task_skips_suse_and_uses_openssh_name(self):
         text = _read(self.TASKS)
-        self.assertIn("ansible_facts.os_family in ['Archlinux', 'Suse']", text)
+        self.assertIn("ansible_facts.os_family in ['Archlinux', 'Suse', 'Gentoo']", text)
         self.assertIn("when: ansible_facts.os_family != 'Suse'", text)
 
     def test_ssh_service_debian_is_ssh(self):
@@ -95,6 +95,17 @@ class TestSshHardeningDistro(unittest.TestCase):
         text = _read(self.TASKS)
         self.assertIn("Deploy monolithic sshd_config", text)
         self.assertIn("not (_sshd_config_dropin_supported | bool)", text)
+
+    def test_gentoo_uses_openssh_package_name(self):
+        text = _read(self.TASKS)
+        self.assertIn("['Archlinux', 'Suse', 'Gentoo']", text)
+        self.assertIn("['openssh'] + (['sudo'] if sudo_enabled | default(true) | bool else [])", text)
+
+    def test_linux_sudoers_directory_is_created(self):
+        text = _read(self.TASKS)
+        self.assertIn("Ensure sudoers.d directory exists (Linux)", text)
+        self.assertIn("path: /etc/sudoers.d", text)
+        self.assertIn("ansible_facts.os_family != 'FreeBSD'", text)
 
     def test_dropin_template_omits_subsystem_and_uses_normalized_admin_names(self):
         text = _read(self.SSHD_DROPIN_TEMPLATE)

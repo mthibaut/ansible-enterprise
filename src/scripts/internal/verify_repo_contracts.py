@@ -92,7 +92,6 @@ REQUIRED_ROOT_FILES = [
     "CODEOWNERS",
     ".gitignore",
     "Makefile",
-    "ansible.cfg",
 ]
 
 LOCAL_CONFIG_PATTERNS_ENV = "ANSIBLE_ENTERPRISE_LOCAL_CONFIG_PATTERNS_FILE"

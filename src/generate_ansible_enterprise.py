@@ -251,7 +251,7 @@ certbot_email: ""
 # mailserver_domain: mail.example.com
 # mailserver_admin_password: "CHANGE_ME"
 # mailserver_masquerading_enabled: true
-# mailserver_masquerade_domain: example.com
+# mailserver_masquerade_domains: [example.com]
 # mailserver_local_domains: [example.com]
 # mailserver_relay_domains: []
 
@@ -351,7 +351,7 @@ provisioner:
           admin_mail_user: mailadmin
           admin_mail_password: ""
           masquerading_enabled: false
-          masquerade_domain: ""
+          masquerade_domains: []
           masquerade_users: []
           masquerade_hosts: []
         molecule_testing: true
@@ -556,6 +556,22 @@ lint: |
       command: openssl version
       changed_when: false
 """,
+    'ansible.cfg': """\
+[defaults]
+# Facts from modules like service_facts are NOT injected as top-level vars.
+# Access them via ansible_facts['services'] etc. Prevents collisions with
+# project-level vars that happen to share a name (e.g. our `services` data
+# model collides with ansible_facts.services populated by service_facts).
+inject_facts_as_vars = False
+
+interpreter_python = auto_silent
+
+# Parallelise across the full inventory (default forks=5 serialises).
+forks = 20
+
+# Each host proceeds independently instead of waiting per task.
+strategy = free
+""",
     'requirements.yml': """\
 ---
 collections:
@@ -745,7 +761,10 @@ geoip:
 #   mailserver_admin_mail_user:     Unix account for mail admin (default: mailadmin)
 #   mailserver_admin_password: (set in vault)
 #   mailserver_masquerading_enabled: true/false (default: false)
-#   mailserver_masquerade_domain:   outbound rewrite domain
+#   mailserver_masquerade_domains:  list of outbound rewrite domains (first used
+#                                   as the generic_maps rewrite target; all are
+#                                   emitted into Postfix masquerade_domains).
+#                                   Example: [example.com]
 #   mailserver_masquerade_users:    list of users to rewrite (default: [])
 #   mailserver_masquerade_hosts:    list of hosts to rewrite (default: [])
 #   mailserver_local_domains:       additional domains accepted for local delivery
@@ -763,7 +782,7 @@ mailserver:
   admin_mail_user: "{{ mailserver_admin_mail_user | default('mailadmin') }}"
   admin_mail_password: "{{ mailserver_admin_password | default('') }}"
   masquerading_enabled: "{{ mailserver_masquerading_enabled | default(false) | bool }}"
-  masquerade_domain: "{{ mailserver_masquerade_domain | default('') }}"
+  masquerade_domains: "{{ mailserver_masquerade_domains | default([]) }}"
   masquerade_users: "{{ mailserver_masquerade_users | default([]) }}"
   masquerade_hosts: "{{ mailserver_masquerade_hosts | default([]) }}"
   local_domains: "{{ mailserver_local_domains | default([]) }}"
@@ -955,6 +974,7 @@ certbot_selfsigned_days: 365
     name: nginx
     state: reloaded
   changed_when: false
+  when: not ansible_check_mode
 """,
     'roles/certbot/tasks/main.yml': """\
 ---
@@ -1566,6 +1586,7 @@ fi
     - set_domain_name | default('') | length > 0
     - "_set_domain_backend_effective | default('') == 'systemd-resolved'"
     - _resolved_search_domain is changed
+    - not ansible_check_mode
 
 - name: Ensure resolvconf base directory exists
   file:
@@ -1709,7 +1730,9 @@ fi
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family == 'Archlinux'
+  when:
+    - ansible_facts.os_family == 'Archlinux'
+    - not ansible_check_mode
 """,
     'roles/dns/defaults/main.yml': """\
 ---
@@ -2234,6 +2257,7 @@ if __name__ == "__main__":
   service:
     name: "{{ 'bind9' if ansible_facts.os_family == 'Debian' else 'named' }}"
     state: reloaded
+  when: not ansible_check_mode
 """,
     'roles/dns/tasks/main.yml': """\
 ---
@@ -2724,6 +2748,7 @@ if __name__ == "__main__":
     - _dns_local_zones | length > 0
     - ansible_facts.os_family != 'FreeBSD'
     - ansible_facts.service_mgr == 'systemd'
+    - not ansible_check_mode
 
 - name: Enable and start BIND (OpenRC)
   service:
@@ -2733,6 +2758,7 @@ if __name__ == "__main__":
   when:
     - _dns_local_zones | length > 0
     - ansible_facts.service_mgr == 'openrc'
+    - not ansible_check_mode
 
 - name: Enable BIND at boot (FreeBSD)
   command: sysrc named_enable=YES
@@ -3672,23 +3698,28 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
   service:
     name: postfix
     state: reloaded
+  when: not ansible_check_mode
 
 - name: Reload dovecot
   service:
     name: dovecot
     state: reloaded
+  when: not ansible_check_mode
 
 - name: Reload opendkim
   service:
     name: "{{ 'milter-opendkim' if ansible_facts.os_family == 'FreeBSD' else 'opendkim' }}"
     state: restarted
+  when: not ansible_check_mode
 
 - name: Reload systemd and restart opendkim
   systemd:
     daemon_reload: true
     name: opendkim
     state: restarted
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 """,
     'roles/mailserver/tasks/main.yml': """\
 ---
@@ -3970,7 +4001,9 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable and start opendkim (enable via sysrc)
   command: sysrc milteropendkim_enable=YES
@@ -3990,7 +4023,9 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable and start dovecot (enable via sysrc)
   command: sysrc dovecot_enable=YES
@@ -4010,7 +4045,9 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable and start postfix (enable via sysrc)
   command: sysrc postfix_enable=YES
@@ -4031,7 +4068,9 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     owner: root
     group: "{{ _root_group }}"
     mode: "0644"
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/mailserver/templates/10-auth.conf.j2': """\
@@ -4087,9 +4126,10 @@ localhost
 {% endfor %}
 """,
     'roles/mailserver/templates/generic.j2': """\
+{% set _rewrite_to = (mailserver.masquerade_domains | default([]) | first) if (mailserver.masquerade_domains | default([]) | length > 0) else '' %}
 {% for user in mailserver.masquerade_users | default([]) %}
-{{ user }} {{ user }}@{{ mailserver.masquerade_domain }}
-{{ user }}@{{ ansible_facts.fqdn | default('localhost') }} {{ user }}@{{ mailserver.masquerade_domain }}
+{{ user }} {{ user }}@{{ _rewrite_to }}
+{{ user }}@{{ ansible_facts.fqdn | default('localhost') }} {{ user }}@{{ _rewrite_to }}
 {% endfor %}
 """,
     'roles/mailserver/templates/main.cf.j2': """\
@@ -4121,6 +4161,9 @@ smtpd_milters = inet:127.0.0.1:8891
 non_smtpd_milters = inet:127.0.0.1:8891
 {% if mailserver.masquerading_enabled | default(false) | bool %}
 smtp_generic_maps = lmdb:{{ _postfix_conf_dir }}/generic
+{% if mailserver.masquerade_domains | default([]) | length > 0 %}
+masquerade_domains = {{ mailserver.masquerade_domains | join(', ') }}
+{% endif %}
 {% endif %}
 """,
     'roles/mailserver/templates/master.cf.j2': """\
@@ -4334,6 +4377,7 @@ dependencies:
   when:
     - services.nextcloud is defined
     - services.nextcloud.enabled | default(false) | bool
+    - not ansible_check_mode
 
 # Wait for the FPM container to be ready before running occ commands.
 - name: Wait for Nextcloud FPM to be ready
@@ -4420,6 +4464,7 @@ services:
   service:
     name: nginx
     state: reloaded
+  when: not ansible_check_mode
 """,
     'roles/nginx/tasks/main.yml': """\
 ---
@@ -4464,7 +4509,9 @@ services:
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable and start nginx (enable via sysrc)
   command: sysrc nginx_enable=YES
@@ -4868,6 +4915,7 @@ mounts: []
     - nfs.server.enabled | default(false) | bool
     - 3 in _nfs_versions
     - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 # Configure NFS server protocol versions (Debian/Ubuntu).
 - name: Configure NFS server versions (Debian)
@@ -4972,6 +5020,7 @@ mounts: []
   when:
     - nfs.server.enabled | default(false) | bool
     - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable NFS server at boot (FreeBSD)
   command: sysrc nfs_server_enable=YES
@@ -4999,6 +5048,7 @@ mounts: []
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - nfs.server.enabled | default(false) | bool
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 
 # Apply server-side export and daemon changes before any client mount tasks
@@ -5166,13 +5216,17 @@ mounts: []
   service:
     name: "{{ _nfs_service }}"
     state: restarted
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Restart NFS idmapd
   service:
     name: "{{ 'nfs-idmapd' if ansible_facts.os_family == 'Debian' else 'rpc-idmapd' if ansible_facts.os_family == 'RedHat' else 'nfsuserd' }}"
     state: restarted
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
   failed_when: false
 """,
     'roles/nfs/templates/exports.j2': """\
@@ -5246,7 +5300,9 @@ samba:
     name: "{{ _smb_service }}"
     state: restarted
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Restart Samba (FreeBSD)
   command: service samba_server restart
@@ -5326,7 +5382,9 @@ samba:
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable Samba at boot (FreeBSD)
   command: sysrc samba_server_enable=YES
@@ -5350,6 +5408,7 @@ samba:
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - samba.enabled | default(false) | bool
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/samba/templates/smb.conf.j2': """\
@@ -5451,7 +5510,9 @@ step_ca:
     name: step-ca
     state: restarted
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Restart step-ca (FreeBSD)
   command: service step_ca restart
@@ -5499,6 +5560,7 @@ node_exporter_version: "1.8.2"
     name: "{{ 'prometheus-node-exporter' if ansible_facts.os_family == 'Debian' else 'node_exporter' }}"
     state: restarted
     daemon_reload: true
+  when: not ansible_check_mode
 """,
     'roles/node_exporter/tasks/main.yml': """\
 ---
@@ -5636,7 +5698,9 @@ node_exporter_version: "1.8.2"
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 # FreeBSD: node_exporter has no daemon mode and the ports rc.d script
 # does not reliably background it. Use daemon(8) from base to daemonize,
@@ -5669,7 +5733,9 @@ node_exporter_version: "1.8.2"
     owner: root
     group: "{{ _root_group }}"
     mode: "0644"
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/node_exporter/templates/40-node-exporter.nft.j2': """\
@@ -5747,7 +5813,9 @@ step_ca:
     name: step-ca
     state: restarted
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Restart step-ca (FreeBSD)
   command: service step_ca restart
@@ -5968,6 +6036,7 @@ step_ca:
   when:
     - step_ca.enabled | default(false) | bool
     - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 # rc.d script checks step_ca_steppath for the CA directory.
 # Default is /usr/local/etc/step/ca -- point it at our data_dir.
@@ -6103,6 +6172,7 @@ step_ca:
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - step_ca.enabled | default(false) | bool
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/step_ca/templates/40-stepca.nft.j2': """\
@@ -6256,6 +6326,7 @@ openvpn_instances: []
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - openvpn_instances | default([]) | selectattr('mode', 'equalto', 'server') | list | length > 0
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/openvpn/tasks/server_instance.yml': """\
@@ -6613,6 +6684,7 @@ wireguard_instances: []
   loop: "{{ wireguard_instances | default([]) }}"
   loop_control:
     loop_var: _inst
+    label: "{{ _inst.name }}"
 
 - name: Deploy WireGuard nftables drop-in
   template:
@@ -6624,6 +6696,7 @@ wireguard_instances: []
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - wireguard_instances | default([]) | selectattr('listen_port', 'defined') | list | length > 0
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 
 # -- FreeBSD: enable and start via rc.d --
@@ -6803,7 +6876,9 @@ container_engine_docker_edition: ce
     name: podman.socket
     enabled: true
     state: started
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
   failed_when: false
 """,
     'roles/container_engine/tasks/docker.yml': """\
@@ -6874,7 +6949,9 @@ container_engine_docker_edition: ce
     name: docker
     enabled: true
     state: started
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 """,
     # ------------------------------------------------------------------ #
     #  Workloads role -- provider-agnostic container workloads             #
@@ -6996,6 +7073,7 @@ workloads: []
   when:
     - ansible_facts.os_family != 'FreeBSD'
     - workloads | default([]) | length > 0
+    - firewall_enabled | default(false) | bool
   notify: Reload nftables
 """,
     'roles/workloads/tasks/remove_podman.yml': """\
@@ -7399,12 +7477,14 @@ proxmox:
     name: pveproxy
     state: restarted
     daemon_reload: true
+  when: not ansible_check_mode
 
 - name: Restart postfix
   systemd:
     name: postfix
     state: restarted
     daemon_reload: true
+  when: not ansible_check_mode
 
 - name: Update GRUB
   command: update-grub
@@ -7943,6 +8023,7 @@ write_config("Ansible: update firewall aliases");
   service:
     name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
     state: restarted
+  when: not ansible_check_mode
 """,
     'roles/ssh_hardening/tasks/main.yml': """\
 ---
@@ -7962,7 +8043,7 @@ write_config("Ansible: update firewall aliases");
         (['sudo'] if sudo_enabled | default(true) | bool else [])
         if ansible_facts.os_family == 'FreeBSD' else
         ['openssh'] + (['sudo'] if sudo_enabled | default(true) | bool else [])
-        if ansible_facts.os_family in ['Archlinux', 'Suse'] else
+        if ansible_facts.os_family in ['Archlinux', 'Suse', 'Gentoo'] else
         ['openssh-server'] + (['sudo'] if sudo_enabled | default(true) | bool else [])
       }}
     state: present
@@ -8021,6 +8102,17 @@ write_config("Ansible: update firewall aliases");
     mode: "0750"
   when:
     - ansible_facts.os_family == 'FreeBSD'
+    - sudo_enabled | default(true) | bool
+
+- name: Ensure sudoers.d directory exists (Linux)
+  file:
+    path: /etc/sudoers.d
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0750"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
     - sudo_enabled | default(true) | bool
 
 - name: Grant admin users passwordless sudo
@@ -8101,14 +8193,18 @@ write_config("Ansible: update firewall aliases");
     name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
     enabled: true
     state: started
-  when: ansible_facts.service_mgr == 'systemd'
+  when:
+    - ansible_facts.service_mgr == 'systemd'
+    - not ansible_check_mode
 
 - name: Enable and start sshd (OpenRC)
   service:
     name: sshd
     enabled: true
     state: started
-  when: ansible_facts.service_mgr == 'openrc'
+  when:
+    - ansible_facts.service_mgr == 'openrc'
+    - not ansible_check_mode
 
 - name: Enable sshd (FreeBSD)
   command: sysrc sshd_enable=YES
@@ -8145,6 +8241,8 @@ write_config("Ansible: update firewall aliases");
     label: "{{ item.name }}"
   register: _admin_primary_group_results
   changed_when: false
+  check_mode: false
+  failed_when: false
 
 - name: Build admin user primary group map
   set_fact:
@@ -8157,6 +8255,7 @@ write_config("Ansible: update firewall aliases");
   loop: "{{ _admin_primary_group_results.results | default([]) }}"
   loop_control:
     label: "{{ item.item.name }}"
+  when: (item.stdout | default('') | trim) | length > 0
 
 # Ensure .ssh directory exists with correct ownership before deploying keys.
 # This is done separately so authorized_key with manage_dir: false is
@@ -8429,6 +8528,17 @@ user_accounts: []
       {{ keys | join("\\n") }}
 
   tasks:
+    - name: Announce host lockdown
+      debug:
+        msg: >-
+          Host {{ inventory_hostname }} is locked (host_locked=true).
+          All roles skipped. Set host_locked=false to re-enable.
+      when: host_locked | default(false) | bool
+
+    - name: Stop processing this host when locked
+      meta: end_host
+      when: host_locked | default(false) | bool
+
     - name: Validate required infra vars
       assert:
         that:
@@ -8675,6 +8785,7 @@ user_accounts: []
         - _infra_state == 'present'
         - _infra_type == 'vm'
         - _proxmox.started | default(true) | bool
+        - not ansible_check_mode
     - name: Create Proxmox LXC container
       community.proxmox.proxmox:
         api_host: "{{ _pve_api_host }}"
@@ -8725,6 +8836,7 @@ user_accounts: []
         - _infra_state == 'present'
         - _infra_type == 'lxc'
         - _proxmox.started | default(true) | bool
+        - not ansible_check_mode
 
     - name: Persist last applied infra config fingerprint
       copy:
@@ -8792,6 +8904,17 @@ user_accounts: []
       {% endfor %}
 
   tasks:
+    - name: Announce host lockdown
+      debug:
+        msg: >-
+          Host {{ inventory_hostname }} is locked (host_locked=true).
+          All roles skipped. Set host_locked=false to re-enable.
+      when: host_locked | default(false) | bool
+
+    - name: Stop processing this host when locked
+      meta: end_host
+      when: host_locked | default(false) | bool
+
     - name: Set package manager mirrors (bootstrap)
       raw: |
         /bin/sh -c '
@@ -8917,22 +9040,34 @@ user_accounts: []
   become: true
 
   pre_tasks:
+    - name: Announce host lockdown
+      debug:
+        msg: >-
+          Host {{ inventory_hostname }} is locked (host_locked=true).
+          All roles skipped. Set host_locked=false to re-enable.
+      when: host_locked | default(false) | bool
+
+    - name: Stop processing this host when locked
+      meta: end_host
+      when: host_locked | default(false) | bool
+
     - name: Run preflight validation
       include_role:
         name: preflight
 
-    - name: Set persistent host environment variables
-      copy:
-        dest: /etc/environment
+    - name: Manage persistent host environment variables
+      blockinfile:
+        path: /etc/environment
+        create: true
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - ansible-enterprise host_environment"
         owner: root
         group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
         mode: "0644"
-        content: |
-          # managed by ansible-enterprise
-          {% for k, v in host_environment.items() %}
+        state: "{{ 'present' if host_environment | default({}) | length > 0 else 'absent' }}"
+        block: |
+          {% for k, v in (host_environment | default({})).items() %}
           {{ k }}={{ v }}
           {% endfor %}
-      when: host_environment | default({}) | length > 0
 
     - name: Set host environment for interactive shells
       copy:
@@ -9290,6 +9425,18 @@ user_accounts: []
   vars:
     ansible_python_interpreter: "{{ lookup('pipe', 'command -v python3 || command -v python') }}"
 
+  pre_tasks:
+    - name: Announce host lockdown
+      debug:
+        msg: >-
+          Host {{ inventory_hostname }} is locked (host_locked=true).
+          All roles skipped. Set host_locked=false to re-enable.
+      when: host_locked | default(false) | bool
+
+    - name: Stop processing this host when locked
+      meta: end_host
+      when: host_locked | default(false) | bool
+
   roles:
     - role: bootstrap_scripts
 """,
@@ -9338,6 +9485,17 @@ user_accounts: []
     _ext: "{{ _ext_map[_compress] | default('tar.zst') }}"
 
   tasks:
+    - name: Announce host lockdown
+      debug:
+        msg: >-
+          Host {{ inventory_hostname }} is locked (host_locked=true).
+          All roles skipped. Set host_locked=false to re-enable.
+      when: host_locked | default(false) | bool
+
+    - name: Stop processing this host when locked
+      meta: end_host
+      when: host_locked | default(false) | bool
+
     - name: Validate infra dict is defined
       assert:
         that:
@@ -9515,7 +9673,9 @@ user_accounts: []
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 """,
 
     # prometheus role
@@ -9560,6 +9720,7 @@ prometheus_retention: "30d"
     name: prometheus
     state: restarted
     daemon_reload: true
+  when: not ansible_check_mode
 """,
 
     'roles/prometheus/tasks/main.yml': """\
@@ -9628,6 +9789,7 @@ prometheus_retention: "30d"
     enabled: true
     state: started
     daemon_reload: true
+  when: not ansible_check_mode
 """,
 
     'roles/prometheus/templates/prometheus.yml.j2': """\
@@ -9690,6 +9852,7 @@ grafana_org_name: "Ansible Enterprise"
     name: grafana
     state: restarted
     daemon_reload: true
+  when: not ansible_check_mode
 """,
 
     'roles/grafana/tasks/main.yml': """\
@@ -9775,6 +9938,7 @@ grafana_org_name: "Ansible Enterprise"
     enabled: true
     state: started
     daemon_reload: true
+  when: not ansible_check_mode
 """,
 
     # apache2 role
@@ -9818,6 +9982,7 @@ apache2_php_modules:
          else 'apache24' if ansible_facts.os_family == 'FreeBSD'
          else 'apache2' }}
     state: reloaded
+  when: not ansible_check_mode
 
 - name: Restart apache2
   service:
@@ -9826,6 +9991,7 @@ apache2_php_modules:
          else 'apache24' if ansible_facts.os_family == 'FreeBSD'
          else 'apache2' }}
     state: restarted
+  when: not ansible_check_mode
 """,
     'roles/apache2/tasks/main.yml': """\
 ---
@@ -9976,7 +10142,9 @@ apache2_php_modules:
     enabled: true
     state: started
     daemon_reload: true
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - not ansible_check_mode
 
 - name: Enable and start Apache2 (FreeBSD)
   command: sysrc apache24_enable=YES

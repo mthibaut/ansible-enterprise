@@ -3322,3 +3322,157 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      - ssh_hardening: explicit systemd/OpenRC/FreeBSD enable+start tasks
      - test_distro_conditionals.py: TestBootstrapMirrorSetup class +
        updates for service_mgr, bootstrap_raw_pre_host
+
+211. `checkpoint-211-host-locked-safety-guard`
+     Adds an opt-in per-host safety lock so legacy/fragile hosts can be
+     included in the inventory without risk of accidental changes.
+     - New host_var `host_locked: true` (default false) skips every role
+       for that host.
+     - All five entry playbooks (site.yml, infra.yml, lxc_bootstrap.yml,
+       bootstrap.yml, lxc_export.yml) gain a pre_task pair: a debug task
+       that loudly announces the lock, then `meta: end_host` gated on
+       `host_locked | default(false) | bool`.
+     - Override for a single run: `-e host_locked=false --limit foo`.
+       An earlier `assert` against `ansible_play_hosts_all` was removed
+       because `hostvars[h].host_locked` does not reliably observe
+       extra-var precedence through the `extract` filter, causing false
+       positives on legitimate overrides.
+     - Test: test_generator_invariants.TestHostLockedGuard verifies both
+       the end_host guard and the lockdown announcement in every
+       entry playbook.
+
+212. `checkpoint-212-check-mode-safety`
+     Makes `ansible-playbook --check` safe on fresh hosts where the
+     package install task is a no-op and the service unit does not
+     exist yet.
+     - Guard added on every `state: started`, `state: restarted`, and
+       `state: reloaded` task across all roles (44 tasks total): the
+       `when:` list now includes `- not ansible_check_mode`. Task skips
+       under --check; real runs unchanged.
+     - ssh_hardening: the `Resolve admin users primary groups` task
+       (`id -gn <user>`) now runs with `check_mode: false` (read-only
+       command) and `failed_when: false` (tolerates missing user on
+       fresh host); the downstream `Build admin user primary group map`
+       set_fact now skips entries with empty stdout so the later
+       `file:` task's `group:` does not resolve to the empty string.
+     - Symptom that motivated this: node_exporter enable-and-start
+       failing in --check with "Could not find the requested service
+       prometheus-node-exporter".
+     - Test: test_generator_invariants.TestCheckModeGuards scans every
+       `tasks/*.yml` and `handlers/*.yml` under `build/roles/`,
+       asserting that no `state: started|restarted|reloaded` task is
+       missing the guard. TestAdminPrimaryGroupsLookup verifies the
+       ssh_hardening flow.
+
+213. `checkpoint-213-nftables-dropins-require-firewall`
+     Service roles that deploy nftables snippets into
+     `/etc/nftables.d/input/` must first check that the firewall role
+     has run and created those directories; otherwise the copy fails
+     on hosts where `firewall_enabled: false`.
+     - Added `- firewall_enabled | default(false) | bool` to the
+       `when:` list of every `Deploy <x> nftables drop-in` task
+       (mailserver, nfs, samba, node_exporter, step_ca, openvpn,
+       wireguard, workloads; dns was already guarded).
+     - Symptom: mailserver failing on sirius-new with
+       "Destination directory /etc/nftables.d/input does not exist".
+     - Test: test_generator_invariants.TestNftablesDropInGuard globs
+       every role task file containing `/etc/nftables.d/` and asserts
+       `firewall_enabled` appears in each `Deploy <x> nftables drop-in`
+       task's window.
+
+214. `checkpoint-214-wireguard-no-log-label`
+     Prevents WireGuard private keys from leaking into the task log.
+     - The `Configure WireGuard instances` include_tasks loop iterates
+       dicts that contain `private_key`. Without a `label:` inside
+       `loop_control`, the `included:` banner prints the whole item
+       per iteration -- secret included.
+     - Added `label: "{{ _inst.name }}"` so only the interface name
+       appears. The template task that actually consumes the key
+       already had `no_log: true`.
+     - Test: test_generator_invariants.TestWireguardLoopSecretHiding
+       asserts the task has a `loop_control:` block with the safe
+       label string.
+
+215. `checkpoint-215-host-environment-blockinfile`
+     `/etc/environment` is now managed with `blockinfile:` instead of
+     `copy:`, so distro-default and PAM-injected entries are preserved.
+     - site.yml pre_task replaces the clobbering `copy:` with
+       `blockinfile:` using marker
+       `# {mark} ANSIBLE MANAGED BLOCK - ansible-enterprise host_environment`.
+     - `state:` is now `present` when `host_environment` is non-empty,
+       `absent` otherwise, so removing the var cleanly strips the
+       managed block (previous logic skipped the task and left stale
+       values).
+     - `create: true` handles minimal containers where /etc/environment
+       does not exist. The /etc/profile.d/ drop-ins are unchanged --
+       those files are entirely ours.
+     - Test: test_generator_invariants.TestHostEnvironmentBlockinfile
+       asserts the blockinfile usage, the marker, the
+       conditional-state expression, and rejects any leftover `copy:`
+       targeting /etc/environment.
+
+216. `checkpoint-216-ansible-cfg-in-build`
+     Moves `ansible.cfg` from the repository root into the generated
+     `build/` tree so Ansible actually discovers it.
+     - Root cause: documented workflow is `cd build && ansible-playbook`;
+       Ansible only checks `$ANSIBLE_CONFIG`, CWD, `~/.ansible.cfg`,
+       `/etc/ansible/ansible.cfg` -- it never walks up to the repo
+       root. The repo-root `ansible.cfg` was silently never loaded, so
+       `inject_facts_as_vars` stayed at its default True and
+       `ansible_facts.services` (from service_facts) shadowed the
+       project's `services` var, breaking the certbot
+       `Assert domain resolves to this host` loop.
+     - Added `ansible.cfg` to `FILE_MANIFEST` so it is emitted at
+       `build/ansible.cfg` with `inject_facts_as_vars = False`,
+       `interpreter_python = auto_silent`, `forks = 20`,
+       `strategy = free`.
+     - Removed repo-root `ansible.cfg` (stale).
+     - Removed `ansible.cfg` from `REQUIRED_ROOT_FILES` in
+       `scripts/internal/verify_repo_contracts.py`.
+     - Added `ansible.cfg` entry to `scripts/generation_contracts.yml`
+       with `source_of_truth: [PROMPT.md, generate_ansible_enterprise.py]`.
+     - Test: test_generator_invariants.TestAnsibleCfgInBuild verifies
+       `build/ansible.cfg` exists, contains the inject-facts-as-vars
+       setting, and that no stale repo-root `ansible.cfg` shadows it.
+
+217. `checkpoint-217-mailserver-masquerade-domains-list`
+     Aligns `mailserver_masquerade_domains` with Postfix's native list
+     semantics.
+     - Variable renamed `mailserver_masquerade_domain` (scalar) ->
+       `mailserver_masquerade_domains` (list). Default changes from
+       `""` to `[]`. No deprecation shim -- the old key is silently
+       ignored; inventory using it must migrate to a list.
+     - roles/mailserver/defaults/main.yml: declares `masquerade_domains:
+       "{{ mailserver_masquerade_domains | default([]) }}"` and
+       removes the singular form.
+     - generic.j2: uses the first list entry as the outbound rewrite
+       target for existing `smtp_generic_maps` behaviour.
+     - main.cf.j2: now also emits Postfix's native
+       `masquerade_domains = <comma-joined list>` directive when the
+       list is non-empty. Comma separator matches the convention used
+       by the nearby `mydestination = localhost, <domain>, ...`.
+     - Test: test_generator_invariants.TestMasqueradeDomainsList
+       covers the defaults file, the generic.j2 list-first usage,
+       and the main.cf.j2 postfix directive emission.
+
+218. `checkpoint-218-regression-test-invariants`
+     Adds `src/scripts/tests/test_generator_invariants.py`, a
+     retroactive regression-test battery covering the invariants
+     established in checkpoints 211-217. Fifteen test methods total,
+     grouped by subject class. Addresses the gap where checkpoints
+     211-217 were implemented without per-fix tests, violating the
+     Bug Fix Test Contract documented in spec/contracts.md.
+     - TestHostLockedGuard (2): every entry playbook has end_host +
+       announcement.
+     - TestCheckModeGuards (1): every service state-change task has
+       `not ansible_check_mode`.
+     - TestNftablesDropInGuard (1): every nftables drop-in has
+       `firewall_enabled`.
+     - TestWireguardLoopSecretHiding (1): loop_control.label on the
+       WireGuard include.
+     - TestAdminPrimaryGroupsLookup (2): ssh_hardening id-gn flow.
+     - TestMasqueradeDomainsList (3): mailserver list semantics.
+     - TestHostEnvironmentBlockinfile (2): /etc/environment
+       non-destructive management.
+     - TestAnsibleCfgInBuild (3): build/ansible.cfg exists and
+       disables fact-var injection.
