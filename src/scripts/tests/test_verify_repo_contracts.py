@@ -81,5 +81,53 @@ class TestLocalConfigScrubContract(unittest.TestCase):
             self.assertEqual(violations, [])
 
 
+class TestRequiredFileContracts(unittest.TestCase):
+
+    def test_repo_root_does_not_require_generated_ansible_cfg(self):
+        self.assertNotIn("ansible.cfg", vrc.REQUIRED_ROOT_FILES)
+
+    def test_verify_required_files_accepts_missing_repo_root_ansible_cfg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            src = root / "src"
+            build = root / "build"
+            for path in (
+                src / "PROMPT.md",
+                src / ".prompt.sha256",
+                src / ".prompt.version",
+                src / ".generator.lock.yml",
+                src / "generate_ansible_enterprise.py",
+                src / "spec" / "contracts.md",
+                src / "spec" / "ai-development-mode.md",
+                src / "scripts" / "generation_contracts.yml",
+                src / "scripts" / "known_gaps.yml",
+                src / "scripts" / "internal" / "verify_repo_contracts.py",
+                src / "scripts" / "internal" / "verify_checkpoints.py",
+                src / "schemas" / "services.schema.json",
+                root / "README.md",
+                root / "CODEOWNERS",
+                root / ".gitignore",
+                root / "Makefile",
+                build / "ansible.cfg",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x\n", encoding="utf-8")
+
+            module = type("Module", (), {"FILE_MANIFEST": {"ansible.cfg": ""}})()
+
+            original_repo = vrc.REPO
+            original_src = vrc.SRC
+            original_build = vrc.BUILD
+            try:
+                vrc.REPO = root
+                vrc.SRC = src
+                vrc.BUILD = build
+                vrc.verify_required_files(module)
+            finally:
+                vrc.REPO = original_repo
+                vrc.SRC = original_src
+                vrc.BUILD = original_build
+
+
 if __name__ == "__main__":
     unittest.main()

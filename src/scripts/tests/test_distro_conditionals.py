@@ -968,6 +968,61 @@ class TestBootstrapMirrorSetup(unittest.TestCase):
         self.assertIn("download\\.opensuse\\.org", text)
         self.assertIn("/etc/zypp/repos.d/*.repo", text)
 
+    def test_bootstrap_mirror_is_gated_on_configured_mirrors(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("when: pkg_manager_mirror | default({}) | length > 0", text)
+
+    def test_bootstrap_cache_urls_download_and_extract_flow_present(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("Download bootstrap cache archives", text)
+        self.assertIn("get_url:", text)
+        self.assertIn('loop: "{{ bootstrap_cache_urls | default([]) }}"', text)
+        self.assertIn('environment: "{{ bootstrap_environment | default({}) }}"', text)
+        self.assertIn("Extract bootstrap cache archives", text)
+        self.assertIn("unarchive:", text)
+
+    def test_bootstrap_cache_extract_runs_after_downloads(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertLess(
+            text.index("- name: Download bootstrap cache archives"),
+            text.index("- name: Extract bootstrap cache archives"),
+        )
+
+    def test_bootstrap_cache_urls_honors_extract_and_creates_guards(self):
+        text = _read(self.BOOTSTRAP)
+        self.assertIn("item.creates | default('') == '' or not (item.creates | default('') is exists)", text)
+        self.assertIn("item.item.extract | default(false) | bool", text)
+
+
+class TestLxcExportPlaybook(unittest.TestCase):
+
+    PLAYBOOK = "lxc_export.yml"
+
+    def test_export_playbook_runs_vzdump_with_configured_options(self):
+        text = _read(self.PLAYBOOK)
+        self.assertIn("Run vzdump on Proxmox node", text)
+        self.assertIn("vzdump {{ _vmid }}", text)
+        self.assertIn("--compress {{ _compress }}", text)
+        self.assertIn("--storage {{ _storage }}", text)
+        self.assertIn("--mode {{ _mode }}", text)
+
+    def test_export_playbook_stops_and_restarts_container_in_stop_mode(self):
+        text = _read(self.PLAYBOOK)
+        self.assertIn("Stop container before export", text)
+        self.assertIn("pct stop {{ _vmid }}", text)
+        self.assertIn("when: _mode == 'stop'", text)
+        self.assertIn("Start container after export", text)
+        self.assertIn("pct start {{ _vmid }}", text)
+
+    def test_export_playbook_supports_template_move_and_local_fetch(self):
+        text = _read(self.PLAYBOOK)
+        self.assertIn("Resolve vztmpl directory on storage", text)
+        self.assertIn("pvesm path {{ _storage }}:vztmpl/probe.tar", text)
+        self.assertIn("Move tarball to vztmpl directory", text)
+        self.assertIn('_template_ref: "{{ _storage }}:vztmpl/{{ _export_file | basename }}"', text)
+        self.assertIn("Fetch tarball to local destination", text)
+        self.assertIn("scp {{ _node }}:{{ _export_file }}", text)
+
 
 class TestCronieArch(unittest.TestCase):
     """Arch Linux requires cronie for crontab - installed in common role."""

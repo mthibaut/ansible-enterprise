@@ -3476,3 +3476,12 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        non-destructive management.
      - TestAnsibleCfgInBuild (3): build/ansible.cfg exists and
        disables fact-var injection.
+     - Follow-up coverage added after the checkpoint audit:
+       `test_distro_conditionals.py` now covers `lxc_export.yml`
+       (`vzdump`, stop/start, template move, local fetch) and
+       `bootstrap_cache_urls`; `test_generator_invariants.py` now
+       covers host_environment profile.d files plus `forks = 20` and
+       `strategy = free` in `build/ansible.cfg`; and
+       `test_verify_repo_contracts.py` now pins the validator contract
+       that repo-root `ansible.cfg` is no longer a required root file
+       because the generated config lives in `build/`.

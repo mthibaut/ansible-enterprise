@@ -283,6 +283,20 @@ class TestHostEnvironmentBlockinfile(unittest.TestCase):
             text,
         )
 
+    def test_interactive_shell_exports_written_for_linux_and_freebsd(self):
+        text = _read(self.SITE)
+        self.assertIn("Set host environment for interactive shells", text)
+        self.assertIn("dest: /etc/profile.d/ansible-enterprise.sh", text)
+        self.assertIn("Set host environment for interactive shells (FreeBSD)", text)
+        self.assertIn("dest: /usr/local/etc/profile.d/ansible-enterprise.sh", text)
+
+    def test_interactive_shell_exports_removed_when_host_environment_unset(self):
+        text = _read(self.SITE)
+        self.assertIn("Remove host environment when unset", text)
+        self.assertIn("- /etc/profile.d/ansible-enterprise.sh", text)
+        self.assertIn("- /usr/local/etc/profile.d/ansible-enterprise.sh", text)
+        self.assertIn("when: host_environment | default({}) | length == 0", text)
+
 
 # ---------------------------------------------------------------------------
 # ansible.cfg emitted into build/
@@ -300,6 +314,11 @@ class TestAnsibleCfgInBuild(unittest.TestCase):
     def test_inject_facts_as_vars_disabled(self):
         text = (BUILD / "ansible.cfg").read_text(encoding="utf-8")
         self.assertIn("inject_facts_as_vars = False", text)
+
+    def test_parallel_execution_defaults_present(self):
+        text = (BUILD / "ansible.cfg").read_text(encoding="utf-8")
+        self.assertIn("forks = 20", text)
+        self.assertIn("strategy = free", text)
 
     def test_no_stale_repo_root_cfg(self):
         stale = REPO / "ansible.cfg"
