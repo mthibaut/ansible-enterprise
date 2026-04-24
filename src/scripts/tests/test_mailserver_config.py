@@ -9,6 +9,7 @@ Covers:
 - relay_domains absent when list is empty
 - Both new keys present in defaults dict
 - Flat variable documentation present in defaults
+- Mailserver firewall drop-in matches the generated mail protocol listeners
 """
 import pathlib
 import unittest
@@ -85,6 +86,26 @@ class TestMailserverDefaults(unittest.TestCase):
         text = _read(self.DEFAULTS)
         self.assertIn("mailserver_local_domains", text)
         self.assertIn("mailserver_relay_domains", text)
+
+
+class TestMailserverFirewallTemplate(unittest.TestCase):
+
+    TEMPLATE = "roles/mailserver/templates/40-mailserver.nft.j2"
+    PF_TEMPLATE = "roles/firewall/templates/pf.conf.j2"
+
+    def test_firewall_opens_smtp_submission_imap_and_smtps(self):
+        text = _read(self.TEMPLATE)
+        for port in ("25", "587", "143", "465"):
+            self.assertIn(f"tcp dport {port}", text)
+
+    def test_firewall_does_not_open_imaps_when_dovecot_ssl_is_disabled(self):
+        text = _read(self.TEMPLATE)
+        self.assertNotIn("tcp dport 993", text)
+
+    def test_pf_firewall_uses_same_mail_ports(self):
+        text = _read(self.PF_TEMPLATE)
+        self.assertIn("port { 25, 587, 465, 143 }", text)
+        self.assertNotIn("port { 25, 587, 465, 993 }", text)
 
 
 if __name__ == "__main__":

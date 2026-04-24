@@ -4236,7 +4236,7 @@ InternalHosts {{ _opendkim_dir }}/TrustedHosts
 # managed by ansible - mailserver role
 tcp dport 25  accept
 tcp dport 587 accept
-tcp dport 993 accept
+tcp dport 143 accept
 tcp dport 465 accept
 """,
     'roles/nextcloud/defaults/main.yml': """\

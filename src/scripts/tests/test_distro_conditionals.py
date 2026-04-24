@@ -1284,7 +1284,7 @@ class TestPfFirewall(unittest.TestCase):
         """Mail ports must only open when mailserver is active."""
         text = _read(self.PF_CONF)
         self.assertIn("mailserver", text)
-        self.assertIn("25, 587, 465, 993", text)
+        self.assertIn("25, 587, 465, 143", text)
 
     def test_pf_conf_node_exporter_conditional(self):
         text = _read(self.PF_CONF)

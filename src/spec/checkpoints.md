@@ -3485,3 +3485,20 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        `test_verify_repo_contracts.py` now pins the validator contract
        that repo-root `ansible.cfg` is no longer a required root file
        because the generated config lives in `build/`.
+
+219. `checkpoint-219-mailserver-firewall-imap-port`
+     Aligns the mail firewall rules with the generated Dovecot listener
+     configuration.
+     - Root cause: the generated mailserver firewall rules still opened
+       IMAPS on 993, but the generated Dovecot config disables built-in
+       SSL and serves IMAP, so the externally reachable client port is
+       143, not 993.
+     - `roles/mailserver/templates/40-mailserver.nft.j2` now opens
+       `25, 587, 143, 465`.
+     - `src/templates/roles/firewall/pf.conf.j2` now uses the same mail
+       port set on FreeBSD so Linux and pf stay aligned.
+     - Tests: `test_mailserver_config.py` now verifies the nftables and
+       pf mail-port sets and rejects stale 993 exposure; the existing
+       PF regression expectation in `test_distro_conditionals.py` was
+       updated to the new listener contract.
+     - Validation: `make generate` and `make test` pass.

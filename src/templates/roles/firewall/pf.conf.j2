@@ -69,7 +69,7 @@ pass in proto tcp to any port $ssh_port keep state
 # Mail ports (when mailserver is active)
 {% if mailserver.enabled | default(false) | bool
       or 'mailserver' in (_required_providers | default([])) %}
-pass in proto tcp to any port { 25, 587, 465, 993 } keep state
+pass in proto tcp to any port { 25, 587, 465, 143 } keep state
 {% endif %}
 
 # DNS (when BIND is active)

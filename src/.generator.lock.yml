@@ -1,5 +1,5 @@
-source_hash: 5906baba6be86f02244cc3f9f833139f7f5f90751819a4f81d26b3f4eed740e4
-output_hash: 2564e0ac6321870fc92ab634c6197b439fd89b617da56c561245111818941fd6
+source_hash: 69c5f764c8bc18b6c73421fa838a003cedbe3113f58255751afb37d099ff9712
+output_hash: 719ad1929f900ffc00a17e1c8482d6d84d1b5dc8b5c7205bf823ed78aeb06d4e
 generated_files:
   - ansible.cfg
   - bootstrap.yml
