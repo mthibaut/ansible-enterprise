@@ -75,9 +75,10 @@ class TestProxmoxBackupJobs(unittest.TestCase):
         self.assertIn("proxmox.backup_jobs | default({}) | length > 0", text)
 
     def test_backup_jobs_are_additive_only(self):
+        # The proxmox role is now API-only -- the entire tasks file IS the
+        # backup_jobs section. No need for a section anchor.
         text = _read_build(self.TASKS)
         backup_jobs = text.split("- name: Manage Proxmox cluster backup jobs", 1)[1]
-        backup_jobs = backup_jobs.split("# -- IOMMU / PCI passthrough", 1)[0]
         self.assertIn('state: "{{ item.value.state | default(\'present\') }}"', backup_jobs)
         forbidden = [
             "purge",
@@ -114,9 +115,36 @@ class TestProxmoxBackupJobs(unittest.TestCase):
         self.assertNotIn("postfix SASL", tasks)
         self.assertNotIn("/etc/postfix/main.cf", tasks)
         self.assertNotIn("/etc/postfix/sasl_passwd", tasks)
+        # proxmox role no longer has handlers/main.yml -- handlers moved
+        # to proxmox_host with the SSH-based tasks.
+        self.assertFalse((BUILD / "roles/proxmox/handlers/main.yml").exists())
 
-        handlers = _read_build("roles/proxmox/handlers/main.yml")
-        self.assertNotIn("Restart postfix", handlers)
+    def test_proxmox_role_is_cluster_api_only(self):
+        """After checkpoint-234, host-OS concerns moved to proxmox_host.
+        The proxmox role talks only to the cluster API via delegate_to:
+        localhost and must not touch apt, GRUB, kernel modules, or
+        Proxmox web-asset files on the play target."""
+        tasks = _read_build(self.TASKS)
+        forbidden_host_os = [
+            "apt_repository",
+            "apt:",
+            "/etc/default/grub",
+            "vfio",
+            "/usr/share/javascript/proxmox-widget-toolkit",
+            "GRUB_CMDLINE_LINUX_DEFAULT",
+            "Update apt cache",
+            "Restart pveproxy",
+            "Update GRUB",
+        ]
+        for marker in forbidden_host_os:
+            self.assertNotIn(marker, tasks, f"host-OS task leaked into proxmox role: {marker!r}")
+        # The Debian assertion belongs to host-OS prep, not cluster API.
+        self.assertNotIn("ansible_facts.os_family == 'Debian'", tasks)
+
+        defaults = _read_build(self.DEFAULTS)
+        defaults_forbidden = ["repo:", "remove_nag", "extra_packages", "iommu:", "cpu_vendor"]
+        for marker in defaults_forbidden:
+            self.assertNotIn(marker, defaults, f"host-OS default leaked into proxmox role: {marker!r}")
 
 
 if __name__ == "__main__":

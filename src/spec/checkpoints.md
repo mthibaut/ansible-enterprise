@@ -3836,3 +3836,48 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        additive-only test was retargeted to the new IOMMU end-marker.
      - Validation: `make generate`, `make validate`, `make test`,
        `make checkpoints`, and `make services` pass.
+
+234. `checkpoint-234-proxmox-role-split`
+     Splits the proxmox role into two: `proxmox_host` for SSH-based
+     Linux-host preparation (apt repos, nag removal, extra packages,
+     IOMMU/vfio) and `proxmox` for cluster-config calls via the API.
+     Architectural cleanup that follows from checkpoint-230's API-driven
+     direction; host-OS concerns are not "PVE cluster" concerns.
+     - New `roles/proxmox_host/{defaults,handlers,tasks}/main.yml`
+       owns: Debian assertion, `apt_repository` for no-subscription /
+       enterprise repos, web-UI nag removal, `apt` install for
+       `extra_packages`, IOMMU GRUB cmdline, vfio module loading. New
+       defaults namespace: `proxmox_host.{enabled,repo,remove_nag,
+       extra_packages,iommu}`. Handlers `Update apt cache`,
+       `Restart pveproxy`, `Update GRUB` move with the tasks.
+     - `roles/proxmox/defaults/main.yml` keeps only `enabled`,
+       `is_clustered`, `api`, `backup_jobs`, `backup_jobs_prefix`. The
+       host-OS keys are gone.
+     - `roles/proxmox/tasks/main.yml` keeps only the API-token
+       assertion + `mthibaut.proxmox.proxmox_backup_job` loop. The
+       Debian assertion is gone (the role talks via
+       `delegate_to: localhost` and does not touch the play target).
+     - `roles/proxmox/handlers/main.yml` is removed entirely (no
+       handlers needed; nothing notifies on cluster API calls).
+     - `site.yml` adds `- role: proxmox_host` immediately before
+       `- role: proxmox`. proxmox_host activates on
+       `proxmox_host.enabled` or `_required_providers` containing
+       `proxmox_host` or `hypervisor`.
+     - Capability dispatch: `hypervisor: {provider: proxmox_host}`
+       (was `proxmox`). Semantic shift: "I require a hypervisor" now
+       means "prepare this node as a hypervisor host"; cluster API
+       activation is an explicit `proxmox.enabled: true` opt-in.
+     - `scripts/generation_contracts.yml` registers the three new
+       `roles/proxmox_host/*` files and drops the
+       `roles/proxmox/handlers/main.yml` entry.
+     - Tests: new `test_proxmox_host.py` covers role files, defaults
+       namespace, handler coverage, Debian assertion, namespace purity
+       (no `proxmox.*` keys), task coverage, no cluster-API calls,
+       site.yml ordering / activator, capability mapping, and
+       generation-contract registration. `test_proxmox.py` adds
+       `test_proxmox_role_is_cluster_api_only` enforcing the boundary
+       (no apt, GRUB, vfio, web-asset edits, or Debian assertion in
+       the cluster API role).
+     - Validation: `make generate`, `make validate`, `make test`
+       (507 tests, was 493), `make checkpoints`, and `make services`
+       pass.

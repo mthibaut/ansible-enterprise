@@ -519,11 +519,19 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
-  roles/proxmox/defaults/main.yml:
+  roles/proxmox_host/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
-  roles/proxmox/handlers/main.yml:
+  roles/proxmox_host/handlers/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/proxmox_host/tasks/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/proxmox/defaults/main.yml:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py

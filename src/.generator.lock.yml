@@ -1,5 +1,5 @@
-source_hash: 0fccdc17dd67db46e9c4e85e5fe3e9202a3b637abc239296d475b7d3d97087e8
-output_hash: 5606a7364a7c0f21d488dc7b91e20363c2075ee42e6116a8bbd404af97951f7d
+source_hash: c983a25aba5229f7bffdffeab71d73481f0375f184c374c4f4d7fe8c4a90fd6b
+output_hash: a456d2c1b005e264f1e4f22e49845a6709ab20ea49102c16fc901056dfa08a07
 generated_files:
   - ansible.cfg
   - baseline.yml
@@ -128,8 +128,10 @@ generated_files:
   - roles/prometheus/tasks/main.yml
   - roles/prometheus/templates/prometheus.yml.j2
   - roles/proxmox/defaults/main.yml
-  - roles/proxmox/handlers/main.yml
   - roles/proxmox/tasks/main.yml
+  - roles/proxmox_host/defaults/main.yml
+  - roles/proxmox_host/handlers/main.yml
+  - roles/proxmox_host/tasks/main.yml
   - roles/samba/defaults/main.yml
   - roles/samba/handlers/main.yml
   - roles/samba/tasks/main.yml

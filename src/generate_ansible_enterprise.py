@@ -781,7 +781,7 @@ capabilities:
   geoip: {provider: maxmind_nftables}
   mail: {provider: mailserver}
   id_mapping: {provider: nfs}
-  hypervisor: {provider: proxmox}
+  hypervisor: {provider: proxmox_host}
   router: {provider: pfsense}
 """,
     'roles/ssh_hardening/defaults/main.yml': """\
@@ -7927,24 +7927,132 @@ ExecStop=/usr/bin/docker stop {{ _wl.name }}
 WantedBy=multi-user.target
 """,
     # ------------------------------------------------------------------ #
-    #  Proxmox VE role -- hypervisor host configuration (Debian only)      #
+    #  proxmox_host role -- Linux host preparation for Proxmox VE          #
+    #  (apt, nag removal, extra packages, IOMMU/vfio). Debian-only.        #
+    #  Cluster-config concerns live in the separate proxmox role.          #
     # ------------------------------------------------------------------ #
-    'roles/proxmox/defaults/main.yml': """\
+    'roles/proxmox_host/defaults/main.yml': """\
 ---
-# Proxmox VE host configuration.
-# Debian-only -- Proxmox VE runs on Debian.
-proxmox:
+# Proxmox VE host preparation. Debian-only -- PVE runs on Debian.
+# This role configures the underlying Linux host (apt repos, nag removal,
+# kernel modules, GRUB cmdline). Cluster-config concerns (backup jobs,
+# notifications, storage, users, ACLs) live in the separate proxmox role.
+proxmox_host:
   enabled: false
-  # Whether this PVE node is part of a cluster (shared pmxcfs).
-  # Affects backup_jobs orchestration: true => one API call per cluster
-  # (run_once), false => one API call per node.
-  is_clustered: true
   # Repository type: enterprise (requires subscription) or no_subscription (free).
   repo: no_subscription
   # Remove the "no valid subscription" nag dialog from the web UI.
   remove_nag: true
   # Extra packages to install on the Proxmox host.
   extra_packages: []
+  # PCI passthrough / IOMMU.
+  iommu:
+    enabled: false
+    # intel or amd -- determines kernel parameter.
+    cpu_vendor: intel
+""",
+    'roles/proxmox_host/handlers/main.yml': """\
+---
+- name: Update apt cache
+  apt:
+    update_cache: true
+
+- name: Restart pveproxy
+  systemd:
+    name: pveproxy
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Update GRUB
+  command: update-grub
+  changed_when: false
+""",
+    'roles/proxmox_host/tasks/main.yml': """\
+---
+- name: Assert Proxmox runs on Debian
+  assert:
+    that: ansible_facts.os_family == 'Debian'
+    fail_msg: "The proxmox_host role only supports Debian-based Proxmox VE hosts"
+
+# -- Repository configuration -----------------------------------------------
+- name: Configure Proxmox no-subscription repository
+  apt_repository:
+    repo: "deb http://download.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-no-subscription"
+    filename: pve-no-subscription
+    state: present
+  when: proxmox_host.repo | default('no_subscription') == 'no_subscription'
+  notify: Update apt cache
+
+- name: Disable Proxmox enterprise repository
+  apt_repository:
+    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
+    filename: pve-enterprise
+    state: absent
+  when: proxmox_host.repo | default('no_subscription') == 'no_subscription'
+  notify: Update apt cache
+
+- name: Enable Proxmox enterprise repository
+  apt_repository:
+    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
+    filename: pve-enterprise
+    state: present
+  when: proxmox_host.repo | default('no_subscription') == 'enterprise'
+  notify: Update apt cache
+
+# -- Web UI subscription nag removal ----------------------------------------
+- name: Remove subscription nag from web UI
+  shell: |
+    sed -i.bak "s/Ext.Msg.show({/void({/g" \\
+      /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+  args:
+    creates: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js.bak
+  when: proxmox_host.remove_nag | default(true) | bool
+  notify: Restart pveproxy
+
+# -- Extra packages ----------------------------------------------------------
+- name: Install extra Proxmox packages
+  apt:
+    name: "{{ proxmox_host.extra_packages | default([]) }}"
+    state: present
+  when: proxmox_host.extra_packages | default([]) | length > 0
+
+# -- IOMMU / PCI passthrough ------------------------------------------------
+- name: Enable IOMMU in GRUB
+  lineinfile:
+    path: /etc/default/grub
+    regexp: "^GRUB_CMDLINE_LINUX_DEFAULT="
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet {{ "intel_iommu=on" if proxmox_host.iommu.cpu_vendor | default("intel") == "intel" else "amd_iommu=on" }} iommu=pt"'
+  when: proxmox_host.iommu.enabled | default(false) | bool
+  notify: Update GRUB
+
+- name: Load vfio modules
+  copy:
+    content: |
+      vfio
+      vfio_iommu_type1
+      vfio_pci
+      vfio_virqfd
+    dest: /etc/modules-load.d/vfio.conf
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  when: proxmox_host.iommu.enabled | default(false) | bool
+""",
+    # ------------------------------------------------------------------ #
+    #  proxmox role -- Proxmox VE cluster-config via API (mthibaut.proxmox)#
+    #  (backup jobs today, future: notifications, storage, users, ACLs)   #
+    # ------------------------------------------------------------------ #
+    'roles/proxmox/defaults/main.yml': """\
+---
+# Proxmox VE cluster-config (API-driven via mthibaut.proxmox).
+# Host-OS preparation concerns (apt, nag, IOMMU) live in proxmox_host.
+proxmox:
+  enabled: false
+  # Whether this PVE node is part of a cluster (shared pmxcfs).
+  # Affects backup_jobs orchestration: true => one API call per cluster
+  # (run_once), false => one API call per node.
+  is_clustered: true
   # API auth -- used for cluster-config calls (backup_jobs, future
   # notifications/storage/users). api.host defaults to inventory_hostname;
   # override if Ansible targets the node by IP/alias.
@@ -7970,85 +8078,16 @@ proxmox:
   #       enabled: true
   backup_jobs: {}
   backup_jobs_prefix: "ansible-"
-  # Cluster join configuration (optional). Different from is_clustered above:
-  # this drives 'pvecm add' on initial bootstrap. Leave name empty to skip.
-  cluster:
-    name: ""
-  # PCI passthrough / IOMMU.
-  iommu:
-    enabled: false
-    # intel or amd -- determines kernel parameter.
-    cpu_vendor: intel
-""",
-    'roles/proxmox/handlers/main.yml': """\
----
-- name: Update apt cache
-  apt:
-    update_cache: true
-
-- name: Restart pveproxy
-  systemd:
-    name: pveproxy
-    state: restarted
-    daemon_reload: true
-  when: not ansible_check_mode
-
-- name: Update GRUB
-  command: update-grub
-  changed_when: false
 """,
     'roles/proxmox/tasks/main.yml': """\
 ---
-- name: Assert Proxmox runs on Debian
-  assert:
-    that: ansible_facts.os_family == 'Debian'
-    fail_msg: "The proxmox role only supports Debian-based Proxmox VE hosts"
-
-# -- Repository configuration -----------------------------------------------
-- name: Configure Proxmox no-subscription repository
-  apt_repository:
-    repo: "deb http://download.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-no-subscription"
-    filename: pve-no-subscription
-    state: present
-  when: proxmox.repo | default('no_subscription') == 'no_subscription'
-  notify: Update apt cache
-
-- name: Disable Proxmox enterprise repository
-  apt_repository:
-    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
-    filename: pve-enterprise
-    state: absent
-  when: proxmox.repo | default('no_subscription') == 'no_subscription'
-  notify: Update apt cache
-
-- name: Enable Proxmox enterprise repository
-  apt_repository:
-    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
-    filename: pve-enterprise
-    state: present
-  when: proxmox.repo | default('no_subscription') == 'enterprise'
-  notify: Update apt cache
-
-# -- Web UI subscription nag removal ----------------------------------------
-- name: Remove subscription nag from web UI
-  shell: |
-    sed -i.bak "s/Ext.Msg.show({/void({/g" \\
-      /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
-  args:
-    creates: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js.bak
-  when: proxmox.remove_nag | default(true) | bool
-  notify: Restart pveproxy
-
-# -- Extra packages ----------------------------------------------------------
-- name: Install extra Proxmox packages
-  apt:
-    name: "{{ proxmox.extra_packages | default([]) }}"
-    state: present
-  when: proxmox.extra_packages | default([]) | length > 0
+# This role talks to the PVE cluster API via delegate_to: localhost.
+# It does NOT modify the play target's filesystem -- host-OS concerns
+# (apt, kernel modules, etc.) belong in the proxmox_host role.
+# Requires the mthibaut.proxmox collection (declared in requirements.yml)
+# and proxmoxer on the controller.
 
 # -- Backup jobs (API-driven, /etc/pve/jobs.cfg via /cluster/backup) -------
-# Requires the mthibaut.proxmox collection (declared in requirements.yml)
-# and proxmoxer on the controller (delegate_to: localhost).
 - name: Assert proxmox_api_token_secret is set when backup_jobs declared
   assert:
     that:
@@ -8091,28 +8130,6 @@ proxmox:
   delegate_to: localhost
   run_once: "{{ proxmox.is_clustered | default(true) | bool }}"
   when: proxmox.backup_jobs | default({}) | length > 0
-
-# -- IOMMU / PCI passthrough ------------------------------------------------
-- name: Enable IOMMU in GRUB
-  lineinfile:
-    path: /etc/default/grub
-    regexp: "^GRUB_CMDLINE_LINUX_DEFAULT="
-    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet {{ "intel_iommu=on" if proxmox.iommu.cpu_vendor | default("intel") == "intel" else "amd_iommu=on" }} iommu=pt"'
-  when: proxmox.iommu.enabled | default(false) | bool
-  notify: Update GRUB
-
-- name: Load vfio modules
-  copy:
-    content: |
-      vfio
-      vfio_iommu_type1
-      vfio_pci
-      vfio_virqfd
-    dest: /etc/modules-load.d/vfio.conf
-    owner: root
-    group: "{{ _root_group }}"
-    mode: "0644"
-  when: proxmox.iommu.enabled | default(false) | bool
 """,
     # ------------------------------------------------------------------ #
     #  pfSense role -- firewall/router configuration (FreeBSD/pfSense)     #
@@ -9878,6 +9895,12 @@ user_accounts: []
     - role: workloads
       tags: [workloads, containers]
       when: workloads | default([]) | length > 0
+    - role: proxmox_host
+      tags: [proxmox_host, hypervisor]
+      when: >
+        proxmox_host.enabled | default(false) | bool
+        or 'proxmox_host' in (_required_providers | default([]))
+        or 'hypervisor' in (_required_providers | default([]))
     - role: proxmox
       tags: [proxmox, hypervisor]
       when: >
