@@ -3502,3 +3502,280 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        PF regression expectation in `test_distro_conditionals.py` was
        updated to the new listener contract.
      - Validation: `make generate` and `make test` pass.
+
+220. `checkpoint-220-mailserver-ports-variable`
+     Adds `mailserver_ports` as the primary inventory variable for mail
+     firewall exposure while keeping backward compatibility with the
+     legacy `mailserver_open_ports` alias.
+     - `roles/mailserver/defaults/main.yml` now documents
+       `mailserver_ports` (numbers or `/etc/services` names) and maps
+       `mailserver.open_ports` from
+       `mailserver_ports | default(mailserver_open_ports | default(...))`.
+     - `roles/mailserver/templates/40-mailserver.nft.j2` now iterates
+       the `mailserver_ports`-driven value instead of hardcoding the
+       fallback list directly in the role-level variable.
+     - `src/templates/roles/firewall/pf.conf.j2` now uses the same
+       `mailserver_ports`-first expression so FreeBSD pf stays aligned.
+     - Tests: `test_mailserver_config.py` and the PF expectation in
+       `test_distro_conditionals.py` were updated to assert the new
+       `mailserver_ports` path and fallback chain.
+     - Validation: `make generate` passes; targeted mailserver tests
+       pass. Existing unrelated baseline failure remains in
+       `test_distro_conditionals.TestSshHardeningDistro.
+       test_common_defaults_expose_ssh_manage_toggle` due to
+       `pkg_manager_update_policy` expectation drift (`always` vs
+       generated `auto`).
+
+221. `checkpoint-221-tls-certificate-method-switch`
+     Adds a certificate-source switch so TLS vhosts can either use
+     certbot-managed Let's Encrypt paths or inventory/vault-specified
+     certificate files.
+     - New defaults in `roles/certbot/defaults/main.yml`:
+       `tls_certificate_method: certbot|inventory` (default `certbot`)
+       and `tls_inventory_certificates` mapping
+       (`<domain>.fullchain_path` / `<domain>.privkey_path`).
+     - `site.yml` now runs the `certbot` role only when
+       `tls_certificate_method == 'certbot'` and at least one service has
+       `security.tls: true`.
+     - `roles/nginx/tasks/render_service.yml` now resolves
+       `_tls_fullchain_path` / `_tls_privkey_path` per service based on
+       `tls_certificate_method`, checks the resolved cert path exists,
+       and emits method-aware failure guidance.
+     - All nginx vhost templates now use the resolved
+       `_tls_fullchain_path` and `_tls_privkey_path` values instead of
+       hardcoded Let's Encrypt live paths.
+     - Tests: `test_distro_conditionals.py` adds coverage for the new
+       switch defaults, certbot role gating, nginx TLS path resolution,
+       and template wiring. The stale `pkg_manager_update_policy`
+       expectation was also corrected (`always` -> `auto`) so the suite
+       matches current generated defaults.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+222. `checkpoint-222-selfsigned-certificate-method-default`
+     Extends the TLS certificate source switch with a first-class
+     `selfsigned` mode and makes it the default.
+     - `roles/certbot/defaults/main.yml` now documents three modes:
+       `selfsigned`, `certbot`, `inventory`, with default
+       `tls_certificate_method: selfsigned`.
+     - `roles/certbot/tasks/main.yml` now resolves
+       `_tls_certificate_method` and gates certbot-only tasks
+       (`certbot_email` assert, certbot package/hooks, DNS-01 issuance,
+       renewal cron) behind `when: _tls_certificate_method == 'certbot'`.
+     - Self-signed generation now runs when
+       `tls_certificate_method == 'selfsigned'`, and still supports the
+       legacy certbot-mode fallback behavior in non-production when
+       `certbot_selfsigned_fallback: true`.
+     - `site.yml` now runs the certificate role when TLS services exist
+       and `tls_certificate_method` is `certbot` or `selfsigned`.
+     - nginx certificate path resolution now defaults method handling to
+       `selfsigned` for non-inventory modes.
+     - Tests: `test_distro_conditionals.py` updated to assert the new
+       default mode, certbot gating, explicit self-signed behavior, and
+       site role gating for certbot/selfsigned paths.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+223. `checkpoint-223-stepca-certificate-method-placeholder`
+     Adds a reserved `stepca` certificate method to the TLS method switch
+     so operators can select it now while implementation is deferred.
+     - `roles/certbot/defaults/main.yml` now documents `stepca` as a
+       fourth `tls_certificate_method` option.
+     - `roles/certbot/tasks/main.yml` now validates
+       `tls_certificate_method` against the allowed set
+       (`selfsigned`, `certbot`, `inventory`, `stepca`) and fails fast
+       with an explicit "not implemented yet" message when `stepca` is
+       selected.
+     - `site.yml` certificate-role gating now includes `stepca` so the
+       placeholder failure path is evaluated for TLS-enabled services.
+     - Tests: `test_distro_conditionals.py` updated to assert
+       `stepca` appears in defaults, is included in site gating, and is
+       covered by the method-validation + deferred-implementation
+       failure checks.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+224. `checkpoint-224-tls-path-and-inventory-split`
+     Renames the old path-based `inventory` TLS mode to `path`, and
+     introduces a new `inventory` TLS mode that installs certificate
+     material directly from inventory/vault onto managed hosts.
+     - `tls_certificate_method` now supports:
+       `selfsigned`, `certbot`, `path`, `inventory`, `stepca`.
+     - `roles/certbot/defaults/main.yml` now defines:
+       `tls_path_certificates` (new path map),
+       `tls_inventory_certificates` (backward-compatible alias to
+       `tls_path_certificates`), and
+       `tls_inventory_certificate_material` (new PEM-content map with
+       `fullchain_pem`/`privkey_pem`).
+     - `roles/certbot/tasks/main.yml` now provisions inventory
+       certificate material in `inventory` mode by asserting required
+       PEM content per TLS-enabled service and writing
+       `fullchain.pem`/`privkey.pem` into `_le_dir/live/<domain>/`.
+     - `roles/nginx/tasks/render_service.yml` now treats `path` as the
+       path-based method (with backward compatibility for legacy
+       `tls_inventory_certificates` lookups) and emits method-specific
+       guidance for `path` vs `inventory`.
+     - `site.yml` cert-role gating now includes `inventory` so
+       inventory-provided key material is installed before nginx renders.
+     - Tests: `test_distro_conditionals.py` updated to assert new mode
+       list, new defaults variables, inventory-material installation
+       flow, updated site gating, and render-service references.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+225. `checkpoint-225-consumer-level-certificates`
+     Replaces the global TLS method switch with consumer-level
+     certificate selection for nginx services and mailserver.
+     - `roles/common/defaults/main.yml` now exposes a host-level
+       `certificates` registry for shared domain lists, path references,
+       and inventory/vault PEM material.
+     - Service TLS declarations now use
+       `security.tls.enabled`, `security.tls.method`, and optional
+       `security.tls.certificate`; `src/schemas/services.schema.json`
+       rejects the old boolean TLS shape.
+     - `roles/certbot/tasks/main.yml` now builds a de-duplicated
+       `_certificate_requests` list from nginx services plus
+       `mailserver.tls`, and applies `selfsigned`, `certbot`, `path`,
+       `inventory`, or reserved `stepca` per request.
+     - `roles/nginx/tasks/render_service.yml` resolves certificate paths
+       from the service's own TLS config and the shared `certificates`
+       registry instead of a global `tls_certificate_method`.
+     - `roles/mailserver/defaults/main.yml` adds flat
+       `mailserver_tls_*` variables, and the mailserver role now resolves
+       TLS cert paths for Postfix and Dovecot, verifies the certificate
+       exists, and renders `smtpd_tls_*` plus Dovecot `ssl_cert`/`ssl_key`
+       when mail TLS is enabled.
+     - The certbot renewal deploy hook now reloads common TLS consumers
+       (`nginx`, `postfix`, `dovecot`) when present.
+     - Tests: `test_distro_conditionals.py` covers certificate request
+       construction, per-request method gating, nginx path resolution, and
+       mailserver TLS wiring; `test_services_schema.py` covers the new TLS
+       object and rejects the old boolean form.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+226. `checkpoint-226-distro-native-managed-certificate-storage`
+     Moves Ansible-managed certificate material out of the Certbot
+     lineage tree and into distribution-native TLS storage locations.
+     - `certbot` method certificates continue to use Certbot's native
+       lineage directories:
+       `/etc/letsencrypt/live/<primary-domain>/` on Linux and
+       `/usr/local/etc/letsencrypt/live/<primary-domain>/` on FreeBSD.
+     - `inventory` and `selfsigned` method certificates now use
+       Ansible-owned directories under the native TLS cert/private tree:
+       `/etc/ssl/{certs,private}/ansible-enterprise/<certificate-name>/`
+       on Debian/Ubuntu/Arch/SUSE/FreeBSD-style systems, and
+       `/etc/pki/tls/{certs,private}/ansible-enterprise/<certificate-name>/`
+       on RedHat-family systems.
+     - `path` method certificates remain exact operator-provided paths.
+     - Mailserver and nginx TLS path resolution now distinguish
+       `certbot` from Ansible-managed methods when constructing
+       `fullchain.pem` and `privkey.pem` paths.
+     - Docs now show the on-disk layout for Certbot-owned,
+       Ansible-owned, and path-supplied certificates.
+     - Tests: `test_distro_conditionals.py` covers the documented
+       managed storage locations, method-specific path resolution, and
+       the split between managed self-signed certs and certbot fallback
+       certs.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+227. `checkpoint-227-registry-owned-certificate-method`
+     Makes the certificate registry the sole owner of certificate
+     materialization method and key material.
+     - `certificates.<name>.method` now selects `selfsigned`,
+       `certbot`, `path`, `inventory`, or reserved `stepca`.
+     - TLS consumers now only reference certificate names:
+       nginx services use `security.tls.certificate`, and mailserver
+       uses `mailserver_tls_certificate` / `mailserver.tls.certificate`.
+       Consumers no longer set `method`, PEM material, or path
+       overrides.
+     - `roles/certbot/tasks/main.yml` now builds certificate requests
+       from registry-owned methods and material only, preventing two
+       consumers of the same certificate/key pair from disagreeing about
+       how it is produced.
+     - `roles/nginx/tasks/render_service.yml` and
+       `roles/mailserver/tasks/main.yml` resolve paths from the selected
+       certificate registry entry rather than consumer TLS blocks.
+     - `src/schemas/services.schema.json` rejects per-service TLS
+       `method`, PEM, and path fields.
+     - Tests: `test_distro_conditionals.py` covers registry-owned
+       method lookup and absence of consumer method overrides;
+       `test_services_schema.py` rejects per-service method/material
+       declarations.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+228. `checkpoint-228-no-log-certificate-secret-material`
+     Prevents certificate private keys and DNS TSIG secrets from leaking
+     into Ansible output.
+     - `_certificate_requests` no longer carries `fullchain_pem` or
+       `privkey_pem`, so shared loop items cannot expose PEM material
+       on unrelated task failures.
+     - Inventory certificate PEM content is read directly from
+       `certificates.<name>` only inside the material assertion and copy
+       tasks.
+     - Inventory PEM assertion, fullchain copy, and private-key copy are
+       marked `no_log: true`, preventing diff/verbose output from
+       printing supplied PEM content.
+     - Certbot TSIG secret resolution, assertion, and key-file rendering
+       are marked `no_log: true`.
+     - Tests: `test_distro_conditionals.py` asserts `_certificate_requests`
+       does not store PEM material and that all secret-bearing certbot
+       tasks are `no_log`.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+229. `checkpoint-229-trusted-root-certificates`
+     Adds host-level installation of trusted root/intermediate CA
+     certificates through the common role.
+     - `roles/common/defaults/main.yml` now exposes
+       `trusted_root_certificates`, a mapping of trust-anchor names to
+       exactly one material source: inline `pem`, controller-side `src`,
+       or managed-host `remote_src`.
+     - `roles/common/tasks/main.yml` validates the registry shape,
+       installs the distro-appropriate CA package, writes roots into the
+       native OS trust anchor directory, and refreshes the trust store.
+     - Supported trust-store layouts:
+       `/usr/local/share/ca-certificates` for Debian/Ubuntu/Alpine/Gentoo,
+       `/etc/pki/ca-trust/source/anchors` for RedHat-family systems,
+       `/etc/ca-certificates/trust-source/anchors` for Arch,
+       `/etc/pki/trust/anchors` for openSUSE/SLES, and
+       `/usr/local/share/certs` for FreeBSD.
+     - Inline PEM installation is `no_log: true`.
+     - Docs: `docs/roles/common.md` documents examples and on-disk
+       locations.
+     - Tests: `test_distro_conditionals.py` covers defaults
+       documentation, validation, all three material sources,
+       distro paths/package names, and trust-store refresh commands.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
+
+230. `checkpoint-230-proxmox-api-backup-jobs`
+     Migrates Proxmox backup scheduling from legacy host-local `vzdump`
+     cron management to the Proxmox cluster backup-job API.
+     - `requirements.yml` now includes `community.proxmox` and the
+       sibling `mthibaut.proxmox` collection that provides
+       `proxmox_backup_job`.
+     - `roles/proxmox/defaults/main.yml` removes the old
+       `proxmox.backup.*` block and exposes `proxmox.api`,
+       `proxmox.backup_jobs`, `proxmox.backup_jobs_prefix`, and
+       `proxmox.is_clustered`.
+     - `roles/proxmox/tasks/main.yml` removes the `vzdump-backup` cron,
+       `_proxmox_vmids`, `_vzdump_cmd`, and `vzdump.conf.j2`
+       deployment flow. It now asserts `proxmox_api_token_secret` when
+       backup jobs are declared, then delegates `mthibaut.proxmox`
+       API calls to localhost.
+     - Backup job IDs are strict `{{ proxmox.backup_jobs_prefix }}{{ key }}`
+       values, defaulting to `ansible-<key>`, and comments default to
+       "Managed by Ansible (proxmox role) -- do not edit in web UI".
+     - Backup job management is intentionally additive-only: removing a
+       job from YAML does not delete it. Per-entry `state: absent` is the
+       only deletion mechanism.
+     - The legacy `roles/proxmox/templates/vzdump.conf.j2` manifest entry
+       and generation-contract entry are removed.
+     - Tests: `test_proxmox.py` covers collection requirements, defaults,
+       API-token assertion, job ID/comment defaults, additive-only
+       invariants, and removal of the legacy `vzdump.conf.j2` template.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.

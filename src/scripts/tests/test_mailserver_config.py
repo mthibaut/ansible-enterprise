@@ -9,7 +9,7 @@ Covers:
 - relay_domains absent when list is empty
 - Both new keys present in defaults dict
 - Flat variable documentation present in defaults
-- Mailserver firewall drop-in matches the generated mail protocol listeners
+- Mailserver firewall templates derive from mailserver_ports
 """
 import pathlib
 import unittest
@@ -86,6 +86,13 @@ class TestMailserverDefaults(unittest.TestCase):
         text = _read(self.DEFAULTS)
         self.assertIn("mailserver_local_domains", text)
         self.assertIn("mailserver_relay_domains", text)
+        self.assertIn("mailserver_ports", text)
+        self.assertIn("mailserver_open_ports", text)
+
+    def test_open_ports_default_present(self):
+        text = _read(self.DEFAULTS)
+        self.assertIn("open_ports", text)
+        self.assertIn("mailserver_ports | default(mailserver_open_ports | default([25, 587, 143, 465]))", text)
 
 
 class TestMailserverFirewallTemplate(unittest.TestCase):
@@ -93,19 +100,21 @@ class TestMailserverFirewallTemplate(unittest.TestCase):
     TEMPLATE = "roles/mailserver/templates/40-mailserver.nft.j2"
     PF_TEMPLATE = "roles/firewall/templates/pf.conf.j2"
 
-    def test_firewall_opens_smtp_submission_imap_and_smtps(self):
+    def test_nft_firewall_uses_open_ports_variable(self):
         text = _read(self.TEMPLATE)
-        for port in ("25", "587", "143", "465"):
-            self.assertIn(f"tcp dport {port}", text)
+        self.assertIn("mailserver_ports", text)
+        self.assertIn("for _port in", text)
 
-    def test_firewall_does_not_open_imaps_when_dovecot_ssl_is_disabled(self):
+    def test_nft_firewall_default_port_list_omits_stale_imaps(self):
         text = _read(self.TEMPLATE)
-        self.assertNotIn("tcp dport 993", text)
+        self.assertIn("default([25, 587, 143, 465])", text)
+        self.assertNotIn("default([25, 587, 465, 993])", text)
 
-    def test_pf_firewall_uses_same_mail_ports(self):
+    def test_pf_firewall_uses_open_ports_variable(self):
         text = _read(self.PF_TEMPLATE)
-        self.assertIn("port { 25, 587, 465, 143 }", text)
-        self.assertNotIn("port { 25, 587, 465, 993 }", text)
+        self.assertIn("mailserver_ports", text)
+        self.assertIn("join(', ')", text)
+        self.assertIn("mailserver_ports | default(mailserver.open_ports | default([25, 587, 143, 465]))", text)
 
 
 if __name__ == "__main__":

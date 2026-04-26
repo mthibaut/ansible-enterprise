@@ -2,6 +2,12 @@
 
 Creates one or more WireGuard interfaces from `wireguard_instances`.
 
+This role is the deployment layer. It expects WireGuard interface data to
+already exist in inventory and is responsible for installing packages,
+rendering host config on the target, enabling services, and integrating with
+firewalling. It does not need to be the long-term owner of topology parsing or
+key-generation workflows.
+
 `group_vars` example:
 ```yaml
 wireguard_instances:
@@ -26,7 +32,7 @@ wireguard_instances:
 vault_wireguard_private_key: "BASE64PRIVATEKEY"
 ```
 
-Topology-driven generation is also available via
+Topology-driven generation is currently also available via
 [wireguard_topology_render.py](/Users/mthibaut/install/chat-gpt-out/ansible-enterprise/src/scripts/wireguard_topology_render.py).
 It compiles a topology YAML into:
 
@@ -43,3 +49,13 @@ Example:
 ```
 
 Use `--rotate <network>` to force-regenerate keys and PSKs for one network.
+
+Recommended ownership boundary for publishing:
+
+- `wireguard` repository: source of truth for topology parsing, key lifecycle,
+  `wg-quick` output, netplan output, and WireGuard-related inventory fragments
+- `ansible-enterprise`: source of truth for the host-side role that consumes
+  `wireguard_instances` and deploys the resulting configuration
+
+If both projects are published, prefer the standalone `wireguard` repository as
+the public topology compiler and keep this role focused on deployment.

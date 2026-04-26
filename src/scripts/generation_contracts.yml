@@ -523,10 +523,6 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
-  roles/proxmox/templates/vzdump.conf.j2:
-    source_of_truth:
-      - PROMPT.md
-      - generate_ansible_enterprise.py
   roles/pfsense/defaults/main.yml:
     source_of_truth:
       - PROMPT.md

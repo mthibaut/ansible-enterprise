@@ -155,7 +155,7 @@ FILE_MANIFEST: Dict[str, str] = {
 #     domain: prometheus.example.com
 #     port: 9090           # upstream port; nginx proxies to 127.0.0.1:9090
 #     security:
-#       tls: true
+#       tls: {enabled: true, certificate: prometheus.example.com}
 #       expose_https: true
 #       access_allowlist: [10.0.0.0/8]
 #       geoip_allowlist:  [10.0.0.0/8]
@@ -165,7 +165,7 @@ FILE_MANIFEST: Dict[str, str] = {
 #     domain: grafana.example.com
 #     port: 3000           # upstream port; nginx proxies to 127.0.0.1:3000
 #     security:
-#       tls: true
+#       tls: {enabled: true, certificate: grafana.example.com}
 #       expose_https: true
 #       access_allowlist: [10.0.0.0/8]
 #       geoip_allowlist:  [10.0.0.0/8]
@@ -177,7 +177,7 @@ FILE_MANIFEST: Dict[str, str] = {
 #     aliases: [www.myapp.example.com]  # SNI aliases -> same backend
 #     owner: myapp         # Unix user for web root ownership
 #     security:
-#       tls: true
+#       tls: {enabled: true, certificate: myapp.example.com}
 #     web:
 #       upstream_host: 10.0.0.5
 #       upstream_port: 8080
@@ -262,6 +262,12 @@ nextcloud_db_root_password: "CHANGE_ME"
 
 # -- Grafana (requires grafana_enabled: true) -------------------------
 grafana_admin_password: "CHANGE_ME"
+
+# -- Proxmox API token (required when proxmox.backup_jobs is non-empty) -----
+# Create on the PVE host:
+#   pveum user token add root@pam ansible --privsep=0
+# The 'value' shown once is the secret -- store it here.
+# proxmox_api_token_secret: "00000000-0000-0000-0000-000000000000"
 """,
     'inventory/group_vars/.gitkeep': """\
 """,
@@ -363,7 +369,7 @@ provisioner:
             domain: testapp.example.com
             owner: www-data
             security:
-              tls: false
+              tls: {enabled: false}
               expose_http: true
               expose_https: false
               require_client_cert: false
@@ -375,7 +381,7 @@ provisioner:
             domain: nextcloud.example.com
             owner: nextcloud
             security:
-              tls: false
+              tls: {enabled: false}
               expose_http: true
               expose_https: false
               require_client_cert: false
@@ -579,6 +585,8 @@ collections:
   - name: ansible.posix
   - name: community.crypto
   - name: community.mysql
+  - name: community.proxmox
+  - name: mthibaut.proxmox
 """,
     'roles/common/defaults/main.yml': """\
 ---
@@ -693,12 +701,12 @@ pkg_manager_mirror: {}
 
 # Package metadata refresh policy before roles run.
 # Valid values:
-#   always - eager refresh on every run (current behavior)
+#   always - eager refresh on every run
 #   auto   - use package-manager-native lightweight refresh when available
-#            (APT cache_valid_time); skip eager refresh on managers without
-#            a safe lightweight equivalent
+#            (APT cache_valid_time, FreeBSD pkg repo autoupdate); skip eager
+#            pre-task refresh on managers without a safe lightweight equivalent
 #   never  - do not refresh metadata in site.yml pre_tasks
-pkg_manager_update_policy: always
+pkg_manager_update_policy: auto
 
 # Cache validity window in seconds for package managers that support TTL-based
 # refresh behavior in auto mode (currently APT).
@@ -708,6 +716,58 @@ pkg_manager_update_valid_time: 3600
 # or host_vars. Each entry drives nginx, DNS, TLS, and firewall config.
 # See group_vars/all/main.yml for examples.
 services: {}
+
+# Certificate registry. Consumers choose a certificate by name. Registry entries
+# define how that certificate is materialized and provide shared metadata and
+# material for path/inventory modes.
+#
+# On-disk layout:
+#   method: certbot
+#     Linux:   /etc/letsencrypt/live/<primary-domain>/{fullchain,privkey}.pem
+#     FreeBSD: /usr/local/etc/letsencrypt/live/<primary-domain>/{fullchain,privkey}.pem
+#   method: inventory or selfsigned
+#     Debian/Arch/SUSE/FreeBSD/etc:
+#       /etc/ssl/certs/ansible-enterprise/<certificate-name>/fullchain.pem
+#       /etc/ssl/private/ansible-enterprise/<certificate-name>/privkey.pem
+#     RedHat family:
+#       /etc/pki/tls/certs/ansible-enterprise/<certificate-name>/fullchain.pem
+#       /etc/pki/tls/private/ansible-enterprise/<certificate-name>/privkey.pem
+#   method: path
+#     Uses certificates.<name>.fullchain_path and privkey_path exactly.
+#
+# certificates:
+#   app.example.com:
+#     method: certbot
+#     domains: [app.example.com, www.app.example.com]
+#   mail.example.com:
+#     method: inventory
+#     domains: [mail.example.com]
+#     fullchain_pem: "{{ vault_mail_fullchain_pem }}"
+#     privkey_pem: "{{ vault_mail_privkey_pem }}"
+#   existing.example.com:
+#     method: path
+#     domains: [existing.example.com]
+#     fullchain_path: /etc/ssl/existing/fullchain.pem
+#     privkey_path: /etc/ssl/existing/privkey.pem
+certificates: {}
+
+# Trusted root / intermediate CA certificates to install into the host OS trust
+# store. These are trust anchors for clients on the managed host, not leaf
+# server certificates for nginx/mailserver.
+#
+# Each entry must define exactly one material source:
+#   pem         - inline PEM content from inventory/vault
+#   src         - controller-side file copied to the managed host
+#   remote_src  - existing file path on the managed host
+#
+# trusted_root_certificates:
+#   corp-root:
+#     pem: "{{ vault_corp_root_ca_pem }}"
+#   lab-root:
+#     src: files/lab-root-ca.crt
+#   existing-root:
+#     remote_src: /opt/ca/root.pem
+trusted_root_certificates: {}
 
 # Provider mapping for the capabilities dispatch layer.
 # Maps capability names to the Ansible role that satisfies each one.
@@ -776,6 +836,13 @@ geoip:
 #                                   Mail for these domains is forwarded, not
 #                                   delivered locally.
 #                                   Example: [subsidiary.example.com]
+#   mailserver_ports:               Mail listener ports/services to expose in
+#                                   the firewall for this host's mail services.
+#                                   Accepts numbers and /etc/services names.
+#                                   Default: [25, 587, 143, 465]
+#   mailserver_open_ports:          DEPRECATED alias for mailserver_ports.
+#   mailserver_tls_enabled:         Enable TLS for Postfix/Dovecot.
+#   mailserver_tls_certificate:     Certificate registry key; defaults to domain.
 mailserver:
   enabled: "{{ mailserver_enabled | default(false) | bool }}"
   domain: "{{ mailserver_domain | default('mail.example.com') }}"
@@ -787,6 +854,10 @@ mailserver:
   masquerade_hosts: "{{ mailserver_masquerade_hosts | default([]) }}"
   local_domains: "{{ mailserver_local_domains | default([]) }}"
   relay_domains: "{{ mailserver_relay_domains | default([]) }}"
+  open_ports: "{{ mailserver_ports | default(mailserver_open_ports | default([25, 587, 143, 465])) }}"
+  tls:
+    enabled: "{{ mailserver_tls_enabled | default(false) | bool }}"
+    certificate: "{{ mailserver_tls_certificate | default(mailserver_domain | default('mail.example.com')) }}"
 """,
     'roles/file_copy/defaults/main.yml': """\
 ---
@@ -896,6 +967,34 @@ file_copy_items: []
 """,
     'roles/certbot/defaults/main.yml': """\
 ---
+# Certificate methods are selected by the shared certificates registry:
+#   certificates.<name>.method
+#
+# Consumers only reference a certificate:
+#   services.<name>.security.tls.certificate
+#   mailserver.tls.certificate
+#
+# Supported methods:
+#   selfsigned - generate self-signed certs on-host when missing
+#   certbot    - obtain/renew certs via DNS-01
+#   path       - use certificate/key paths declared on certificates.<name>
+#   inventory  - install certificate/key PEM content from certificates.<name>
+#   stepca     - reserved for future step-ca integration (not implemented yet)
+#
+# On-disk layout:
+#   certbot:
+#     Linux:   /etc/letsencrypt/live/<primary-domain>/fullchain.pem
+#     FreeBSD: /usr/local/etc/letsencrypt/live/<primary-domain>/fullchain.pem
+#   inventory/selfsigned:
+#     Most systems:
+#       /etc/ssl/certs/ansible-enterprise/<certificate-name>/fullchain.pem
+#       /etc/ssl/private/ansible-enterprise/<certificate-name>/privkey.pem
+#     RedHat family:
+#       /etc/pki/tls/certs/ansible-enterprise/<certificate-name>/fullchain.pem
+#       /etc/pki/tls/private/ansible-enterprise/<certificate-name>/privkey.pem
+#   path:
+#     Uses certificates.<name>.fullchain_path and privkey_path exactly.
+
 # Email for Let's Encrypt registration and expiry notices.
 # Must be set - the certbot role will fail fast if empty.
 certbot_email: ""
@@ -978,19 +1077,182 @@ certbot_selfsigned_days: 365
 """,
     'roles/certbot/tasks/main.yml': """\
 ---
+# Set certificate storage directories.
+# Certbot owns its native lineage tree. Ansible-owned inventory/self-signed
+# material is stored in the distribution's conventional TLS cert/private tree.
+- name: Set TLS certificate storage directories
+  set_fact:
+    _le_dir: "{{ '/usr/local/etc/letsencrypt' if ansible_facts.os_family == 'FreeBSD' else '/etc/letsencrypt' }}"
+    _ae_tls_cert_dir: "{{ '/etc/pki/tls/certs/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/certs/ansible-enterprise' }}"
+    _ae_tls_private_dir: "{{ '/etc/pki/tls/private/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/private/ansible-enterprise' }}"
+
+- name: Build certificate request list
+  set_fact:
+    _certificate_requests: >-
+      {%- set ns = namespace(items=[]) -%}
+      {%- for _svc in services | default({}) | dict2items | sort(attribute='key') -%}
+      {%-   set _tls = (_svc.value.security | default({})).tls | default({}) -%}
+      {%-   if _svc.value.enabled | default(false) | bool and _tls.enabled | default(false) | bool -%}
+      {%-     set _name = _tls.certificate | default(_svc.value.domain) -%}
+      {%-     set _cert = (certificates | default({})).get(_name, {}) -%}
+      {%-     set _domains = _cert.domains | default([_svc.value.domain] + (_svc.value.aliases | default([]))) -%}
+      {%-     if _name not in (ns.items | map(attribute='name') | list) -%}
+      {%-       set _ = ns.items.append({
+                'name': _name,
+                'consumer': 'service:' ~ _svc.key,
+                'storage_name': _name | regex_replace('[^A-Za-z0-9_.-]', '_'),
+                'primary_domain': _domains[0],
+                'domains': _domains,
+                'method': _cert.method | default('selfsigned'),
+                'fullchain_path': _cert.fullchain_path | default(''),
+                'privkey_path': _cert.privkey_path | default('')
+              }) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set _mail_tls = mailserver.tls | default({}) -%}
+      {%- if mailserver.enabled | default(false) | bool and _mail_tls.enabled | default(false) | bool -%}
+      {%-   set _name = _mail_tls.certificate | default(mailserver.domain) -%}
+      {%-   set _cert = (certificates | default({})).get(_name, {}) -%}
+      {%-   set _domains = _cert.domains | default([mailserver.domain]) -%}
+      {%-   if _name not in (ns.items | map(attribute='name') | list) -%}
+      {%-     set _ = ns.items.append({
+              'name': _name,
+              'consumer': 'mailserver',
+              'storage_name': _name | regex_replace('[^A-Za-z0-9_.-]', '_'),
+              'primary_domain': _domains[0],
+              'domains': _domains,
+              'method': _cert.method | default('selfsigned'),
+              'fullchain_path': _cert.fullchain_path | default(''),
+              'privkey_path': _cert.privkey_path | default('')
+            }) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ ns.items | to_json | from_json }}
+
+- name: Assert certificate methods are supported
+  assert:
+    that:
+      - item.method in ['selfsigned', 'certbot', 'path', 'inventory', 'stepca']
+    fail_msg: >
+      TLS certificate method for {{ item.consumer }} must be one of:
+      selfsigned, certbot, path, inventory, stepca.
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.name }}"
+
+- name: Fail for unimplemented step-ca certificate method
+  fail:
+    msg: >
+      TLS certificate method stepca is reserved but not implemented yet
+      for {{ item.consumer }} certificate {{ item.name }}.
+      Use selfsigned, certbot, or inventory for now.
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.name }}"
+  when: item.method == 'stepca'
+
+- name: Ensure managed certificate root exists
+  file:
+    path: "{{ _ae_tls_cert_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: "{{ _root_group }}"
+  when: >
+    _certificate_requests
+    | selectattr('method', 'in', ['inventory', 'selfsigned'])
+    | list
+    | length > 0
+
+- name: Ensure managed private key root exists
+  file:
+    path: "{{ _ae_tls_private_dir }}"
+    state: directory
+    mode: "0700"
+    owner: root
+    group: "{{ _root_group }}"
+  when: >
+    _certificate_requests
+    | selectattr('method', 'in', ['inventory', 'selfsigned'])
+    | list
+    | length > 0
+
+- name: Ensure managed certificate directory exists per certificate
+  file:
+    path: "{{ _ae_tls_cert_dir }}/{{ item.storage_name }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: "{{ _root_group }}"
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.name }}"
+  when: item.method in ['inventory', 'selfsigned']
+
+- name: Ensure managed private key directory exists per certificate
+  file:
+    path: "{{ _ae_tls_private_dir }}/{{ item.storage_name }}"
+    state: directory
+    mode: "0700"
+    owner: root
+    group: "{{ _root_group }}"
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.name }}"
+  when: item.method in ['inventory', 'selfsigned']
+
+- name: Assert inventory certificate material is defined
+  assert:
+    that:
+      - (certificates | default({})).get(item.name, {}).get('fullchain_pem', '') | length > 0
+      - (certificates | default({})).get(item.name, {}).get('privkey_pem', '') | length > 0
+    fail_msg: >
+      TLS inventory method for {{ item.consumer }} certificate {{ item.name }}
+      requires fullchain_pem and privkey_pem in certificates.{{ item.name }}.
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.name }}"
+  when: item.method == 'inventory'
+  no_log: true
+
+- name: Install inventory fullchain certificate
+  copy:
+    dest: "{{ _ae_tls_cert_dir }}/{{ item.storage_name }}/fullchain.pem"
+    content: "{{ (certificates | default({})).get(item.name, {}).get('fullchain_pem', '') }}"
+    mode: "0644"
+    owner: root
+    group: "{{ _root_group }}"
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.primary_domain }}"
+  when: item.method == 'inventory'
+  no_log: true
+  notify: Reload nginx
+
+- name: Install inventory private key
+  copy:
+    dest: "{{ _ae_tls_private_dir }}/{{ item.storage_name }}/privkey.pem"
+    content: "{{ (certificates | default({})).get(item.name, {}).get('privkey_pem', '') }}"
+    mode: "0600"
+    owner: root
+    group: "{{ _root_group }}"
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.primary_domain }}"
+  when: item.method == 'inventory'
+  no_log: true
+  notify: Reload nginx
+
 - name: Assert certbot_email is set
   assert:
     that: certbot_email | length > 0
     fail_msg: >
       certbot_email must be set in group_vars or vault.
       Used for Let's Encrypt registration and expiry notices.
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
-# Set letsencrypt base directory (py311-certbot on FreeBSD uses /usr/local/etc/letsencrypt)
-- name: Set letsencrypt base directory
-  set_fact:
-    _le_dir: "{{ '/usr/local/etc/letsencrypt' if ansible_facts.os_family == 'FreeBSD' else '/etc/letsencrypt' }}"
-
-# Resolve effective DNS update method from the new variable or the legacy alias.
+# Resolve effective DNS update method from the configured variable.
 - name: Resolve certbot DNS update method
   set_fact:
     _certbot_dns_method: >-
@@ -1001,6 +1263,7 @@ certbot_selfsigned_days: 365
       {%- else -%}
       none
       {%- endif %}
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 # Resolve nsupdate target from dns.zones when available.
 # Prefers remote_primary zones (certbot pushes to remote BIND),
@@ -1032,7 +1295,8 @@ certbot_selfsigned_days: 365
         {%- set _varname = 'dns_tsig_' + (certbot_tsig_key_name | replace('-', '_')) + '_secret' -%}
         {{- _hvars[_varname] | default(certbot_tsig_secret | default('')) -}}
       {%- endif %}
-  when: _certbot_dns_method in ['local', 'nsupdate']
+  when: _certbot_dns_method | default('none') in ['local', 'nsupdate']
+  no_log: true
 
 - name: Debug certbot nsupdate resolution
   debug:
@@ -1042,7 +1306,7 @@ certbot_selfsigned_days: 365
       secret_length={{ _certbot_nsupdate_secret | default('') | length }}
       zones_with_allow_update={{ dns.zones | default([]) | selectattr('allow_update', 'defined') | list | length }}
       certbot_tsig_key_name={{ certbot_tsig_key_name | default('UNSET') }}
-  when: _certbot_dns_method in ['local', 'nsupdate']
+  when: _certbot_dns_method | default('none') in ['local', 'nsupdate']
 
 - name: Assert certbot tsig secret is set when using nsupdate
   assert:
@@ -1052,7 +1316,8 @@ certbot_selfsigned_days: 365
       is local or nsupdate. Set certbot_tsig_secret or
       dns_tsig_<keyname>_secret (matching dns.tsig_keys[].name).
       Generate: tsig-keygen -a hmac-sha512 certbot-acme
-  when: _certbot_dns_method in ['local', 'nsupdate']
+  when: _certbot_dns_method | default('none') in ['local', 'nsupdate']
+  no_log: true
 
 # bind9-dnsutils (Debian) and bind-utils (RedHat) both provide dig and
 # nsupdate. dig is used by the domain resolution assertion task; nsupdate
@@ -1065,11 +1330,13 @@ certbot_selfsigned_days: 365
       {%- elif ansible_facts.os_family == 'FreeBSD' -%}bind-tools
       {%- else -%}bind-utils{%- endif %}
     state: present
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 - name: Install certbot
   package:
     name: "{{ 'py311-certbot' if ansible_facts.os_family == 'FreeBSD' else 'certbot' }}"
     state: present
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 - name: Ensure hook and renewal directories exist
   file:
@@ -1081,6 +1348,7 @@ certbot_selfsigned_days: 365
   loop:
     - "{{ certbot_hook_dir }}"
     - "{{ '/usr/local/etc/letsencrypt/renewal-hooks/deploy' if ansible_facts.os_family == 'FreeBSD' else '/etc/letsencrypt/renewal-hooks/deploy' }}"
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 - name: Deploy TSIG key file for nsupdate
   template:
@@ -1089,7 +1357,8 @@ certbot_selfsigned_days: 365
     mode: "0400"
     owner: root
     group: "{{ _root_group }}"
-  when: _certbot_dns_method in ['local', 'nsupdate']
+  when: _certbot_dns_method | default('none') in ['local', 'nsupdate']
+  no_log: true
 
 - name: Deploy DNS auth hook script
   template:
@@ -1098,6 +1367,7 @@ certbot_selfsigned_days: 365
     mode: "0750"
     owner: root
     group: "{{ _root_group }}"
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 - name: Deploy DNS cleanup hook script
   template:
@@ -1106,6 +1376,7 @@ certbot_selfsigned_days: 365
     mode: "0750"
     owner: root
     group: "{{ _root_group }}"
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 - name: Deploy nginx reload hook for post-renewal
   template:
@@ -1114,6 +1385,7 @@ certbot_selfsigned_days: 365
     mode: "0750"
     owner: root
     group: "{{ _root_group }}"
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 # Certificate issuance block.
 # certbot_fail_hard=true (default): any failure halts the play.
@@ -1125,16 +1397,14 @@ certbot_selfsigned_days: 365
   block:
 
     - name: Assert domain resolves to this host
-      command: dig +short {{ item.value.domain }} A
+      command: dig +short {{ item.primary_domain }} A
       register: _dig_result
       failed_when: ansible_facts.default_ipv4.address not in _dig_result.stdout
       changed_when: false
-      loop: "{{ services | dict2items | sort(attribute='key') }}"
+      loop: "{{ _certificate_requests }}"
       loop_control:
-        label: "{{ item.value.domain }}"
-      when:
-        - item.value.enabled | default(false) | bool
-        - item.value.security.tls | default(false) | bool
+        label: "{{ item.consumer }} -> {{ item.primary_domain }}"
+      when: item.method == 'certbot'
 
     - name: Issue TLS certificate via DNS-01
       command: >
@@ -1147,16 +1417,13 @@ certbot_selfsigned_days: 365
         --manual-auth-hook {{ certbot_hook_dir }}/dns-auth.sh
         --manual-cleanup-hook {{ certbot_hook_dir }}/dns-cleanup.sh
         {{ '--staging' if certbot_staging | bool else '' }}
-        -d {{ item.value.domain }}
-        {% for _alias in item.value.aliases | default([]) %}-d {{ _alias }} {% endfor %}
+        {% for _domain in item.domains %}-d {{ _domain }} {% endfor %}
       args:
-        creates: "{{ _le_dir }}/live/{{ item.value.domain }}/fullchain.pem"
-      loop: "{{ services | dict2items | sort(attribute='key') }}"
+        creates: "{{ _le_dir }}/live/{{ item.primary_domain }}/fullchain.pem"
+      loop: "{{ _certificate_requests }}"
       loop_control:
-        label: "{{ item.value.domain }}"
-      when:
-        - item.value.enabled | default(false) | bool
-        - item.value.security.tls | default(false) | bool
+        label: "{{ item.consumer }} -> {{ item.primary_domain }}"
+      when: item.method == 'certbot'
 
   rescue:
 
@@ -1174,48 +1441,60 @@ certbot_selfsigned_days: 365
       fail:
         msg: Certificate issuance failed. See previous debug message for causes.
       when: certbot_fail_hard | default(true) | bool
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 
 
-# Self-signed certificate fallback.
-# Runs after the LE block so it only generates certs that do not already
-# exist (either because LE succeeded - creates: sentinel - or because a
-# self-signed cert was previously generated).
-# Guard: never runs in production even if certbot_selfsigned_fallback
-# is somehow set, because that would silently replace a failed LE cert
-# with an untrusted cert and nginx would serve it to real users.
-- name: Ensure Let's Encrypt directory exists for self-signed cert
-  file:
-    path: "{{ _le_dir }}/live/{{ item.value.domain }}"
-    state: directory
-    mode: "0755"
-    owner: root
-    group: "{{ _root_group }}"
-  loop: "{{ services | dict2items | sort(attribute='key') }}"
-  loop_control:
-    label: "{{ item.value.domain }}"
-  when:
-    - item.value.enabled | default(false) | bool
-    - item.value.security.tls | default(false) | bool
-    - certbot_selfsigned_fallback | bool
-    - deployment_environment | default('production') != 'production'
-
-- name: Generate self-signed certificate at Let's Encrypt path
+# Self-signed certificate mode/fallback.
+# - method: selfsigned -> always manage self-signed certs
+# - method: certbot    -> optional fallback in non-production
+- name: Generate managed self-signed certificate
   command: >
     openssl req -x509 -nodes
     -days {{ certbot_selfsigned_days }}
     -newkey rsa:2048
-    -keyout {{ _le_dir }}/live/{{ item.value.domain }}/privkey.pem
-    -out {{ _le_dir }}/live/{{ item.value.domain }}/fullchain.pem
-    -subj "/CN={{ item.value.domain }}"
-    -addext "subjectAltName=DNS:{{ item.value.domain }}{% for _alias in item.value.aliases | default([]) %},DNS:{{ _alias }}{% endfor %}"
+    -keyout {{ _ae_tls_private_dir }}/{{ item.storage_name }}/privkey.pem
+    -out {{ _ae_tls_cert_dir }}/{{ item.storage_name }}/fullchain.pem
+    -subj "/CN={{ item.primary_domain }}"
+    -addext "subjectAltName={% for _domain in item.domains %}DNS:{{ _domain }}{% if not loop.last %},{% endif %}{% endfor %}"
   args:
-    creates: "{{ _le_dir }}/live/{{ item.value.domain }}/fullchain.pem"
-  loop: "{{ services | dict2items | sort(attribute='key') }}"
+    creates: "{{ _ae_tls_cert_dir }}/{{ item.storage_name }}/fullchain.pem"
+  loop: "{{ _certificate_requests }}"
   loop_control:
-    label: "{{ item.value.domain }}"
+    label: "{{ item.consumer }} -> {{ item.primary_domain }}"
+  when: item.method == 'selfsigned'
+  notify: Reload nginx
+
+- name: Ensure Let's Encrypt directory exists for certbot self-signed fallback
+  file:
+    path: "{{ _le_dir }}/live/{{ item.primary_domain }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: "{{ _root_group }}"
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.primary_domain }}"
   when:
-    - item.value.enabled | default(false) | bool
-    - item.value.security.tls | default(false) | bool
+    - item.method == 'certbot'
+    - certbot_selfsigned_fallback | bool
+    - deployment_environment | default('production') != 'production'
+
+- name: Generate certbot self-signed fallback at Let's Encrypt path
+  command: >
+    openssl req -x509 -nodes
+    -days {{ certbot_selfsigned_days }}
+    -newkey rsa:2048
+    -keyout {{ _le_dir }}/live/{{ item.primary_domain }}/privkey.pem
+    -out {{ _le_dir }}/live/{{ item.primary_domain }}/fullchain.pem
+    -subj "/CN={{ item.primary_domain }}"
+    -addext "subjectAltName={% for _domain in item.domains %}DNS:{{ _domain }}{% if not loop.last %},{% endif %}{% endfor %}"
+  args:
+    creates: "{{ _le_dir }}/live/{{ item.primary_domain }}/fullchain.pem"
+  loop: "{{ _certificate_requests }}"
+  loop_control:
+    label: "{{ item.consumer }} -> {{ item.primary_domain }}"
+  when:
+    - item.method == 'certbot'
     - certbot_selfsigned_fallback | bool
     - deployment_environment | default('production') != 'production'
   notify: Reload nginx
@@ -1227,6 +1506,7 @@ certbot_selfsigned_days: 365
     user: root
     job: certbot renew --quiet
     state: present
+  when: _certificate_requests | selectattr('method', 'equalto', 'certbot') | list | length > 0
 """,
     'roles/certbot/templates/certbot-tsig.key.j2': """\
 # TSIG key for certbot DNS-01 nsupdate - managed by Ansible.
@@ -1275,12 +1555,14 @@ exit 0
     'roles/certbot/templates/renew-deploy-hook.sh.j2': """\
 #!/usr/bin/env bash
 # Post-renewal deploy hook - managed by Ansible.
-# Reloads nginx after every successful certificate renewal.
+# Reloads common TLS consumers after every successful certificate renewal.
 set -euo pipefail
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl reload nginx
+  systemctl try-reload-or-restart nginx postfix dovecot 2>/dev/null || true
 else
-  service nginx reload
+  service nginx reload 2>/dev/null || true
+  service postfix reload 2>/dev/null || true
+  service dovecot reload 2>/dev/null || true
 fi
 """,
     'roles/common/tasks/main.yml': """\
@@ -1322,6 +1604,115 @@ fi
 - name: Set root group name
   set_fact:
     _root_group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
+
+- name: Resolve trusted root certificate store
+  set_fact:
+    _trusted_root_ca_dir: >-
+      {%- if ansible_facts.os_family == 'RedHat' -%}/etc/pki/ca-trust/source/anchors
+      {%- elif ansible_facts.os_family == 'Archlinux' -%}/etc/ca-certificates/trust-source/anchors
+      {%- elif ansible_facts.os_family == 'Suse' -%}/etc/pki/trust/anchors
+      {%- elif ansible_facts.os_family == 'FreeBSD' -%}/usr/local/share/certs
+      {%- else -%}/usr/local/share/ca-certificates{%- endif %}
+    _trusted_root_ca_ext: "{{ 'pem' if ansible_facts.os_family == 'FreeBSD' else 'crt' }}"
+  when: trusted_root_certificates | default({}) | length > 0
+
+- name: Assert trusted root certificate entries are valid
+  assert:
+    that:
+      - item.value is mapping
+      - ([item.value.pem is defined, item.value.src is defined, item.value.remote_src is defined] | select('equalto', true) | list | length) == 1
+    fail_msg: >
+      trusted_root_certificates.{{ item.key }} must define exactly one of:
+      pem, src, remote_src.
+  loop: "{{ trusted_root_certificates | default({}) | dict2items | sort(attribute='key') }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: trusted_root_certificates | default({}) | length > 0
+
+- name: Install ca-certificates package for trusted roots
+  package:
+    name: >-
+      {%- if ansible_facts.os_family == 'FreeBSD' -%}ca_root_nss
+      {%- elif ansible_facts.os_family == 'Gentoo' -%}app-misc/ca-certificates
+      {%- else -%}ca-certificates{%- endif %}
+    state: present
+  when: trusted_root_certificates | default({}) | length > 0
+
+- name: Ensure trusted root certificate directory exists
+  file:
+    path: "{{ _trusted_root_ca_dir }}"
+    state: directory
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+  when: trusted_root_certificates | default({}) | length > 0
+
+- name: Install trusted root certificates from inline PEM
+  copy:
+    content: "{{ item.value.pem }}"
+    dest: "{{ _trusted_root_ca_dir }}/{{ item.key | regex_replace('[^A-Za-z0-9_.-]', '_') }}.{{ _trusted_root_ca_ext }}"
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  loop: "{{ trusted_root_certificates | default({}) | dict2items | sort(attribute='key') }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - trusted_root_certificates | default({}) | length > 0
+    - item.value.pem is defined
+  no_log: true
+  register: _trusted_root_pem_copy
+
+- name: Install trusted root certificates from controller files
+  copy:
+    src: "{{ item.value.src }}"
+    dest: "{{ _trusted_root_ca_dir }}/{{ item.key | regex_replace('[^A-Za-z0-9_.-]', '_') }}.{{ _trusted_root_ca_ext }}"
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+  loop: "{{ trusted_root_certificates | default({}) | dict2items | sort(attribute='key') }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - trusted_root_certificates | default({}) | length > 0
+    - item.value.src is defined
+  register: _trusted_root_src_copy
+
+- name: Install trusted root certificates from remote files
+  copy:
+    src: "{{ item.value.remote_src }}"
+    dest: "{{ _trusted_root_ca_dir }}/{{ item.key | regex_replace('[^A-Za-z0-9_.-]', '_') }}.{{ _trusted_root_ca_ext }}"
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+    remote_src: true
+  loop: "{{ trusted_root_certificates | default({}) | dict2items | sort(attribute='key') }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - trusted_root_certificates | default({}) | length > 0
+    - item.value.remote_src is defined
+  register: _trusted_root_remote_copy
+
+- name: Refresh trusted root certificate store
+  command: >-
+    {%- if ansible_facts.os_family in ['Debian', 'Alpine', 'Gentoo', 'Suse'] -%}
+    update-ca-certificates
+    {%- elif ansible_facts.os_family == 'RedHat' -%}
+    update-ca-trust
+    {%- elif ansible_facts.os_family == 'Archlinux' -%}
+    trust extract-compat
+    {%- elif ansible_facts.os_family == 'FreeBSD' -%}
+    certctl rehash
+    {%- else -%}
+    update-ca-certificates
+    {%- endif %}
+  when:
+    - trusted_root_certificates | default({}) | length > 0
+    - >
+      (_trusted_root_pem_copy is defined and (_trusted_root_pem_copy.results | default([]) | selectattr('changed') | list | length > 0))
+      or (_trusted_root_src_copy is defined and (_trusted_root_src_copy.results | default([]) | selectattr('changed') | list | length > 0))
+      or (_trusted_root_remote_copy is defined and (_trusted_root_remote_copy.results | default([]) | selectattr('changed') | list | length > 0))
 
 - name: Read current Gentoo profile
   command: eselect profile show
@@ -3785,6 +4176,69 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     _opendkim_bin: "{{ '/usr/local/sbin/opendkim' if ansible_facts.os_family == 'FreeBSD' else '/usr/sbin/opendkim' }}"
     _postfix_conf_dir: "{{ '/usr/local/etc/postfix' if ansible_facts.os_family == 'FreeBSD' else '/etc/postfix' }}"
 
+- name: Set certificate storage directories for mail TLS
+  set_fact:
+    _le_dir: "{{ '/usr/local/etc/letsencrypt' if ansible_facts.os_family == 'FreeBSD' else '/etc/letsencrypt' }}"
+    _ae_tls_cert_dir: "{{ '/etc/pki/tls/certs/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/certs/ansible-enterprise' }}"
+    _ae_tls_private_dir: "{{ '/etc/pki/tls/private/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/private/ansible-enterprise' }}"
+
+- name: Resolve mailserver TLS certificate paths
+  set_fact:
+    _mail_tls_certificate_name: "{{ mailserver.tls.certificate | default(mailserver.domain) }}"
+    _mail_tls_certificate_method: >-
+      {%- set _name = mailserver.tls.certificate | default(mailserver.domain) -%}
+      {{ (certificates | default({})).get(_name, {}).get('method', 'selfsigned') }}
+    _mail_tls_primary_domain: >-
+      {%- set _name = mailserver.tls.certificate | default(mailserver.domain) -%}
+      {%- set _cert = (certificates | default({})).get(_name, {}) -%}
+      {{ (_cert.domains | default([mailserver.domain]))[0] }}
+    _mail_tls_fullchain_path: >-
+      {%- set _name = mailserver.tls.certificate | default(mailserver.domain) -%}
+      {%- set _cert = (certificates | default({})).get(_name, {}) -%}
+      {%- set _method = _cert.method | default('selfsigned') -%}
+      {%- if _method == 'path' -%}
+      {{ _cert.fullchain_path | default('') }}
+      {%- elif _method == 'certbot' -%}
+      {{ _le_dir }}/live/{{ (_cert.domains | default([mailserver.domain]))[0] }}/fullchain.pem
+      {%- else -%}
+      {{ _ae_tls_cert_dir }}/{{ _name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/fullchain.pem
+      {%- endif -%}
+    _mail_tls_privkey_path: >-
+      {%- set _name = mailserver.tls.certificate | default(mailserver.domain) -%}
+      {%- set _cert = (certificates | default({})).get(_name, {}) -%}
+      {%- set _method = _cert.method | default('selfsigned') -%}
+      {%- if _method == 'path' -%}
+      {{ _cert.privkey_path | default('') }}
+      {%- elif _method == 'certbot' -%}
+      {{ _le_dir }}/live/{{ (_cert.domains | default([mailserver.domain]))[0] }}/privkey.pem
+      {%- else -%}
+      {{ _ae_tls_private_dir }}/{{ _name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/privkey.pem
+      {%- endif -%}
+
+- name: Assert mailserver TLS certificate exists
+  stat:
+    path: "{{ _mail_tls_fullchain_path }}"
+  register: _mail_cert_stat
+  when: mailserver.tls.enabled | default(false) | bool
+
+- name: Fail if mailserver TLS certificate is missing
+  fail:
+    msg: >
+      TLS certificate missing for mailserver {{ mailserver.domain }}:
+      {{ _mail_tls_fullchain_path }} does not exist.
+      {% if _mail_tls_certificate_method == 'path' %}
+      Set certificates.{{ _mail_tls_certificate_name }}.{fullchain_path,privkey_path}.
+      {% elif _mail_tls_certificate_method == 'inventory' %}
+      Set certificates.{{ _mail_tls_certificate_name }}.{fullchain_pem,privkey_pem}.
+      {% else %}
+      Ensure certificates.{{ _mail_tls_certificate_name }}.method has provisioned certs:
+      certbot uses {{ _le_dir }}/live/{{ _mail_tls_primary_domain }}/fullchain.pem;
+      inventory/selfsigned use {{ _ae_tls_cert_dir }}/{{ _mail_tls_certificate_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/fullchain.pem.
+      {% endif %}
+  when:
+    - mailserver.tls.enabled | default(false) | bool
+    - not _mail_cert_stat.stat.exists
+
 # postfix main.cf references /etc/mailname for myorigin.
 # It must exist before postfix starts.
 # /etc/mailname is a Debian/Linux convention for the mail hostname.
@@ -3850,17 +4304,22 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     mode: "0644"
   notify: Reload dovecot
 
-# Disable Dovecot's built-in SSL. TLS is handled by postfix on the
-# submission port and by nginx for webmail. Dovecot only serves
-# localhost LMTP/auth connections where SSL is not needed.
+# Configure Dovecot SSL. When mailserver.tls.enabled is false, built-in SSL is
+# disabled so distro defaults cannot reference missing package certificate paths.
 # On Arch, the package default dovecot.conf enables SSL and references
 # /etc/dovecot/ssl-cert.pem which does not exist, causing a fatal error.
-- name: Deploy dovecot SSL config (disable built-in SSL)
+- name: Deploy dovecot SSL config
   copy:
     dest: "{{ _dovecot_conf_dir }}/conf.d/10-ssl.conf"
     content: |
-      # SSL handled at postfix/nginx layer. Disabled here.
+      # Dovecot SSL managed by Ansible.
+      {% if mailserver.tls.enabled | default(false) | bool %}
+      ssl = required
+      ssl_cert = <{{ _mail_tls_fullchain_path }}
+      ssl_key = <{{ _mail_tls_privkey_path }}
+      {% else %}
       ssl = no
+      {% endif %}
     mode: "0644"
   notify: Reload dovecot
 
@@ -4151,6 +4610,10 @@ relay_domains = {{ mailserver.relay_domains | join(', ') }}
 home_mailbox = Maildir/
 smtpd_tls_security_level = may
 smtp_tls_security_level = may
+{% if mailserver.tls.enabled | default(false) | bool %}
+smtpd_tls_cert_file = {{ _mail_tls_fullchain_path }}
+smtpd_tls_key_file = {{ _mail_tls_privkey_path }}
+{% endif %}
 smtpd_sasl_type = dovecot
 smtpd_sasl_path = private/auth
 smtpd_sasl_auth_enable = yes
@@ -4234,10 +4697,9 @@ InternalHosts {{ _opendkim_dir }}/TrustedHosts
 """,
     'roles/mailserver/templates/40-mailserver.nft.j2': """\
 # managed by ansible - mailserver role
-tcp dport 25  accept
-tcp dport 587 accept
-tcp dport 143 accept
-tcp dport 465 accept
+{% for _port in mailserver_ports | default(mailserver.open_ports | default([25, 587, 143, 465])) %}
+tcp dport {{ _port }} accept
+{% endfor %}
 """,
     'roles/nextcloud/defaults/main.yml': """\
 ---
@@ -4574,29 +5036,79 @@ services:
     _static_site: "{{ _upstream_port | string | length == 0 }}"
   when: service.value.enabled | default(false) | bool
 
+- name: Resolve TLS certificate paths for {{ service.key }}
+  set_fact:
+    _le_dir: "{{ '/usr/local/etc/letsencrypt' if ansible_facts.os_family == 'FreeBSD' else '/etc/letsencrypt' }}"
+    _ae_tls_cert_dir: "{{ '/etc/pki/tls/certs/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/certs/ansible-enterprise' }}"
+    _ae_tls_private_dir: "{{ '/etc/pki/tls/private/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/private/ansible-enterprise' }}"
+    _tls_certificate_name: "{{ ((service.value.security | default({})).tls | default({})).certificate | default(service.value.domain) }}"
+    _tls_certificate_method: >-
+      {%- set _tls = (service.value.security | default({})).tls | default({}) -%}
+      {%- set _name = _tls.certificate | default(service.value.domain) -%}
+      {{ (certificates | default({})).get(_name, {}).get('method', 'selfsigned') }}
+    _tls_certificate_primary_domain: >-
+      {%- set _tls = (service.value.security | default({})).tls | default({}) -%}
+      {%- set _name = _tls.certificate | default(service.value.domain) -%}
+      {%- set _cert = (certificates | default({})).get(_name, {}) -%}
+      {{ (_cert.domains | default([service.value.domain] + (service.value.aliases | default([]))))[0] }}
+    _tls_fullchain_path: >-
+      {%- set _tls = (service.value.security | default({})).tls | default({}) -%}
+      {%- set _name = _tls.certificate | default(service.value.domain) -%}
+      {%- set _cert = (certificates | default({})).get(_name, {}) -%}
+      {%- set _method = _cert.method | default('selfsigned') -%}
+      {%- if _method == 'path' -%}
+      {{ _cert.fullchain_path | default('') }}
+      {%- elif _method == 'certbot' -%}
+      {{ _le_dir }}/live/{{ (_cert.domains | default([service.value.domain] + (service.value.aliases | default([]))))[0] }}/fullchain.pem
+      {%- else -%}
+      {{ _ae_tls_cert_dir }}/{{ _name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/fullchain.pem
+      {%- endif -%}
+    _tls_privkey_path: >-
+      {%- set _tls = (service.value.security | default({})).tls | default({}) -%}
+      {%- set _name = _tls.certificate | default(service.value.domain) -%}
+      {%- set _cert = (certificates | default({})).get(_name, {}) -%}
+      {%- set _method = _cert.method | default('selfsigned') -%}
+      {%- if _method == 'path' -%}
+      {{ _cert.privkey_path | default('') }}
+      {%- elif _method == 'certbot' -%}
+      {{ _le_dir }}/live/{{ (_cert.domains | default([service.value.domain] + (service.value.aliases | default([]))))[0] }}/privkey.pem
+      {%- else -%}
+      {{ _ae_tls_private_dir }}/{{ _name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/privkey.pem
+      {%- endif -%}
+  when: service.value.enabled | default(false) | bool
+
 # For TLS-enabled services, assert the certificate exists before rendering
 # the vhost config. nginx will fail to start if ssl_certificate points to
 # a missing file. This catches the common case of running --tags nginx
 # without running certbot first, or a domain mismatch.
 - name: Assert TLS certificate exists for {{ service.key }}
   stat:
-    path: "{{ _le_dir }}/live/{{ service.value.domain }}/fullchain.pem"
+    path: "{{ _tls_fullchain_path }}"
   register: _cert_stat
   when:
     - service.value.enabled | default(false) | bool
-    - service.value.security.tls | default(false) | bool
+    - ((service.value.security | default({})).tls | default({})).enabled | default(false) | bool
 
 - name: Fail if TLS certificate is missing for {{ service.key }}
   fail:
     msg: >
       TLS certificate missing for {{ service.value.domain }}:
-      {{ _le_dir }}/live/{{ service.value.domain }}/fullchain.pem does not exist.
-      Run the certbot role first, or set security.tls: false to skip TLS.
-      In staging/dev, set certbot_selfsigned_fallback: true to generate
-      a self-signed certificate automatically.
+      {{ _tls_fullchain_path }} does not exist.
+      {% if _tls_certificate_method == 'path' %}
+      Set certificates.{{ _tls_certificate_name }}.{fullchain_path,privkey_path}
+      to valid files on this host, or set security.tls.enabled: false.
+      {% elif _tls_certificate_method == 'inventory' %}
+      Set certificates.{{ _tls_certificate_name }}.{fullchain_pem,privkey_pem}
+      in inventory/vault so the files can be installed on host.
+      {% else %}
+      Ensure certificates.{{ _tls_certificate_name }}.method has provisioned certs:
+      certbot uses {{ _le_dir }}/live/{{ _tls_certificate_primary_domain }}/fullchain.pem;
+      inventory/selfsigned use {{ _ae_tls_cert_dir }}/{{ _tls_certificate_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/fullchain.pem.
+      Or set security.tls.enabled: false to skip TLS.
+      {% endif %}
   when:
     - service.value.enabled | default(false) | bool
-    - service.value.security.tls | default(false) | bool
+    - ((service.value.security | default({})).tls | default({})).enabled | default(false) | bool
     - not _cert_stat.stat.exists
 
 - name: Render service vhost for {{ service.key }}
@@ -4614,14 +5126,14 @@ server {
   {% if svc.security.expose_http | default(false) | bool %}
   listen 80;
   {% endif %}
-  {% if svc.security.tls | default(false) | bool %}
+  {% if ((svc.security | default({})).tls | default({})).enabled | default(false) | bool %}
   listen 443 ssl http2;
-  ssl_certificate {{ _le_dir }}/live/{{ svc.domain }}/fullchain.pem;
-  ssl_certificate_key {{ _le_dir }}/live/{{ svc.domain }}/privkey.pem;
+  ssl_certificate {{ _tls_fullchain_path }};
+  ssl_certificate_key {{ _tls_privkey_path }};
   ssl_client_certificate {{ svc.security.client_ca_path | default('') }};
   ssl_verify_client on;
   {% endif %}
-  {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
+  {% if not (svc.security.expose_http | default(false) | bool) and not (((svc.security | default({})).tls | default({})).enabled | default(false) | bool) %}
   listen 80;  # fallback: no listen directive declared
   {% endif %}
   server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
@@ -4648,12 +5160,12 @@ server {
   {% if svc.security.expose_http | default(false) | bool %}
   listen 80;
   {% endif %}
-  {% if svc.security.tls | default(false) | bool %}
+  {% if ((svc.security | default({})).tls | default({})).enabled | default(false) | bool %}
   listen 443 ssl http2;
-  ssl_certificate {{ _le_dir }}/live/{{ svc.domain }}/fullchain.pem;
-  ssl_certificate_key {{ _le_dir }}/live/{{ svc.domain }}/privkey.pem;
+  ssl_certificate {{ _tls_fullchain_path }};
+  ssl_certificate_key {{ _tls_privkey_path }};
   {% endif %}
-  {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
+  {% if not (svc.security.expose_http | default(false) | bool) and not (((svc.security | default({})).tls | default({})).enabled | default(false) | bool) %}
   listen 80;  # fallback: no listen directive declared
   {% endif %}
   server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
@@ -4687,12 +5199,12 @@ server {
   {% if svc.security.expose_http | default(false) | bool %}
   listen 80;
   {% endif %}
-  {% if svc.security.tls | default(false) | bool %}
+  {% if ((svc.security | default({})).tls | default({})).enabled | default(false) | bool %}
   listen 443 ssl http2;
-  ssl_certificate {{ _le_dir }}/live/{{ svc.domain }}/fullchain.pem;
-  ssl_certificate_key {{ _le_dir }}/live/{{ svc.domain }}/privkey.pem;
+  ssl_certificate {{ _tls_fullchain_path }};
+  ssl_certificate_key {{ _tls_privkey_path }};
   {% endif %}
-  {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
+  {% if not (svc.security.expose_http | default(false) | bool) and not (((svc.security | default({})).tls | default({})).enabled | default(false) | bool) %}
   listen 80;  # fallback: no TLS configured
   {% endif %}
   server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
@@ -4726,7 +5238,7 @@ server {
     include fastcgi_params;
     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     fastcgi_param PATH_INFO $fastcgi_path_info;
-    fastcgi_param HTTPS {% if svc.security.tls | default(false) | bool %}on{% else %}off{% endif %};
+    fastcgi_param HTTPS {% if ((svc.security | default({})).tls | default({})).enabled | default(false) | bool %}on{% else %}off{% endif %};
     fastcgi_read_timeout 300;
   }
 }
@@ -4751,12 +5263,12 @@ server {
   {% if svc.security.expose_http | default(false) | bool %}
   listen 80;
   {% endif %}
-  {% if svc.security.tls | default(false) | bool %}
+  {% if ((svc.security | default({})).tls | default({})).enabled | default(false) | bool %}
   listen 443 ssl http2;
-  ssl_certificate {{ _le_dir }}/live/{{ svc.domain }}/fullchain.pem;
-  ssl_certificate_key {{ _le_dir }}/live/{{ svc.domain }}/privkey.pem;
+  ssl_certificate {{ _tls_fullchain_path }};
+  ssl_certificate_key {{ _tls_privkey_path }};
   {% endif %}
-  {% if not (svc.security.expose_http | default(false) | bool) and not (svc.security.tls | default(false) | bool) %}
+  {% if not (svc.security.expose_http | default(false) | bool) and not (((svc.security | default({})).tls | default({})).enabled | default(false) | bool) %}
   listen 80;  # fallback: no listen directive declared
   {% endif %}
   server_name {{ svc.domain }}{% for _alias in svc.aliases | default([]) %} {{ _alias }}{% endfor %};
@@ -7423,32 +7935,43 @@ WantedBy=multi-user.target
 # Debian-only -- Proxmox VE runs on Debian.
 proxmox:
   enabled: false
+  # Whether this PVE node is part of a cluster (shared pmxcfs).
+  # Affects backup_jobs orchestration: true => one API call per cluster
+  # (run_once), false => one API call per node.
+  is_clustered: true
   # Repository type: enterprise (requires subscription) or no_subscription (free).
   repo: no_subscription
   # Remove the "no valid subscription" nag dialog from the web UI.
   remove_nag: true
   # Extra packages to install on the Proxmox host.
   extra_packages: []
-  # vzdump backup configuration.
-  backup:
-    enabled: false
-    # Storage target for backups (e.g. local, nfs-backup).
-    storage: local
-    # Backup schedule (systemd calendar format).
-    schedule: "0 2 * * *"
-    # Backup mode: snapshot, suspend, or stop.
-    mode: snapshot
-    # Compression: zstd, lzo, gzip, or none.
-    compress: zstd
-    # Max backups to keep per VM/CT (0 = unlimited).
-    maxfiles: 3
-    # Mailto for backup notifications.
-    mailto: ""
-    # VMs/CTs to include (empty = all). Supports ranges: [100, "200-205"].
-    vmids: []
-    # VMs/CTs to exclude. Supports ranges: [9000, "100-105"].
-    exclude_vmids: []
-  # SMTP relay for Proxmox email alerts (postfix relayhost).
+  # API auth -- used for cluster-config calls (backup_jobs, future
+  # notifications/storage/users). api.host defaults to inventory_hostname;
+  # override if Ansible targets the node by IP/alias.
+  # Required vault var when backup_jobs is non-empty: proxmox_api_token_secret
+  api:
+    user: root@pam
+    token_id: ansible
+    host: ""
+    validate_certs: true
+  # Backup jobs to manage in /etc/pve/jobs.cfg (modern, API-driven).
+  # Each entry's key becomes the local job name; the API id is
+  # "{{ backup_jobs_prefix }}{{ key }}". Set state: absent to delete.
+  # The role NEVER auto-deletes jobs; remove from yaml is a no-op.
+  # Example:
+  #   backup_jobs:
+  #     daily-all:
+  #       schedule: "02:00"
+  #       storage: backup-store
+  #       selection_mode: all
+  #       mode: snapshot
+  #       compress: zstd
+  #       prune_backups: "keep-last=7,keep-weekly=4"
+  #       enabled: true
+  backup_jobs: {}
+  backup_jobs_prefix: "ansible-"
+  # SMTP relay for Proxmox email alerts (legacy postfix relayhost).
+  # NOTE: future migration target -- /cluster/notifications/endpoints API.
   smtp:
     enabled: false
     relayhost: ""
@@ -7456,8 +7979,8 @@ proxmox:
     user: ""
     # Password from vault: proxmox_smtp_password
     from: ""
-  # Cluster join configuration (optional).
-  # Leave empty for standalone nodes.
+  # Cluster join configuration (optional). Different from is_clustered above:
+  # this drives 'pvecm add' on initial bootstrap. Leave name empty to skip.
   cluster:
     name: ""
   # PCI passthrough / IOMMU.
@@ -7539,78 +8062,51 @@ proxmox:
     state: present
   when: proxmox.extra_packages | default([]) | length > 0
 
-# -- vzdump backup configuration --------------------------------------------
-- name: Deploy vzdump backup configuration
-  template:
-    src: vzdump.conf.j2
-    dest: /etc/vzdump.conf
-    owner: root
-    group: "{{ _root_group }}"
-    mode: "0644"
-  when: proxmox.backup.enabled | default(false) | bool
+# -- Backup jobs (API-driven, /etc/pve/jobs.cfg via /cluster/backup) -------
+# Requires the mthibaut.proxmox collection (declared in requirements.yml)
+# and proxmoxer on the controller (delegate_to: localhost).
+- name: Assert proxmox_api_token_secret is set when backup_jobs declared
+  assert:
+    that:
+      - proxmox_api_token_secret is defined
+      - proxmox_api_token_secret | length > 0
+    fail_msg: "proxmox.backup_jobs is non-empty but proxmox_api_token_secret is not set in vault"
+  when: proxmox.backup_jobs | default({}) | length > 0
+  run_once: true
 
-- name: Expand VMID ranges for backup
-  set_fact:
-    _proxmox_vmids: >-
-      {%- set _ids = [] -%}
-      {%- for _v in proxmox.backup.vmids | default([]) -%}
-      {%-   if _v | string | regex_search('^\\d+-\\d+$') -%}
-      {%-     set _parts = _v | string | split('-') -%}
-      {%-     for _i in range(_parts[0] | int, _parts[1] | int + 1) -%}
-      {%-       set _ = _ids.append(_i) -%}
-      {%-     endfor -%}
-      {%-   else -%}
-      {%-     set _ = _ids.append(_v | int) -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {{ _ids | sort }}
-    _proxmox_exclude_vmids: >-
-      {%- set _ids = [] -%}
-      {%- for _v in proxmox.backup.exclude_vmids | default([]) -%}
-      {%-   if _v | string | regex_search('^\\d+-\\d+$') -%}
-      {%-     set _parts = _v | string | split('-') -%}
-      {%-     for _i in range(_parts[0] | int, _parts[1] | int + 1) -%}
-      {%-       set _ = _ids.append(_i) -%}
-      {%-     endfor -%}
-      {%-   else -%}
-      {%-     set _ = _ids.append(_v | int) -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {{ _ids | sort }}
-  when: proxmox.backup.enabled | default(false) | bool
-
-- name: Build vzdump command
-  set_fact:
-    _vzdump_cmd: >-
-      {%- set _parts = ['/usr/bin/vzdump'] -%}
-      {%- if _proxmox_vmids | default([]) | length == 0 -%}
-      {%-   set _ = _parts.append('--all') -%}
-      {%- else -%}
-      {%-   for _id in _proxmox_vmids -%}
-      {%-     set _ = _parts.append(_id | string) -%}
-      {%-   endfor -%}
-      {%- endif -%}
-      {%- set _ = _parts.append('--mode ' + proxmox.backup.mode | default('snapshot')) -%}
-      {%- set _ = _parts.append('--compress ' + proxmox.backup.compress | default('zstd')) -%}
-      {%- set _ = _parts.append('--storage ' + proxmox.backup.storage | default('local')) -%}
-      {%- set _ = _parts.append('--maxfiles ' + (proxmox.backup.maxfiles | default(3) | string)) -%}
-      {%- if _proxmox_exclude_vmids | default([]) | length > 0 -%}
-      {%-   set _ = _parts.append('--exclude ' + _proxmox_exclude_vmids | join(',')) -%}
-      {%- endif -%}
-      {%- if proxmox.backup.mailto | default('') | length > 0 -%}
-      {%-   set _ = _parts.append('--mailto ' + proxmox.backup.mailto) -%}
-      {%- endif -%}
-      {%- set _ = _parts.append('--quiet 1') -%}
-      {{ _parts | join(' ') }}
-  when: proxmox.backup.enabled | default(false) | bool
-
-- name: Configure vzdump backup schedule
-  cron:
-    name: "vzdump-backup"
-    job: "{{ _vzdump_cmd }}"
-    minute: "0"
-    hour: "2"
-    state: "{{ 'present' if proxmox.backup.enabled | default(false) | bool else 'absent' }}"
+- name: Manage Proxmox cluster backup jobs
+  mthibaut.proxmox.proxmox_backup_job:
+    api_user: "{{ proxmox.api.user | default('root@pam') }}"
+    api_token_id: "{{ proxmox.api.token_id | default('ansible') }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    api_host: "{{ proxmox.api.host | default('') | length > 0 | ternary(proxmox.api.host, inventory_hostname) }}"
+    validate_certs: "{{ proxmox.api.validate_certs | default(true) }}"
+    id: "{{ proxmox.backup_jobs_prefix | default('ansible-') }}{{ item.key }}"
+    state: "{{ item.value.state | default('present') }}"
+    comment: "{{ item.value.comment | default('Managed by Ansible (proxmox role) -- do not edit in web UI') }}"
+    schedule: "{{ item.value.schedule | default(omit) }}"
+    storage: "{{ item.value.storage | default(omit) }}"
+    selection_mode: "{{ item.value.selection_mode | default(omit) }}"
+    vmid: "{{ item.value.vmid | default(omit) }}"
+    pool: "{{ item.value.pool | default(omit) }}"
+    node: "{{ item.value.node | default(omit) }}"
+    mode: "{{ item.value.mode | default(omit) }}"
+    compress: "{{ item.value.compress | default(omit) }}"
+    mailto: "{{ item.value.mailto | default(omit) }}"
+    notification_mode: "{{ item.value.notification_mode | default(omit) }}"
+    prune_backups: "{{ item.value.prune_backups | default(omit) }}"
+    bwlimit: "{{ item.value.bwlimit | default(omit) }}"
+    ionice: "{{ item.value.ionice | default(omit) }}"
+    performance: "{{ item.value.performance | default(omit) }}"
+    fleecing: "{{ item.value.fleecing | default(omit) }}"
+    notes_template: "{{ item.value.notes_template | default(omit) }}"
+    enabled: "{{ item.value.enabled | default(omit) }}"
+  loop: "{{ proxmox.backup_jobs | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  run_once: "{{ proxmox.is_clustered | default(true) | bool }}"
+  when: proxmox.backup_jobs | default({}) | length > 0
 
 # -- SMTP relay for alerts ---------------------------------------------------
 - name: Configure postfix relayhost
@@ -7679,16 +8175,6 @@ proxmox:
     group: "{{ _root_group }}"
     mode: "0644"
   when: proxmox.iommu.enabled | default(false) | bool
-""",
-    'roles/proxmox/templates/vzdump.conf.j2': """\
-# vzdump.conf - managed by Ansible
-storage: {{ proxmox.backup.storage | default('local') }}
-mode: {{ proxmox.backup.mode | default('snapshot') }}
-compress: {{ proxmox.backup.compress | default('zstd') }}
-maxfiles: {{ proxmox.backup.maxfiles | default(3) }}
-{% if proxmox.backup.mailto | default('') | length > 0 %}
-mailto: {{ proxmox.backup.mailto }}
-{% endif %}
 """,
     # ------------------------------------------------------------------ #
     #  pfSense role -- firewall/router configuration (FreeBSD/pfSense)     #
@@ -9329,10 +9815,14 @@ user_accounts: []
     - role: certbot
       tags: [certbot, tls]
       when: >-
+        (
         services.values()
-        | selectattr('security.tls', 'defined')
-        | selectattr('security.tls')
+        | selectattr('security.tls.enabled', 'defined')
+        | selectattr('security.tls.enabled')
         | list | length > 0
+        )
+        or
+        mailserver.tls.enabled | default(false) | bool
     # apache2 before nginx: Apache2 must be listening before nginx
     # starts proxying to it. The role is a no-op when no service has
     # app.type: apache2.

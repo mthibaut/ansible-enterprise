@@ -153,6 +153,21 @@ Per-role configuration docs live under [`docs/roles/`](docs/roles/README.md).
 | [pfsense](docs/roles/pfsense.md) | pfSense config management |
 | [file_copy](docs/roles/file_copy.md) | Copy inline or repo-managed files to targets |
 
+## WireGuard boundary
+
+`ansible-enterprise` should treat WireGuard topology rendering as a separate
+concern from infrastructure deployment.
+
+- The standalone `wireguard` project is the right place to publish topology
+  parsing, key lifecycle, `wg-quick` rendering, and netplan rendering.
+- `ansible-enterprise` is the right place to publish host deployment:
+  package install, service enablement, firewall integration, and inventory
+  consumption via `wireguard_instances`.
+
+If both repositories are kept, prefer `wireguard` as the source of truth for
+topology-driven output and keep `ansible-enterprise` focused on consuming and
+deploying that output.
+
 ## Services
 
 Services are declared in `build/group_vars/all/main.yml` and drive nginx vhosts,

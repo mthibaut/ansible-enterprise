@@ -1,5 +1,5 @@
-source_hash: 69c5f764c8bc18b6c73421fa838a003cedbe3113f58255751afb37d099ff9712
-output_hash: 719ad1929f900ffc00a17e1c8482d6d84d1b5dc8b5c7205bf823ed78aeb06d4e
+source_hash: 75181fdaeea0995f01c5a3799290db82dd84b7cf16be18c8e4c232e7049d257e
+output_hash: 7f16fd3f9eae93f3b7d0516742c5991c40ae3098d12a3cc7851bedf370f1effc
 generated_files:
   - ansible.cfg
   - bootstrap.yml
@@ -128,7 +128,6 @@ generated_files:
   - roles/proxmox/defaults/main.yml
   - roles/proxmox/handlers/main.yml
   - roles/proxmox/tasks/main.yml
-  - roles/proxmox/templates/vzdump.conf.j2
   - roles/samba/defaults/main.yml
   - roles/samba/handlers/main.yml
   - roles/samba/tasks/main.yml

@@ -73,7 +73,7 @@ class TestSshHardeningDistro(unittest.TestCase):
         text = _read(self.COMMON_DEFAULTS)
         self.assertIn("ssh_manage: true", text)
         self.assertIn("leave SSH daemon packaging and configuration unmanaged", text)
-        self.assertIn("pkg_manager_update_policy: always", text)
+        self.assertIn("pkg_manager_update_policy: auto", text)
         self.assertIn("pkg_manager_update_valid_time: 3600", text)
 
     def test_site_gates_ssh_hardening_role_on_ssh_manage(self):
@@ -370,6 +370,54 @@ class TestHostnameBootstrapRegression(unittest.TestCase):
         self.assertNotIn("hostvars[inventory_hostname]", text)
 
 
+class TestTrustedRootCertificates(unittest.TestCase):
+
+    COMMON_DEFAULTS = "roles/common/defaults/main.yml"
+    COMMON_TASKS = "roles/common/tasks/main.yml"
+
+    def test_common_defaults_document_trusted_root_certificates(self):
+        text = _read(self.COMMON_DEFAULTS)
+        self.assertIn("trusted_root_certificates: {}", text)
+        self.assertIn("trusted_root_certificates:", text)
+        self.assertIn("pem:", text)
+        self.assertIn("src:", text)
+        self.assertIn("remote_src:", text)
+
+    def test_common_installs_trusted_roots_in_distro_trust_store(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("Resolve trusted root certificate store", text)
+        self.assertIn("/usr/local/share/ca-certificates", text)
+        self.assertIn("/etc/pki/ca-trust/source/anchors", text)
+        self.assertIn("/etc/ca-certificates/trust-source/anchors", text)
+        self.assertIn("/etc/pki/trust/anchors", text)
+        self.assertIn("/usr/local/share/certs", text)
+        self.assertIn("Install ca-certificates package for trusted roots", text)
+        self.assertIn("ca_root_nss", text)
+        self.assertIn("app-misc/ca-certificates", text)
+
+    def test_common_validates_and_installs_all_trusted_root_sources(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("Assert trusted root certificate entries are valid", text)
+        self.assertIn("exactly one of", text)
+        self.assertIn("Install trusted root certificates from inline PEM", text)
+        self.assertIn("Install trusted root certificates from controller files", text)
+        self.assertIn("Install trusted root certificates from remote files", text)
+        self.assertIn("remote_src: true", text)
+        inline_task = text[text.index("Install trusted root certificates from inline PEM"):text.index("Install trusted root certificates from controller files")]
+        self.assertIn("no_log: true", inline_task)
+
+    def test_common_refreshes_trusted_root_store_per_distro(self):
+        text = _read(self.COMMON_TASKS)
+        self.assertIn("Refresh trusted root certificate store", text)
+        self.assertIn("update-ca-certificates", text)
+        self.assertIn("update-ca-trust", text)
+        self.assertIn("trust extract-compat", text)
+        self.assertIn("certctl rehash", text)
+        self.assertIn("_trusted_root_pem_copy.results", text)
+        self.assertIn("_trusted_root_src_copy.results", text)
+        self.assertIn("_trusted_root_remote_copy.results", text)
+
+
 class TestGentooSupportRegression(unittest.TestCase):
 
     COMMON_DEFAULTS = "roles/common/defaults/main.yml"
@@ -619,6 +667,8 @@ class TestProxmoxInfraRegression(unittest.TestCase):
 class TestCertbotDistro(unittest.TestCase):
 
     TASKS = "roles/certbot/tasks/main.yml"
+    CERTBOT_DEFAULTS = "roles/certbot/defaults/main.yml"
+    SITE = "site.yml"
 
     def test_dig_package_debian_is_bind9_dnsutils(self):
         self.assertIn("bind9-dnsutils", _read(self.TASKS))
@@ -633,6 +683,89 @@ class TestCertbotDistro(unittest.TestCase):
 
     def test_dig_package_redhat_is_bind_utils(self):
         self.assertIn("bind-utils", _read(self.TASKS))
+
+    def test_defaults_document_registry_level_certificate_methods(self):
+        text = _read(self.CERTBOT_DEFAULTS)
+        self.assertIn("certificates.<name>.method", text)
+        self.assertIn("services.<name>.security.tls.certificate", text)
+        self.assertIn("mailserver.tls.certificate", text)
+        self.assertIn("/etc/ssl/certs/ansible-enterprise/<certificate-name>/fullchain.pem", text)
+        self.assertIn("/etc/pki/tls/private/ansible-enterprise/<certificate-name>/privkey.pem", text)
+        self.assertIn("selfsigned", text)
+        self.assertIn("certbot", text)
+        self.assertIn("path", text)
+        self.assertIn("inventory", text)
+        self.assertIn("stepca", text)
+        self.assertNotIn("tls_certificate_method:", text)
+        self.assertNotIn("security.tls.method", text)
+
+    def test_site_runs_tls_cert_role_for_service_or_mail_tls(self):
+        text = _read(self.SITE)
+        self.assertIn("security.tls.enabled", text)
+        self.assertIn("mailserver.tls.enabled | default(false) | bool", text)
+
+    def test_certbot_builds_requests_from_services_and_mailserver(self):
+        text = _read(self.TASKS)
+        self.assertIn("Build certificate request list", text)
+        self.assertIn("services | default({}) | dict2items", text)
+        self.assertIn("mailserver.tls", text)
+        self.assertIn("certificates | default({})", text)
+        self.assertIn("(_svc.value.security | default({})).tls", text)
+        self.assertIn("'consumer': 'mailserver'", text)
+        self.assertIn("'method': _cert.method | default('selfsigned')", text)
+        self.assertNotIn("_tls.method | default(_cert.method", text)
+        self.assertNotIn("_mail_tls.method | default(_cert.method", text)
+        self.assertNotIn("'privkey_pem':", text)
+        self.assertNotIn("'fullchain_pem':", text)
+
+    def test_certbot_tasks_are_gated_on_request_method(self):
+        text = _read(self.TASKS)
+        self.assertIn("Assert certificate methods are supported", text)
+        self.assertIn("['selfsigned', 'certbot', 'path', 'inventory', 'stepca']", text)
+        self.assertIn("Fail for unimplemented step-ca certificate method", text)
+        self.assertIn("TLS certificate method stepca is reserved but not implemented yet", text)
+        self.assertIn("item.method == 'certbot'", text)
+        self.assertIn("Install certificate renewal cron job", text)
+
+    def test_inventory_method_installs_certificate_material(self):
+        text = _read(self.TASKS)
+        self.assertIn("Ensure managed certificate root exists", text)
+        self.assertIn("Ensure managed private key root exists", text)
+        self.assertIn("/etc/ssl/certs/ansible-enterprise", text)
+        self.assertIn("/etc/ssl/private/ansible-enterprise", text)
+        self.assertIn("/etc/pki/tls/certs/ansible-enterprise", text)
+        self.assertIn("/etc/pki/tls/private/ansible-enterprise", text)
+        self.assertIn("fullchain_pem", text)
+        self.assertIn("privkey_pem", text)
+        self.assertIn("Install inventory fullchain certificate", text)
+        self.assertIn("Install inventory private key", text)
+        self.assertIn("(certificates | default({})).get(item.name, {}).get('privkey_pem', '')", text)
+        self.assertIn("_ae_tls_cert_dir }}/{{ item.storage_name }}/fullchain.pem", text)
+        self.assertIn("_ae_tls_private_dir }}/{{ item.storage_name }}/privkey.pem", text)
+        self.assertIn("item.method == 'inventory'", text)
+        self.assertIn("certificates.{{ item.name }}", text)
+        private_key_task = text[text.index("Install inventory private key"):text.index("Assert certbot_email is set")]
+        self.assertIn("no_log: true", private_key_task)
+        inventory_material_tasks = text[text.index("Assert inventory certificate material is defined"):text.index("Assert certbot_email is set")]
+        self.assertGreaterEqual(inventory_material_tasks.count("no_log: true"), 3)
+
+    def test_certbot_secret_tasks_are_no_log(self):
+        text = _read(self.TASKS)
+        nsupdate_task = text[text.index("Resolve certbot nsupdate target from dns.zones"):text.index("Debug certbot nsupdate resolution")]
+        self.assertIn("no_log: true", nsupdate_task)
+        tsig_assert_task = text[text.index("Assert certbot tsig secret is set when using nsupdate"):text.index("Install DNS client utilities")]
+        self.assertIn("no_log: true", tsig_assert_task)
+        tsig_file_task = text[text.index("Deploy TSIG key file for nsupdate"):text.index("Deploy DNS auth hook script")]
+        self.assertIn("no_log: true", tsig_file_task)
+
+    def test_selfsigned_generation_supports_explicit_selfsigned_method(self):
+        text = _read(self.TASKS)
+        self.assertIn("item.method == 'selfsigned'", text)
+        self.assertIn("Generate managed self-signed certificate", text)
+        self.assertIn("_ae_tls_private_dir }}/{{ item.storage_name }}/privkey.pem", text)
+        self.assertIn("_ae_tls_cert_dir }}/{{ item.storage_name }}/fullchain.pem", text)
+        self.assertIn("certbot_selfsigned_fallback", text)
+        self.assertIn("Generate certbot self-signed fallback at Let's Encrypt path", text)
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +802,26 @@ class TestMailserverDistro(unittest.TestCase):
         debian_pos = text.index("os_family == 'Debian'", lmdb_pos - 200)
         # The Debian condition should follow the Debian package list closely
         self.assertLess(lmdb_pos, debian_pos + 100)
+
+    def test_mailserver_resolves_tls_certificate_paths(self):
+        text = _read(self.TASKS)
+        self.assertIn("Resolve mailserver TLS certificate paths", text)
+        self.assertIn("certificates | default({})", text)
+        self.assertIn("_ae_tls_cert_dir", text)
+        self.assertIn("_ae_tls_private_dir", text)
+        self.assertIn("_method == 'certbot'", text)
+        self.assertIn("_cert.method | default('selfsigned')", text)
+        self.assertNotIn("mailserver.tls.method", text)
+        self.assertIn("_mail_tls_fullchain_path", text)
+        self.assertIn("Assert mailserver TLS certificate exists", text)
+
+    def test_mailserver_configures_postfix_and_dovecot_tls(self):
+        main_cf = _read("roles/mailserver/templates/main.cf.j2")
+        tasks = _read(self.TASKS)
+        self.assertIn("smtpd_tls_cert_file = {{ _mail_tls_fullchain_path }}", main_cf)
+        self.assertIn("smtpd_tls_key_file = {{ _mail_tls_privkey_path }}", main_cf)
+        self.assertIn("ssl_cert = <{{ _mail_tls_fullchain_path }}", tasks)
+        self.assertIn("ssl_key = <{{ _mail_tls_privkey_path }}", tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -712,16 +865,34 @@ class TestNginxDistro(unittest.TestCase):
         self.assertLess(cert_pos, render_pos)
 
     def test_render_service_cert_check_gated_on_tls(self):
-        """Cert existence check must only run for services with tls: true."""
+        """Cert existence check must only run for services with tls.enabled."""
         text = _read(self.RENDER_SVC)
-        self.assertIn("security.tls | default(false) | bool", text)
+        self.assertIn("((service.value.security | default({})).tls | default({})).enabled | default(false) | bool", text)
         self.assertIn("_cert_stat.stat.exists", text)
+        self.assertIn("_tls_fullchain_path", text)
+        self.assertIn("_cert.method | default('selfsigned')", text)
+        self.assertNotIn("_tls.method", text)
+        self.assertIn("certificates | default({})", text)
 
     def test_render_service_cert_fail_msg_actionable(self):
         """Cert missing fail_msg must tell operator what to do."""
         text = _read(self.RENDER_SVC)
-        self.assertIn("certbot role first", text)
-        self.assertIn("certbot_selfsigned_fallback", text)
+        self.assertIn("certificates.{{ _tls_certificate_name }}.method", text)
+        self.assertIn("certbot uses", text)
+        self.assertIn("inventory/selfsigned use", text)
+        self.assertIn("certificates.{{ _tls_certificate_name }}.{fullchain_path,privkey_path}", text)
+        self.assertIn("certificates.{{ _tls_certificate_name }}.{fullchain_pem,privkey_pem}", text)
+
+    def test_vhost_templates_use_resolved_tls_paths(self):
+        for rel in (
+            "roles/nginx/templates/site.conf.j2",
+            "roles/nginx/templates/restricted_site.conf.j2",
+            "roles/nginx/templates/client_cert_site.conf.j2",
+            "roles/nginx/templates/nextcloud.conf.j2",
+        ):
+            text = _read(rel)
+            self.assertIn("ssl_certificate {{ _tls_fullchain_path }}", text)
+            self.assertIn("ssl_certificate_key {{ _tls_privkey_path }}", text)
 
 
         self.assertIn("www-data", _read(self.NGINX_CONF))
@@ -1284,7 +1455,8 @@ class TestPfFirewall(unittest.TestCase):
         """Mail ports must only open when mailserver is active."""
         text = _read(self.PF_CONF)
         self.assertIn("mailserver", text)
-        self.assertIn("25, 587, 465, 143", text)
+        self.assertIn("mailserver_ports", text)
+        self.assertIn("default([25, 587, 143, 465])", text)
 
     def test_pf_conf_node_exporter_conditional(self):
         text = _read(self.PF_CONF)

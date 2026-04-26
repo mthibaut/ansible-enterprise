@@ -41,8 +41,44 @@ class TestServicesSchema(unittest.TestCase):
     def test_generic_service_with_web(self):
         self._ok({"app": {
             "enabled": True, "domain": "app.example.com", "owner": "www",
-            "security": {"tls": True, "expose_https": True},
+            "security": {"tls": {"enabled": True, "certificate": "app.example.com"}, "expose_https": True},
             "web": {"upstream_host": "127.0.0.1", "upstream_port": 8080},
+        }})
+
+    def test_service_tls_certificate_reference_valid(self):
+        self._ok({"app": {
+            "enabled": True, "domain": "app.example.com", "owner": "www",
+            "security": {
+                "tls": {
+                    "enabled": True,
+                    "certificate": "shared.example.com",
+                }
+            },
+        }})
+
+    def test_service_tls_method_invalid(self):
+        self._fail({"app": {
+            "enabled": True, "domain": "app.example.com", "owner": "www",
+            "security": {"tls": {"enabled": True, "method": "inventory"}},
+        }})
+
+    def test_service_tls_material_invalid(self):
+        self._fail({"app": {
+            "enabled": True, "domain": "app.example.com", "owner": "www",
+            "security": {
+                "tls": {
+                    "enabled": True,
+                    "certificate": "shared.example.com",
+                    "fullchain_pem": "CERT",
+                    "privkey_pem": "KEY",
+                }
+            },
+        }})
+
+    def test_service_tls_boolean_invalid(self):
+        self._fail({"app": {
+            "enabled": True, "domain": "app.example.com", "owner": "www",
+            "security": {"tls": True},
         }})
 
     def test_nextcloud_service_with_required_app_fields(self):
