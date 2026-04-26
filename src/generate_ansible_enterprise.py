@@ -7970,15 +7970,6 @@ proxmox:
   #       enabled: true
   backup_jobs: {}
   backup_jobs_prefix: "ansible-"
-  # SMTP relay for Proxmox email alerts (legacy postfix relayhost).
-  # NOTE: future migration target -- /cluster/notifications/endpoints API.
-  smtp:
-    enabled: false
-    relayhost: ""
-    port: 587
-    user: ""
-    # Password from vault: proxmox_smtp_password
-    from: ""
   # Cluster join configuration (optional). Different from is_clustered above:
   # this drives 'pvecm add' on initial bootstrap. Leave name empty to skip.
   cluster:
@@ -7998,13 +7989,6 @@ proxmox:
 - name: Restart pveproxy
   systemd:
     name: pveproxy
-    state: restarted
-    daemon_reload: true
-  when: not ansible_check_mode
-
-- name: Restart postfix
-  systemd:
-    name: postfix
     state: restarted
     daemon_reload: true
   when: not ansible_check_mode
@@ -8107,52 +8091,6 @@ proxmox:
   delegate_to: localhost
   run_once: "{{ proxmox.is_clustered | default(true) | bool }}"
   when: proxmox.backup_jobs | default({}) | length > 0
-
-# -- SMTP relay for alerts ---------------------------------------------------
-- name: Configure postfix relayhost
-  lineinfile:
-    path: /etc/postfix/main.cf
-    regexp: '^relayhost\\s*='
-    line: "relayhost = [{{ proxmox.smtp.relayhost }}]:{{ proxmox.smtp.port | default(587) }}"
-  when: proxmox.smtp.enabled | default(false) | bool
-  notify: Restart postfix
-
-- name: Configure postfix SASL authentication
-  copy:
-    content: |
-      [{{ proxmox.smtp.relayhost }}]:{{ proxmox.smtp.port | default(587) }} {{ proxmox.smtp.user }}:{{ proxmox_smtp_password | default('') }}
-    dest: /etc/postfix/sasl_passwd
-    owner: root
-    group: "{{ _root_group }}"
-    mode: "0600"
-  when:
-    - proxmox.smtp.enabled | default(false) | bool
-    - proxmox.smtp.user | default('') | length > 0
-  no_log: true
-  notify: Restart postfix
-
-- name: Hash postfix SASL password map
-  command: postmap /etc/postfix/sasl_passwd
-  when:
-    - proxmox.smtp.enabled | default(false) | bool
-    - proxmox.smtp.user | default('') | length > 0
-  changed_when: false
-  notify: Restart postfix
-
-- name: Enable postfix SASL in main.cf
-  blockinfile:
-    path: /etc/postfix/main.cf
-    marker: "# {mark} ANSIBLE MANAGED - SASL AUTH"
-    block: |
-      smtp_use_tls = yes
-      smtp_sasl_auth_enable = yes
-      smtp_sasl_security_options = noanonymous
-      smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
-      smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
-  when:
-    - proxmox.smtp.enabled | default(false) | bool
-    - proxmox.smtp.user | default('') | length > 0
-  notify: Restart postfix
 
 # -- IOMMU / PCI passthrough ------------------------------------------------
 - name: Enable IOMMU in GRUB

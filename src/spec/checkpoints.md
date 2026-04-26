@@ -3812,3 +3812,27 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        for the current contracts and rejects the stale future-work strings.
      - Validation: `make generate`, `make validate`, `make test`,
        `make checkpoints`, and `make services` pass.
+
+233. `checkpoint-233-proxmox-drop-legacy-smtp`
+     Removes the unused legacy postfix-relay SMTP path from the proxmox
+     role. The block was dormant code (no inventory under `gilde/` set
+     `proxmox.smtp.enabled: true`); per-job `mailto:` on `backup_jobs`
+     handles the common backup-failure-alert case, and full migration to
+     PVE's `/cluster/notifications/endpoints` API is deferred until a real
+     consumer exists.
+     - `roles/proxmox/defaults/main.yml` drops the `proxmox.smtp` block
+       (`enabled`, `relayhost`, `port`, `user`, `from`) and the
+       `proxmox_smtp_password` vault reference.
+     - `roles/proxmox/tasks/main.yml` removes four postfix tasks:
+       `Configure postfix relayhost` (lineinfile in main.cf),
+       `Configure postfix SASL authentication` (sasl_passwd copy),
+       `Hash postfix SASL password map` (postmap), and
+       `Enable postfix SASL in main.cf` (blockinfile of TLS+SASL stanza).
+     - `roles/proxmox/handlers/main.yml` drops the `Restart postfix`
+       handler since nothing notifies it any more.
+     - Tests: `test_proxmox.py` adds
+       `test_legacy_postfix_smtp_relay_removed` asserting the smtp/postfix
+       references are gone from defaults, tasks, and handlers; the
+       additive-only test was retargeted to the new IOMMU end-marker.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.
