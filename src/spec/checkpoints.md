@@ -3779,3 +3779,21 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        invariants, and removal of the legacy `vzdump.conf.j2` template.
      - Validation: `make generate`, `make validate`, `make test`,
        `make checkpoints`, and `make services` pass.
+
+231. `checkpoint-231-master-playbooks`
+     Adds generated wrapper playbooks for common push-mode workflows.
+     - `full-setup.yml` imports `infra.yml`, `lxc_bootstrap.yml`, and
+       `site.yml` in order, providing a single-command path for complete
+       inventories that need infrastructure provisioning, Python bootstrap,
+       and full host configuration.
+     - `baseline.yml` is a small standalone play that stops after
+       preflight, `common`, and `ssh_hardening`, giving operators a named
+       "usable baseline" workflow before applying the full role set.
+     - `scripts/generation_contracts.yml` now includes both new generated
+       playbooks, and the generator lock tracks 167 generated files.
+     - README playbook documentation now lists both wrapper playbooks and
+       shows example commands.
+     - Tests: `test_generator_invariants.py` covers full-setup import
+       ordering, baseline role scope, and the baseline host lock guard.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.

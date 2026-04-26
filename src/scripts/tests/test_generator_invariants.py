@@ -4,7 +4,8 @@ Regression tests for generator invariants established during the
 found in production without a test catching it.
 
 Coverage:
-- host_locked safety guard present in all 5 entry playbooks
+- host_locked safety guard present in entry playbooks that define plays
+- master wrapper playbooks are generated for full setup and baseline setup
 - state: started tasks skip under --check (not ansible_check_mode)
 - state: restarted/reloaded tasks skip under --check
 - Deploy <x> nftables drop-in tasks gated on firewall_enabled
@@ -39,6 +40,7 @@ class TestHostLockedGuard(unittest.TestCase):
         "lxc_bootstrap.yml",
         "bootstrap.yml",
         "lxc_export.yml",
+        "baseline.yml",
     ]
 
     def test_each_playbook_has_end_host_guard(self):
@@ -60,6 +62,35 @@ class TestHostLockedGuard(unittest.TestCase):
                 "Announce host lockdown", text,
                 msg=f"{pb} missing debug announcement for locked hosts",
             )
+
+
+# ---------------------------------------------------------------------------
+# master wrapper playbooks
+# ---------------------------------------------------------------------------
+
+class TestMasterPlaybooks(unittest.TestCase):
+    """Convenience playbooks must compose documented workflows."""
+
+    def test_full_setup_imports_infra_bootstrap_and_site_in_order(self):
+        text = _read("full-setup.yml")
+        self.assertIn("import_playbook: infra.yml", text)
+        self.assertIn("import_playbook: lxc_bootstrap.yml", text)
+        self.assertIn("import_playbook: site.yml", text)
+        self.assertLess(text.index("import_playbook: infra.yml"),
+                        text.index("import_playbook: lxc_bootstrap.yml"))
+        self.assertLess(text.index("import_playbook: lxc_bootstrap.yml"),
+                        text.index("import_playbook: site.yml"))
+
+    def test_baseline_stops_after_common_and_ssh_hardening(self):
+        text = _read("baseline.yml")
+        self.assertIn("name: preflight", text)
+        self.assertIn("- role: common", text)
+        self.assertIn("- role: ssh_hardening", text)
+        self.assertIn("ssh_manage | default(true) | bool", text)
+        self.assertNotIn("- role: users", text)
+        self.assertNotIn("- role: firewall", text)
+        self.assertNotIn("- role: nginx", text)
+        self.assertNotIn("- role: proxmox", text)
 
 
 # ---------------------------------------------------------------------------

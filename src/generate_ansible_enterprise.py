@@ -9519,6 +9519,57 @@ user_accounts: []
         - item is changed
         - item.item.extract | default(false) | bool
 """,
+    'full-setup.yml': """\
+---
+# full-setup.yml - Provision infrastructure, bootstrap Python, then configure hosts.
+#
+# This is a convenience wrapper around the normal three-step push workflow:
+#   infra.yml -> lxc_bootstrap.yml -> site.yml
+#
+# Use it when inventory already contains complete infra + host configuration:
+#   ansible-playbook -i inventory ansible-enterprise/build/full-setup.yml
+#
+# The imported playbooks keep their own host_locked guards and task-level
+# safety checks.
+
+- import_playbook: infra.yml
+- import_playbook: lxc_bootstrap.yml
+- import_playbook: site.yml
+""",
+    'baseline.yml': """\
+---
+# baseline.yml - Minimal usable baseline for already-existing hosts.
+#
+# Runs only preflight, common, and ssh_hardening. This is useful when you want
+# a host to become reachable and admin-ready before applying the full role set.
+
+- name: Enterprise baseline configuration
+  hosts: all
+  become: true
+
+  pre_tasks:
+    - name: Announce host lockdown
+      debug:
+        msg: >-
+          Host {{ inventory_hostname }} is locked (host_locked=true).
+          All roles skipped. Set host_locked=false to re-enable.
+      when: host_locked | default(false) | bool
+
+    - name: Stop processing this host when locked
+      meta: end_host
+      when: host_locked | default(false) | bool
+
+    - name: Run preflight validation
+      include_role:
+        name: preflight
+
+  roles:
+    - role: common
+      tags: [common, always]
+    - role: ssh_hardening
+      tags: [ssh_hardening, ssh]
+      when: ssh_manage | default(true) | bool
+""",
     'site.yml': """\
 ---
 - name: Enterprise configuration

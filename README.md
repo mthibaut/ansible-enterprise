@@ -82,6 +82,10 @@ ansible-playbook -i inventory/hosts.ini infra.yml
 
 # Install Python on minimal LXC containers (skip for VMs with cloud-init)
 ansible-playbook -i inventory/hosts.ini lxc_bootstrap.yml
+
+# Or run infrastructure provisioning, LXC bootstrap, and host configuration
+# as one workflow when the inventory is complete:
+ansible-playbook -i inventory/hosts.ini full-setup.yml --ask-vault-pass
 ```
 
 See [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md) for full details, inventory format, lifecycle controls, and helper scripts.
@@ -90,6 +94,9 @@ See [Proxmox infrastructure provisioning](docs/infrastructure/proxmox.md) for fu
 
 ```bash
 ansible-playbook -i inventory/hosts.ini site.yml --ask-vault-pass
+
+# Minimal baseline only: preflight, common, and SSH hardening
+ansible-playbook -i inventory/hosts.ini baseline.yml --ask-vault-pass
 ```
 
 ### Pull mode
@@ -106,6 +113,8 @@ bash scripts/bootstrap_pull_host.sh
 | --- | --- | --- |
 | `infra.yml` | 1 | Create, update, or destroy infrastructure instances from inventory |
 | `lxc_bootstrap.yml` | 1 | Install Python on minimal LXC containers via `raw` module |
+| `full-setup.yml` | 1+2 | Run `infra.yml`, `lxc_bootstrap.yml`, then `site.yml` |
+| `baseline.yml` | 2 | Apply only preflight, common, and SSH hardening |
 | `bootstrap.yml` | 1 | Generate per-host bootstrap shell scripts on the controller |
 | `site.yml` | 2 | Configure hosts with roles (requires Python on targets) |
 
