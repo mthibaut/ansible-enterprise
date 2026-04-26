@@ -3797,3 +3797,18 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        ordering, baseline role scope, and the baseline host lock guard.
      - Validation: `make generate`, `make validate`, `make test`,
        `make checkpoints`, and `make services` pass.
+
+232. `checkpoint-232-spec-freshness`
+     Cleans up stale source-spec future-work text that contradicted later
+     implemented checkpoints.
+     - `src/spec/architecture.md` no longer says capability routing still
+       needs to be implemented; it documents the current compatibility
+       model where `mailserver.enabled` and `_required_providers` can both
+       activate mailserver behaviour.
+     - `src/spec/roles.md` now describes the current Docker/FPM Nextcloud
+       contract and nginx's existing `nextcloud.conf.j2` integration
+       instead of the obsolete host-installed php-fpm future work.
+     - Tests: `test_generator_invariants.py` now checks these source specs
+       for the current contracts and rejects the stale future-work strings.
+     - Validation: `make generate`, `make validate`, `make test`,
+       `make checkpoints`, and `make services` pass.

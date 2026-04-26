@@ -21,10 +21,38 @@ import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
 BUILD = REPO / "build"
+SRC = REPO / "src"
 
 
 def _read(rel):
     return (BUILD / rel).read_text(encoding="utf-8")
+
+
+def _read_src(rel):
+    return (SRC / rel).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# source spec freshness
+# ---------------------------------------------------------------------------
+
+class TestSourceSpecFreshness(unittest.TestCase):
+    """Source specs must not keep stale future-work text after implementation."""
+
+    def test_architecture_describes_implemented_capability_routing(self):
+        text = _read_src("spec/architecture.md")
+        self.assertIn("Capabilities provider-dispatch", text)
+        self.assertIn("`requires: [mail]` correctly activates mailserver", text)
+        self.assertNotIn("implement capability routing via the `capabilities` dict", text)
+        self.assertNotIn("Mail ports (25, 587, 993, 465) remain conditional", text)
+
+    def test_roles_spec_describes_current_nextcloud_nginx_contract(self):
+        text = _read_src("spec/roles.md")
+        self.assertIn("nginx / nextcloud FPM integration", text)
+        self.assertIn("roles/nginx/templates/nextcloud.conf.j2", text)
+        self.assertIn("nextcloud:fpm", text)
+        self.assertNotIn("Until that work is done", text)
+        self.assertNotIn("Future work: roles/nginx/templates/nextcloud.conf.j2", text)
 
 
 # ---------------------------------------------------------------------------

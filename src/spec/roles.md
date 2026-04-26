@@ -45,18 +45,16 @@ The certbot role includes a dig pre-flight check that fails fast with a
 clear error if the domain does not resolve to this host before attempting
 certificate issuance.
 
-### nginx / nextcloud php-fpm integration
+### nginx / nextcloud FPM integration
 
-The nextcloud role installs php-fpm and starts Nextcloud via occ. It does
-not configure the nginx <-> php-fpm socket because that is nginx's concern.
+The nextcloud role deploys a Docker Compose stack with a `nextcloud:fpm`
+application container listening on `127.0.0.1:{{ nextcloud_fpm_port }}`.
+It does not configure nginx because that is nginx's concern.
 
-The nginx role is responsible for rendering the php-fpm upstream block in
-vhost templates for services whose app type is nextcloud. Until that work is
-done the nginx <-> php-fpm socket path is not wired end-to-end.
+The nginx role renders `roles/nginx/templates/nextcloud.conf.j2` for
+services whose app type is `nextcloud`. That template serves static files
+from `nextcloud_install_dir` and proxies PHP requests to the Nextcloud FPM
+container over TCP.
 
 This boundary is intentional. Do not add nginx configuration tasks to the
-nextcloud role; add a nextcloud-specific vhost template to the nginx role
-instead.
-
-Future work: roles/nginx/templates/nextcloud.conf.j2 and the corresponding
-branch in roles/nginx/tasks/render_service.yml for type == 'nextcloud'.
+nextcloud role; keep HTTP vhost rendering in the nginx role.

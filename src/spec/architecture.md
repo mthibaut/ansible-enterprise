@@ -50,17 +50,17 @@ application-level configuration. It currently drives:
   covered by a declared zone (apex match or subdomain). Zones are created
   and registered in `named.conf.local` automatically. (checkpoint-047)
 
-The following are not yet service-driven:
+The following are not yet fully service-driven:
 
-- **firewall**: HTTP/HTTPS port rules and DNS port rules are now service-driven
-  (checkpoint-049). Mail ports (25, 587, 993, 465) remain conditional on
-  `mailserver.enabled` — a role flag — until the capabilities layer is
-  implemented.
+- **firewall**: HTTP/HTTPS and DNS port rules derive from `services`, while
+  mail ports are opened by the mailserver role when that role is active.
+  The mailserver role can be activated directly with `mailserver.enabled` or
+  indirectly through `requires: [mail]` capability resolution.
 - **application deployment**: nextcloud and mailserver are conditionally
   included roles, not service-dispatched deployments.
 
-Future work: derive mail port rules from a services-dict mailserver entry,
-and implement capability routing via the `capabilities` dict.
+Future work: make role activation rely solely on capability resolution once
+legacy flag compatibility is no longer needed.
 
 ## Capabilities provider-dispatch
 
@@ -77,8 +77,8 @@ translates those declarations into `_required_providers` at play time.
   respective role activation conditions
 
 **Not yet fully service-driven:**
-- Mail port rules derive from `mailserver.enabled` flag as well as
-  `_required_providers`; the flag path still exists for backwards compatibility
+- `mailserver.enabled` remains a backwards-compatible activation path in
+  addition to `_required_providers`
 - Application roles (nextcloud, mailserver) remain conditionally-included
   roles, not capability-dispatched deployments
 - There is no schema enforcement that a service `requires` only capabilities
