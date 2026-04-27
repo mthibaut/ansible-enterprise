@@ -3881,3 +3881,123 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      - Validation: `make generate`, `make validate`, `make test`
        (507 tests, was 493), `make checkpoints`, and `make services`
        pass.
+
+235. `checkpoint-235-opendkim-userid`
+     Adds `UserID opendkim` to the generated `opendkim.conf` so the
+     daemon drops privileges to the `opendkim` user. The Debian
+     `opendkim.service` unit ships with no `User=`, so without this
+     directive opendkim runs as root and refuses to load
+     `mail.private` (owned `opendkim:opendkim` 0600) with
+     `key data is not secure: not owned by the executing uid (0)`.
+     - Template `opendkim.conf.j2`: `UserID opendkim` added inside
+       the existing non-FreeBSD guard (FreeBSD's port handles uid via
+       rc.d).
+     - Test: new `TestOpendkimConfTemplate` in
+       `test_mailserver_config.py` asserts the directive is present
+       and guarded.
+
+236. `checkpoint-236-dkim-inline-material`
+     Lets operators install a known DKIM key from vault for host
+     migration so the published `mail._domainkey` DNS TXT record stays
+     valid on the new host. Without this, `opendkim-genkey` creates a
+     fresh key on each new host and downstream verifiers fail until
+     DNS propagates a replacement record.
+     - Defaults: `mailserver.dkim.private_key_pem` and
+       `mailserver.dkim.txt_record` (flat: `mailserver_dkim_*`); both
+       default empty so the existing genkey path is unchanged.
+     - Tasks: two new copy tasks (`Install inline DKIM private key`,
+       `Install inline DKIM public TXT record`) precede the
+       `opendkim-genkey` task; both `no_log: true` so the secret
+       material does not leak into output (per checkpoint-228 model).
+       The `creates:` guard on genkey makes it a no-op when an inline
+       PEM was written first.
+     - Mode 0600 on both inline tasks: the existing `Set DKIM key
+       ownership` loop forces 0600 on `mail.txt` too, and a 0644
+       declared on the copy task fights the chown loop on every run.
+     - Tests: new `TestDkimInlineMaterial` covers defaults shape,
+       task presence, no_log, ordering vs genkey, and the
+       copy/chown mode-match invariant.
+
+237. `checkpoint-237-nginx-set-fact-split`
+     Splits the `Resolve TLS certificate paths` task in
+     `roles/nginx/tasks/render_service.yml` into two `set_fact` tasks.
+     Ansible 2.18+ enforces strictly that keys within a single
+     `set_fact` cannot reference each other; the previous version
+     defined `_ae_tls_cert_dir` and used it in `_tls_fullchain_path`
+     in the same block, which failed at runtime with
+     `'_ae_tls_cert_dir' is undefined` on TLS-enabled services.
+     - Tasks: `Set TLS storage directories` runs first, then
+       `Resolve TLS certificate paths` consumes them. Same pattern
+       already used by certbot and mailserver roles.
+     - Test: new `TestSetFactKeysDoNotSelfReference` in
+       `test_generator_invariants.py` walks every set_fact block in
+       `render_service.yml` and fails on any block that both defines
+       and templates `_ae_tls_*_dir`.
+
+238. `checkpoint-238-apache2-vhost-layout`
+     **BREAKING.** Default DocumentRoot moves from
+     `/var/www/<domain>` to `/var/www/<domain>/htdocs`. Existing
+     apache2 services that rely on the bare base will silently 404
+     until files are moved or `app.document_root` is set explicitly.
+     Apache2 role is recent (checkpoint-202), so the consumer set is
+     small.
+     - New optional service knobs: `app.web_root` (defaults
+       `/var/www/<domain>`), `app.cgi_bin_enabled` (default false),
+       `app.cgi_bin_path` (defaults `<web_root>/cgi-bin/`).
+     - `apache2_vhost.conf.j2`: introduces `_web_base`, `_docroot`,
+       `_cgi_enabled`, `_cgi_path`. ScriptAlias and `<Directory>`
+       block render only when `cgi_bin_enabled: true`.
+     - Tasks: new `Ensure Apache2 DocumentRoot exists` (always),
+       `Ensure Apache2 cgi-bin directory exists` (when enabled), both
+       owned by the service `owner`. New `Enable mod_cgid (Debian)`
+       task gated on any service opting in.
+     - Schema: `web_root`, `cgi_bin_enabled`, `cgi_bin_path` added;
+       `document_root` description updated.
+     - Tests: new `test_apache2.py` covers template defaults, gating,
+       directory creation, ownership, and mod_cgid trigger.
+
+239. `checkpoint-239-ssh-hardening-overrides`
+     Adds per-host overrides for sshd config directives that
+     previously had only auto-derived or hardcoded values. Use case:
+     a staging host on the public internet where the auto rule
+     (dev/staging + `admin_dev_password_hash` set ⇒ password auth
+     yes) would otherwise enable password auth.
+     - Defaults: `ssh_password_authentication` (default `auto`),
+       `ssh_permit_root_login` (default `auto`),
+       `ssh_pubkey_authentication` (default `'yes'`),
+       `ssh_allow_users` (default `''`, auto-derives from
+       `admin_users` plus root).
+     - Templates: both `99-ansible-enterprise.conf.j2` (drop-in) and
+       `sshd_config.j2` (full file) consume the new vars; auto path
+       preserves existing behavior.
+     - Tests: new `test_ssh_hardening.py` covers defaults and
+       override paths in both templates. Pre-existing
+       `AllowUsers root ...` literal assertions in
+       `test_distro_conditionals.py` updated to the new
+       `'root ' ~ (_admin_user_names ...)` shape.
+
+240. `checkpoint-240-mailserver-imap-dkim-toggles`
+     Lets operators run Postfix without Dovecot and/or without
+     OpenDKIM. Use case: backup-MX or outbound-only smarthosts that
+     need only port 25; hosts that don't sign outbound mail.
+     - Defaults: `mailserver.imap.enabled` (flat
+       `mailserver_imap_enabled`, default true) and
+       `mailserver.dkim.enabled` (flat `mailserver_dkim_enabled`,
+       default true). `open_ports` default drops to `[25]` when
+       `imap.enabled` is false; otherwise `[25, 587, 143, 465]`.
+     - Tasks: package install split into postfix base + dovecot
+       (when imap) + opendkim (when dkim) chains via three
+       `set_fact` calls. EPEL/CRB enabling and `/etc/opendkim` dir
+       creation gated on dkim.enabled. Two `block:` wrappers gate
+       Dovecot config and service start; two more gate OpenDKIM
+       config and service start. Pre-existing `_mail_packages`
+       single-ternary tests updated to the new
+       `_postfix_pkgs`/`_dovecot_pkgs`/`_opendkim_pkgs` shape.
+     - Templates: `main.cf.j2` SASL block and recipient_restrictions
+       branch on imap; milter block gated on dkim.
+       `master.cf.j2` `submission` and `smtps` listeners gated on
+       imap; only `smtp` (port 25) emitted when imap.enabled is
+       false.
+     - Tests: new `TestImapAndDkimToggles` (12 tests) covers
+       defaults, port default, package conditionals, gated blocks,
+       and template branching.

@@ -149,7 +149,20 @@
             },
             "document_root": {
               "type": "string",
-              "description": "DocumentRoot for Apache2 vhost. Defaults to /var/www/<domain>/."
+              "description": "DocumentRoot for Apache2 vhost. Defaults to <web_root>/htdocs."
+            },
+            "web_root": {
+              "type": "string",
+              "description": "Base directory for the site layout. Defaults to /var/www/<domain>. document_root and cgi_bin_path default below this."
+            },
+            "cgi_bin_enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, render a ScriptAlias for /cgi-bin/, create the cgi-bin directory, and enable mod_cgid (Debian)."
+            },
+            "cgi_bin_path": {
+              "type": "string",
+              "description": "Filesystem path the /cgi-bin/ alias maps to. Defaults to <web_root>/cgi-bin/."
             },
             "port": {
               "type": "integer",

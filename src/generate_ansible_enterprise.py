@@ -254,6 +254,20 @@ certbot_email: ""
 # mailserver_masquerade_domains: [example.com]
 # mailserver_local_domains: [example.com]
 # mailserver_relay_domains: []
+# Optional: skip Dovecot install/config and close 587/143/465 (port 25 only).
+# mailserver_imap_enabled: false
+# Optional: skip OpenDKIM install/config and the postfix milter.
+# mailserver_dkim_enabled: false
+#
+# Optional: declare DKIM key material inline so the role does NOT generate a
+# new key with opendkim-genkey. Use this for host migration to keep the
+# published mail._domainkey DNS TXT record valid on the new host.
+# mailserver_dkim_private_key_pem: |
+#   -----BEGIN PRIVATE KEY-----
+#   ...
+#   -----END PRIVATE KEY-----
+# mailserver_dkim_txt_record: |
+#   "v=DKIM1; k=rsa; p=MIIBIjAN..."
 
 # Nextcloud (required when services.nextcloud.enabled: true):
 nextcloud_admin_password: "CHANGE_ME"
@@ -792,6 +806,27 @@ ssh_port: 22
 # Set to false to skip sudo installation and sudoers configuration.
 # Useful for hosts where sudo is not wanted (e.g. appliances).
 sudo_enabled: true
+# sshd PasswordAuthentication override. Three values:
+#   auto  - default; yes when deployment_environment != production AND
+#           admin_dev_password_hash is set, else no
+#   yes   - force enable (only takes effect when admin_dev_password_hash
+#           is set; otherwise password auth is meaningless)
+#   no    - force disable. Use this for staging/dev hosts that are
+#           internet-exposed, where the auto rule would otherwise enable
+#           password auth.
+ssh_password_authentication: auto
+# sshd PermitRootLogin override. Values:
+#   auto  - default; yes when deployment_environment != production AND
+#           admin_dev_password_hash is set, else prohibit-password
+#   yes | no | prohibit-password | forced-commands-only | without-password
+ssh_permit_root_login: auto
+# sshd PubkeyAuthentication override. Values: yes | no.
+# Default yes; do not disable unless you really mean it.
+ssh_pubkey_authentication: 'yes'
+# sshd AllowUsers override. Empty string means auto-derive from admin_users
+# plus root. Set to a space-separated list to override entirely, e.g.
+#   ssh_allow_users: "root deploy ops"
+ssh_allow_users: ''
 """,
     'roles/geoip/defaults/main.yml': """\
 ---
@@ -843,6 +878,26 @@ geoip:
 #   mailserver_open_ports:          DEPRECATED alias for mailserver_ports.
 #   mailserver_tls_enabled:         Enable TLS for Postfix/Dovecot.
 #   mailserver_tls_certificate:     Certificate registry key; defaults to domain.
+#   mailserver_imap_enabled:        Install/configure Dovecot and open
+#                                   submission/IMAP/SMTPS ports. Default true.
+#                                   Set to false on outbound-only or backup-MX
+#                                   hosts that need only Postfix on port 25.
+#                                   When false, the firewall default opens
+#                                   only [25] and master.cf drops the
+#                                   submission (587) and smtps (465) listeners.
+#   mailserver_dkim_enabled:        Install/configure OpenDKIM and wire it as
+#                                   a Postfix milter. Default true. Set to
+#                                   false on hosts that don't sign outbound
+#                                   mail (e.g. plain backup MX).
+#   mailserver_dkim_private_key_pem: Inline DKIM private key (PEM). When set,
+#                                   the role installs this key instead of
+#                                   generating one with opendkim-genkey. Use for
+#                                   host migration so the published DNS TXT
+#                                   record stays valid. Set in vault (secret).
+#   mailserver_dkim_txt_record:     Matching DKIM public TXT record content,
+#                                   written to mail.txt for operator
+#                                   inspection. Required when
+#                                   mailserver_dkim_private_key_pem is set.
 mailserver:
   enabled: "{{ mailserver_enabled | default(false) | bool }}"
   domain: "{{ mailserver_domain | default('mail.example.com') }}"
@@ -854,10 +909,16 @@ mailserver:
   masquerade_hosts: "{{ mailserver_masquerade_hosts | default([]) }}"
   local_domains: "{{ mailserver_local_domains | default([]) }}"
   relay_domains: "{{ mailserver_relay_domains | default([]) }}"
-  open_ports: "{{ mailserver_ports | default(mailserver_open_ports | default([25, 587, 143, 465])) }}"
+  open_ports: "{{ mailserver_ports | default(mailserver_open_ports | default(([25, 587, 143, 465] if (mailserver_imap_enabled | default(true) | bool) else [25]))) }}"
   tls:
     enabled: "{{ mailserver_tls_enabled | default(false) | bool }}"
     certificate: "{{ mailserver_tls_certificate | default(mailserver_domain | default('mail.example.com')) }}"
+  imap:
+    enabled: "{{ mailserver_imap_enabled | default(true) | bool }}"
+  dkim:
+    enabled: "{{ mailserver_dkim_enabled | default(true) | bool }}"
+    private_key_pem: "{{ mailserver_dkim_private_key_pem | default('') }}"
+    txt_record: "{{ mailserver_dkim_txt_record | default('') }}"
 """,
     'roles/file_copy/defaults/main.yml': """\
 ---
@@ -4114,19 +4175,43 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
 """,
     'roles/mailserver/tasks/main.yml': """\
 ---
-# Resolve distro-specific package names.
-- name: Set distro-specific mailserver package names
+# Resolve distro-specific package names. Packages are assembled in three
+# parts so imap and dkim can be opted out independently:
+#   - postfix base (always)
+#   - dovecot (when mailserver.imap.enabled)
+#   - opendkim (when mailserver.dkim.enabled)
+- name: Set postfix base packages
   set_fact:
     _mail_packages: >-
       {{
-        ['postfix', 'postfix-lmdb', 'dovecot-core', 'dovecot-imapd', 'opendkim', 'opendkim-tools']
+        ['postfix', 'postfix-lmdb']
         if ansible_facts.os_family == 'Debian' else
-        ['postfix', 'dovecot', 'opendkim']
-        if ansible_facts.os_family == 'Archlinux' else
-        ['postfix', 'dovecot', 'opendkim']
-        if ansible_facts.os_family == 'FreeBSD' else
-        ['postfix', 'dovecot', 'opendkim', 'opendkim-tools']
+        ['postfix']
       }}
+
+- name: Append dovecot packages
+  set_fact:
+    _mail_packages: "{{ _mail_packages + _dovecot_pkgs }}"
+  vars:
+    _dovecot_pkgs: >-
+      {{
+        ['dovecot-core', 'dovecot-imapd']
+        if ansible_facts.os_family == 'Debian' else
+        ['dovecot']
+      }}
+  when: mailserver.imap.enabled | default(true) | bool
+
+- name: Append opendkim packages
+  set_fact:
+    _mail_packages: "{{ _mail_packages + _opendkim_pkgs }}"
+  vars:
+    _opendkim_pkgs: >-
+      {{
+        ['opendkim', 'opendkim-tools']
+        if ansible_facts.os_family in ['Debian', 'RedHat'] else
+        ['opendkim']
+      }}
+  when: mailserver.dkim.enabled | default(true) | bool
 
 # opendkim is not in the default RHEL 9 repositories.
 # EPEL and CodeReady Builder (CRB) must be enabled first.
@@ -4134,19 +4219,29 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
   package:
     name: epel-release
     state: present
-  when: ansible_facts.os_family == "RedHat"
+  when:
+    - ansible_facts.os_family == "RedHat"
+    - mailserver.dkim.enabled | default(true) | bool
 
 - name: Enable CodeReady Builder repository (RedHat family)
   command: dnf config-manager --set-enabled crb
   changed_when: false
-  when: ansible_facts.os_family == "RedHat"
+  when:
+    - ansible_facts.os_family == "RedHat"
+    - mailserver.dkim.enabled | default(true) | bool
 
 - name: Install mail packages
   package:
     name: "{{ _mail_packages }}"
     state: present
 
-- name: Ensure mail config directories exist
+- name: Ensure postfix config directory exists
+  file:
+    path: /etc/postfix
+    state: directory
+    mode: "0755"
+
+- name: Ensure opendkim config directories exist
   file:
     path: "{{ item }}"
     state: directory
@@ -4154,10 +4249,11 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
   loop:
     - /etc/opendkim
     - /etc/opendkim/keys
-    - /etc/postfix
-  when: ansible_facts.os_family != 'FreeBSD'
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - mailserver.dkim.enabled | default(true) | bool
 
-- name: Ensure mail config directories exist (FreeBSD)
+- name: Ensure opendkim config directories exist (FreeBSD)
   file:
     path: "{{ item }}"
     state: directory
@@ -4165,8 +4261,9 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
   loop:
     - /var/db/dkim
     - /usr/local/etc/mail
-    - /etc/postfix
-  when: ansible_facts.os_family == 'FreeBSD'
+  when:
+    - ansible_facts.os_family == 'FreeBSD'
+    - mailserver.dkim.enabled | default(true) | bool
 
 # Set opendkim paths: FreeBSD ports uses /var/db/dkim and /usr/local/etc/mail
 - name: Set opendkim paths
@@ -4266,139 +4363,180 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     mode: "0644"
   notify: Reload postfix
 
-# Set dovecot config directory: FreeBSD ports uses /usr/local/etc/dovecot
-- name: Set dovecot config directory
-  set_fact:
-    _dovecot_conf_dir: "{{ '/usr/local/etc/dovecot' if ansible_facts.os_family == 'FreeBSD' else '/etc/dovecot' }}"
+# Dovecot block: skipped entirely when mailserver.imap.enabled is false
+# (outbound-only / backup-MX hosts that need only Postfix on port 25).
+- name: Configure Dovecot
+  when: mailserver.imap.enabled | default(true) | bool
+  block:
+    # Set dovecot config directory: FreeBSD ports uses /usr/local/etc/dovecot
+    - name: Set dovecot config directory
+      set_fact:
+        _dovecot_conf_dir: "{{ '/usr/local/etc/dovecot' if ansible_facts.os_family == 'FreeBSD' else '/etc/dovecot' }}"
 
-# Arch Linux and FreeBSD dovecot packages do not create conf.d.
-# Debian and RedHat packages create it; ensure it exists on all distros.
-- name: Ensure dovecot conf.d directory exists
-  file:
-    path: "{{ _dovecot_conf_dir }}/conf.d"
-    state: directory
-    owner: root
-    group: "{{ _root_group }}"
-    mode: "0755"
+    # Arch Linux and FreeBSD dovecot packages do not create conf.d.
+    # Debian and RedHat packages create it; ensure it exists on all distros.
+    - name: Ensure dovecot conf.d directory exists
+      file:
+        path: "{{ _dovecot_conf_dir }}/conf.d"
+        state: directory
+        owner: root
+        group: "{{ _root_group }}"
+        mode: "0755"
 
-- name: Deploy dovecot mail location config
-  template:
-    src: 10-mail.conf.j2
-    dest: "{{ _dovecot_conf_dir }}/conf.d/10-mail.conf"
-    mode: "0644"
-  notify: Reload dovecot
+    - name: Deploy dovecot mail location config
+      template:
+        src: 10-mail.conf.j2
+        dest: "{{ _dovecot_conf_dir }}/conf.d/10-mail.conf"
+        mode: "0644"
+      notify: Reload dovecot
 
-# 10-auth.conf enables plain/login auth mechanisms over TLS,
-# required for SASL auth delegation to postfix.
-- name: Deploy dovecot auth mechanisms config
-  template:
-    src: 10-auth.conf.j2
-    dest: "{{ _dovecot_conf_dir }}/conf.d/10-auth.conf"
-    mode: "0644"
-  notify: Reload dovecot
+    # 10-auth.conf enables plain/login auth mechanisms over TLS,
+    # required for SASL auth delegation to postfix.
+    - name: Deploy dovecot auth mechanisms config
+      template:
+        src: 10-auth.conf.j2
+        dest: "{{ _dovecot_conf_dir }}/conf.d/10-auth.conf"
+        mode: "0644"
+      notify: Reload dovecot
 
-- name: Deploy dovecot auth socket config
-  template:
-    src: 10-master.conf.j2
-    dest: "{{ _dovecot_conf_dir }}/conf.d/10-master.conf"
-    mode: "0644"
-  notify: Reload dovecot
+    - name: Deploy dovecot auth socket config
+      template:
+        src: 10-master.conf.j2
+        dest: "{{ _dovecot_conf_dir }}/conf.d/10-master.conf"
+        mode: "0644"
+      notify: Reload dovecot
 
-# Configure Dovecot SSL. When mailserver.tls.enabled is false, built-in SSL is
-# disabled so distro defaults cannot reference missing package certificate paths.
-# On Arch, the package default dovecot.conf enables SSL and references
-# /etc/dovecot/ssl-cert.pem which does not exist, causing a fatal error.
-- name: Deploy dovecot SSL config
-  copy:
-    dest: "{{ _dovecot_conf_dir }}/conf.d/10-ssl.conf"
-    content: |
-      # Dovecot SSL managed by Ansible.
-      {% if mailserver.tls.enabled | default(false) | bool %}
-      ssl = required
-      ssl_cert = <{{ _mail_tls_fullchain_path }}
-      ssl_key = <{{ _mail_tls_privkey_path }}
-      {% else %}
-      ssl = no
-      {% endif %}
-    mode: "0644"
-  notify: Reload dovecot
+    # Configure Dovecot SSL. When mailserver.tls.enabled is false, built-in SSL is
+    # disabled so distro defaults cannot reference missing package certificate paths.
+    # On Arch, the package default dovecot.conf enables SSL and references
+    # /etc/dovecot/ssl-cert.pem which does not exist, causing a fatal error.
+    - name: Deploy dovecot SSL config
+      copy:
+        dest: "{{ _dovecot_conf_dir }}/conf.d/10-ssl.conf"
+        content: |
+          # Dovecot SSL managed by Ansible.
+          {% if mailserver.tls.enabled | default(false) | bool %}
+          ssl = required
+          ssl_cert = <{{ _mail_tls_fullchain_path }}
+          ssl_key = <{{ _mail_tls_privkey_path }}
+          {% else %}
+          ssl = no
+          {% endif %}
+        mode: "0644"
+      notify: Reload dovecot
 
-# Arch: default dovecot.conf references ssl cert files that do not exist.
-# Replace with a minimal config. Dovecot 2.4+ requires dovecot_config_version.
-- name: Deploy minimal dovecot.conf (Arch)
-  copy:
-    dest: "{{ _dovecot_conf_dir }}/dovecot.conf"
-    content: |
-      # Minimal dovecot.conf managed by Ansible.
-      # All configuration is in conf.d/.
-      # dovecot_config_version required by Dovecot 2.4+ (Arch ships 2.4).
-      dovecot_config_version = 2.4.0
-      protocols = imap
-      !include conf.d/*.conf
-    mode: "0644"
-  when: ansible_facts.os_family == 'Archlinux'
-  notify: Reload dovecot
+    # Arch: default dovecot.conf references ssl cert files that do not exist.
+    # Replace with a minimal config. Dovecot 2.4+ requires dovecot_config_version.
+    - name: Deploy minimal dovecot.conf (Arch)
+      copy:
+        dest: "{{ _dovecot_conf_dir }}/dovecot.conf"
+        content: |
+          # Minimal dovecot.conf managed by Ansible.
+          # All configuration is in conf.d/.
+          # dovecot_config_version required by Dovecot 2.4+ (Arch ships 2.4).
+          dovecot_config_version = 2.4.0
+          protocols = imap
+          !include conf.d/*.conf
+        mode: "0644"
+      when: ansible_facts.os_family == 'Archlinux'
+      notify: Reload dovecot
 
-# FreeBSD: port installs dovecot.conf.sample but not dovecot.conf.
-# FreeBSD ships Dovecot 2.3.x which does NOT support dovecot_config_version.
-- name: Deploy minimal dovecot.conf (FreeBSD)
-  copy:
-    dest: "{{ _dovecot_conf_dir }}/dovecot.conf"
-    content: |
-      # Minimal dovecot.conf managed by Ansible.
-      # All configuration is in conf.d/.
-      protocols = imap
-      !include conf.d/*.conf
-    mode: "0644"
-  when: ansible_facts.os_family == 'FreeBSD'
-  notify: Reload dovecot
+    # FreeBSD: port installs dovecot.conf.sample but not dovecot.conf.
+    # FreeBSD ships Dovecot 2.3.x which does NOT support dovecot_config_version.
+    - name: Deploy minimal dovecot.conf (FreeBSD)
+      copy:
+        dest: "{{ _dovecot_conf_dir }}/dovecot.conf"
+        content: |
+          # Minimal dovecot.conf managed by Ansible.
+          # All configuration is in conf.d/.
+          protocols = imap
+          !include conf.d/*.conf
+        mode: "0644"
+      when: ansible_facts.os_family == 'FreeBSD'
+      notify: Reload dovecot
 
-- name: Deploy OpenDKIM config
-  template:
-    src: opendkim.conf.j2
-    dest: "{{ _opendkim_conf }}"
-    mode: "0644"
-  notify: Reload opendkim
+# OpenDKIM block: skipped entirely when mailserver.dkim.enabled is false
+# (e.g. backup MX hosts that don't sign outbound mail).
+- name: Configure OpenDKIM
+  when: mailserver.dkim.enabled | default(true) | bool
+  block:
+    - name: Deploy OpenDKIM config
+      template:
+        src: opendkim.conf.j2
+        dest: "{{ _opendkim_conf }}"
+        mode: "0644"
+      notify: Reload opendkim
 
-- name: Deploy OpenDKIM key table
-  template:
-    src: KeyTable.j2
-    dest: "{{ _opendkim_dir }}/KeyTable"
-    mode: "0644"
-  notify: Reload opendkim
+    - name: Deploy OpenDKIM key table
+      template:
+        src: KeyTable.j2
+        dest: "{{ _opendkim_dir }}/KeyTable"
+        mode: "0644"
+      notify: Reload opendkim
 
-- name: Deploy OpenDKIM signing table
-  template:
-    src: SigningTable.j2
-    dest: "{{ _opendkim_dir }}/SigningTable"
-    mode: "0644"
-  notify: Reload opendkim
+    - name: Deploy OpenDKIM signing table
+      template:
+        src: SigningTable.j2
+        dest: "{{ _opendkim_dir }}/SigningTable"
+        mode: "0644"
+      notify: Reload opendkim
 
-- name: Deploy OpenDKIM trusted hosts
-  template:
-    src: TrustedHosts.j2
-    dest: "{{ _opendkim_dir }}/TrustedHosts"
-    mode: "0644"
-  notify: Reload opendkim
+    - name: Deploy OpenDKIM trusted hosts
+      template:
+        src: TrustedHosts.j2
+        dest: "{{ _opendkim_dir }}/TrustedHosts"
+        mode: "0644"
+      notify: Reload opendkim
 
-- name: Generate DKIM key if absent
-  command: >
-    opendkim-genkey -D {{ _opendkim_dir }} -d {{ mailserver.domain }} -s mail
-  args:
-    creates: "{{ _opendkim_dir }}/mail.private"
-  notify: Reload opendkim
+    # Inline DKIM material support: when mailserver.dkim.private_key_pem is set
+    # (typically via vault for host migration), install it instead of generating
+    # a fresh key. Without this, opendkim-genkey would create a new key on each
+    # new host, invalidating the published mail._domainkey DNS TXT record. The
+    # matching txt_record is written to mail.txt for operator inspection.
+    # Both writes are no_log so the secret material does not leak into output.
+    - name: Install inline DKIM private key
+      copy:
+        content: "{{ mailserver.dkim.private_key_pem }}"
+        dest: "{{ _opendkim_dir }}/mail.private"
+        owner: opendkim
+        group: opendkim
+        mode: "0600"
+      when: mailserver.dkim.private_key_pem | default('') | length > 0
+      no_log: true
+      notify: Reload opendkim
 
-# opendkim runs as the opendkim user and must own its private key.
-- name: Set DKIM key ownership
-  file:
-    path: "{{ item }}"
-    owner: opendkim
-    group: opendkim
-    mode: "0600"
-  loop:
-    - "{{ _opendkim_dir }}/mail.private"
-    - "{{ _opendkim_dir }}/mail.txt"
-  failed_when: false
+    # Mode 0600 (not 0644) so the value matches the subsequent
+    # "Set DKIM key ownership" loop which also targets mail.txt with 0600.
+    # A mismatch causes the two tasks to fight on every run (copy resets to
+    # 0644, chown resets to 0600, repeat) and breaks idempotence.
+    - name: Install inline DKIM public TXT record
+      copy:
+        content: "{{ mailserver.dkim.txt_record }}"
+        dest: "{{ _opendkim_dir }}/mail.txt"
+        owner: opendkim
+        group: opendkim
+        mode: "0600"
+      when: mailserver.dkim.txt_record | default('') | length > 0
+      no_log: true
+
+    - name: Generate DKIM key if absent
+      command: >
+        opendkim-genkey -D {{ _opendkim_dir }} -d {{ mailserver.domain }} -s mail
+      args:
+        creates: "{{ _opendkim_dir }}/mail.private"
+      notify: Reload opendkim
+
+    # opendkim runs as the opendkim user and must own its private key.
+    - name: Set DKIM key ownership
+      file:
+        path: "{{ item }}"
+        owner: opendkim
+        group: opendkim
+        mode: "0600"
+      loop:
+        - "{{ _opendkim_dir }}/mail.private"
+        - "{{ _opendkim_dir }}/mail.txt"
+      failed_when: false
 
 - name: Deploy postfix generic map
   template:
@@ -4410,93 +4548,100 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     - Rebuild postfix generic map
     - Reload postfix
 
-# Deploy a systemd drop-in that sets RuntimeDirectory=opendkim.
-# This is the correct cross-distro fix for the missing /run/opendkim
-# directory: systemd creates it with correct ownership before starting
-# the service and recreates it on every boot automatically.
-# A drop-in is used rather than editing the unit file so it survives
-# package upgrades on both Debian and RedHat families.
-- name: Ensure opendkim systemd override directory exists
-  file:
-    path: /etc/systemd/system/opendkim.service.d
-    state: directory
-    mode: "0755"
-    owner: root
-    group: "{{ _root_group }}"
-  when: ansible_facts.os_family != 'FreeBSD'
+# OpenDKIM systemd drop-in + service start: also gated on dkim.enabled.
+- name: Activate OpenDKIM service
+  when: mailserver.dkim.enabled | default(true) | bool
+  block:
+    # Deploy a systemd drop-in that sets RuntimeDirectory=opendkim.
+    # This is the correct cross-distro fix for the missing /run/opendkim
+    # directory: systemd creates it with correct ownership before starting
+    # the service and recreates it on every boot automatically.
+    # A drop-in is used rather than editing the unit file so it survives
+    # package upgrades on both Debian and RedHat families.
+    - name: Ensure opendkim systemd override directory exists
+      file:
+        path: /etc/systemd/system/opendkim.service.d
+        state: directory
+        mode: "0755"
+        owner: root
+        group: "{{ _root_group }}"
+      when: ansible_facts.os_family != 'FreeBSD'
 
-- name: Deploy opendkim systemd RuntimeDirectory override
-  copy:
-    dest: /etc/systemd/system/opendkim.service.d/override.conf
-    content: |
-      [Service]
-      # Run foreground (Background=no in opendkim.conf) so systemd tracks
-      # the process correctly with Type=simple.
-      Type=simple
-      # PIDFile must be cleared - opendkim does not write one when Background=no.
-      PIDFile=
-      # RuntimeDirectory creates /run/opendkim with correct ownership before start.
-      RuntimeDirectory=opendkim
-      RuntimeDirectoryMode=0750
-      # Clear and reset ExecStart to strip any distro-added -p socket argument
-      # that would override the Socket directive in opendkim.conf.
-      ExecStart=
-      ExecStart={{ _opendkim_bin }} -x {{ _opendkim_conf }}
-    mode: "0644"
-    owner: root
-    group: "{{ _root_group }}"
-  when: ansible_facts.os_family != 'FreeBSD'
-  notify: Reload systemd and restart opendkim
+    - name: Deploy opendkim systemd RuntimeDirectory override
+      copy:
+        dest: /etc/systemd/system/opendkim.service.d/override.conf
+        content: |
+          [Service]
+          # Run foreground (Background=no in opendkim.conf) so systemd tracks
+          # the process correctly with Type=simple.
+          Type=simple
+          # PIDFile must be cleared - opendkim does not write one when Background=no.
+          PIDFile=
+          # RuntimeDirectory creates /run/opendkim with correct ownership before start.
+          RuntimeDirectory=opendkim
+          RuntimeDirectoryMode=0750
+          # Clear and reset ExecStart to strip any distro-added -p socket argument
+          # that would override the Socket directive in opendkim.conf.
+          ExecStart=
+          ExecStart={{ _opendkim_bin }} -x {{ _opendkim_conf }}
+        mode: "0644"
+        owner: root
+        group: "{{ _root_group }}"
+      when: ansible_facts.os_family != 'FreeBSD'
+      notify: Reload systemd and restart opendkim
 
-# Use the systemd module (not service) for opendkim. The drop-in override
-# sets Type=simple; Ansible's generic service module queries the enabled
-# symlink on every run and marks changed when the unit was enabled via a
-# drop-in path rather than a direct systemctl enable. The systemd module
-# checks both state and enabled correctly for Type=simple units and is
-# idempotent across repeated runs.
-- name: Enable and start opendkim
-  systemd:
-    name: opendkim
-    enabled: true
-    state: started
-    daemon_reload: true
-  when:
-    - ansible_facts.os_family != 'FreeBSD'
-    - not ansible_check_mode
+    # Use the systemd module (not service) for opendkim. The drop-in override
+    # sets Type=simple; Ansible's generic service module queries the enabled
+    # symlink on every run and marks changed when the unit was enabled via a
+    # drop-in path rather than a direct systemctl enable. The systemd module
+    # checks both state and enabled correctly for Type=simple units and is
+    # idempotent across repeated runs.
+    - name: Enable and start opendkim
+      systemd:
+        name: opendkim
+        enabled: true
+        state: started
+        daemon_reload: true
+      when:
+        - ansible_facts.os_family != 'FreeBSD'
+        - not ansible_check_mode
 
-- name: Enable and start opendkim (enable via sysrc)
-  command: sysrc milteropendkim_enable=YES
-  changed_when: false
-  when: ansible_facts.os_family == 'FreeBSD'
+    - name: Enable and start opendkim (enable via sysrc)
+      command: sysrc milteropendkim_enable=YES
+      changed_when: false
+      when: ansible_facts.os_family == 'FreeBSD'
 
-- name: Enable and start opendkim
-  command: service milter-opendkim onestart
-  register: _opendkim_start
-  changed_when: "'already running' not in _opendkim_start.stderr"
-  failed_when: "_opendkim_start.rc != 0 and 'already running' not in _opendkim_start.stderr"
-  when: ansible_facts.os_family == 'FreeBSD'
+    - name: Enable and start opendkim
+      command: service milter-opendkim onestart
+      register: _opendkim_start
+      changed_when: "'already running' not in _opendkim_start.stderr"
+      failed_when: "_opendkim_start.rc != 0 and 'already running' not in _opendkim_start.stderr"
+      when: ansible_facts.os_family == 'FreeBSD'
 
-- name: Enable and start dovecot
-  systemd:
-    name: dovecot
-    enabled: true
-    state: started
-    daemon_reload: true
-  when:
-    - ansible_facts.os_family != 'FreeBSD'
-    - not ansible_check_mode
+- name: Activate Dovecot service
+  when: mailserver.imap.enabled | default(true) | bool
+  block:
+    - name: Enable and start dovecot
+      systemd:
+        name: dovecot
+        enabled: true
+        state: started
+        daemon_reload: true
+      when:
+        - ansible_facts.os_family != 'FreeBSD'
+        - not ansible_check_mode
 
-- name: Enable and start dovecot (enable via sysrc)
-  command: sysrc dovecot_enable=YES
-  changed_when: false
-  when: ansible_facts.os_family == 'FreeBSD'
+    - name: Enable and start dovecot (enable via sysrc)
+      command: sysrc dovecot_enable=YES
+      changed_when: false
+      when: ansible_facts.os_family == 'FreeBSD'
 
-- name: Enable and start dovecot
-  command: service dovecot onestart
-  register: _dovecot_start
-  changed_when: "'already running' not in _dovecot_start.stderr"
-  failed_when: "_dovecot_start.rc != 0 and 'already running' not in _dovecot_start.stderr"
-  when: ansible_facts.os_family == 'FreeBSD'
+    - name: Enable and start dovecot
+      command: service dovecot onestart
+      register: _dovecot_start
+      changed_when: "'already running' not in _dovecot_start.stderr"
+      failed_when: "_dovecot_start.rc != 0 and 'already running' not in _dovecot_start.stderr"
+      when: ansible_facts.os_family == 'FreeBSD'
 
 - name: Enable and start postfix
   systemd:
@@ -4614,14 +4759,20 @@ smtp_tls_security_level = may
 smtpd_tls_cert_file = {{ _mail_tls_fullchain_path }}
 smtpd_tls_key_file = {{ _mail_tls_privkey_path }}
 {% endif %}
+{% if mailserver.imap.enabled | default(true) | bool %}
 smtpd_sasl_type = dovecot
 smtpd_sasl_path = private/auth
 smtpd_sasl_auth_enable = yes
 smtpd_recipient_restrictions = permit_sasl_authenticated,permit_mynetworks,reject_unauth_destination
+{% else %}
+smtpd_recipient_restrictions = permit_mynetworks,reject_unauth_destination
+{% endif %}
+{% if mailserver.dkim.enabled | default(true) | bool %}
 milter_default_action = accept
 milter_protocol = 2
 smtpd_milters = inet:127.0.0.1:8891
 non_smtpd_milters = inet:127.0.0.1:8891
+{% endif %}
 {% if mailserver.masquerading_enabled | default(false) | bool %}
 smtp_generic_maps = lmdb:{{ _postfix_conf_dir }}/generic
 {% if mailserver.masquerade_domains | default([]) | length > 0 %}
@@ -4637,6 +4788,7 @@ masquerade_domains = {{ mailserver.masquerade_domains | join(', ') }}
 # service type  private unpriv  chroot  wakeup  maxproc command + args
 # ==========================================================================
 smtp      inet  n       -       y       -       -       smtpd
+{% if mailserver.imap.enabled | default(true) | bool %}
 submission inet n       -       y       -       -       smtpd
   -o syslog_name=postfix/submission
   -o smtpd_tls_security_level=encrypt
@@ -4651,6 +4803,7 @@ smtps     inet  n       -       y       -       -       smtpd
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
+{% endif %}
 pickup    unix  n       -       y       60      1       pickup
 cleanup   unix  n       -       y       -       0       cleanup
 qmgr      unix  n       -       n       300     1       qmgr
@@ -4683,6 +4836,11 @@ UMask 002
 # is correct there. Only set Background no on non-FreeBSD.
 {% if ansible_facts.os_family != 'FreeBSD' %}
 Background no
+# Drop privileges to the opendkim user. The Debian opendkim.service unit
+# does not set User=, so without this directive opendkim runs as root and
+# refuses to load mail.private (owned opendkim:opendkim 0600) with
+# "key data is not secure: not owned by the executing uid (0)".
+UserID opendkim
 {% endif %}
 Socket inet:8891@127.0.0.1
 Canonicalization relaxed/simple
@@ -5036,11 +5194,19 @@ services:
     _static_site: "{{ _upstream_port | string | length == 0 }}"
   when: service.value.enabled | default(false) | bool
 
-- name: Resolve TLS certificate paths for {{ service.key }}
+# Two-step set_fact: keys within a single set_fact cannot reference each
+# other (strict in Ansible 2.18+). _ae_tls_cert_dir/_ae_tls_private_dir
+# must be defined in a prior task before _tls_fullchain_path/
+# _tls_privkey_path can use them.
+- name: Set TLS storage directories for {{ service.key }}
   set_fact:
     _le_dir: "{{ '/usr/local/etc/letsencrypt' if ansible_facts.os_family == 'FreeBSD' else '/etc/letsencrypt' }}"
     _ae_tls_cert_dir: "{{ '/etc/pki/tls/certs/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/certs/ansible-enterprise' }}"
     _ae_tls_private_dir: "{{ '/etc/pki/tls/private/ansible-enterprise' if ansible_facts.os_family == 'RedHat' else '/etc/ssl/private/ansible-enterprise' }}"
+  when: service.value.enabled | default(false) | bool
+
+- name: Resolve TLS certificate paths for {{ service.key }}
+  set_fact:
     _tls_certificate_name: "{{ ((service.value.security | default({})).tls | default({})).certificate | default(service.value.domain) }}"
     _tls_certificate_method: >-
       {%- set _tls = (service.value.security | default({})).tls | default({}) -%}
@@ -8742,25 +8908,35 @@ write_config("Ansible: update firewall aliases");
 """,
     'roles/ssh_hardening/templates/99-ansible-enterprise.conf.j2': """\
 # managed by ansible - ssh_hardening role
+{% set _pw_auto = 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'no' %}
+{% set _pw = ssh_password_authentication | default('auto') %}
+{% set _root_auto = 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' %}
+{% set _root = ssh_permit_root_login | default('auto') %}
+{% set _allow = ssh_allow_users | default('') %}
 Port {{ ssh_port }}
-# Password auth enabled in dev/staging when admin_dev_password_hash is set.
-# Production always uses key-only auth.
-PasswordAuthentication {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'no' }}
-PubkeyAuthentication yes
-PermitRootLogin {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' }}
-AllowUsers root {{ _admin_user_names | default(admin_users) | join(" ") }}
+# Password auth: ssh_password_authentication overrides; auto = yes in dev/staging
+# when admin_dev_password_hash is set, else no.
+PasswordAuthentication {{ _pw if _pw in ['yes', 'no'] else _pw_auto }}
+PubkeyAuthentication {{ ssh_pubkey_authentication | default('yes') }}
+PermitRootLogin {{ _root if _root in ['yes', 'no', 'prohibit-password', 'forced-commands-only', 'without-password'] else _root_auto }}
+AllowUsers {{ _allow if _allow | length > 0 else 'root ' ~ (_admin_user_names | default(admin_users) | join(' ')) }}
 """,
     'roles/ssh_hardening/templates/sshd_config.j2': """\
+{% set _pw_auto = 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'no' %}
+{% set _pw = ssh_password_authentication | default('auto') %}
+{% set _root_auto = 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' %}
+{% set _root = ssh_permit_root_login | default('auto') %}
+{% set _allow = ssh_allow_users | default('') %}
 Port {{ ssh_port }}
-# Password auth enabled in dev/staging when admin_dev_password_hash is set.
-# Production always uses key-only auth.
-PasswordAuthentication {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'no' }}
-PubkeyAuthentication yes
-PermitRootLogin {{ 'yes' if deployment_environment | default('production') != 'production' and admin_dev_password_hash | default('') | length > 0 else 'prohibit-password' }}
+# Password auth: ssh_password_authentication overrides; auto = yes in dev/staging
+# when admin_dev_password_hash is set, else no.
+PasswordAuthentication {{ _pw if _pw in ['yes', 'no'] else _pw_auto }}
+PubkeyAuthentication {{ ssh_pubkey_authentication | default('yes') }}
+PermitRootLogin {{ _root if _root in ['yes', 'no', 'prohibit-password', 'forced-commands-only', 'without-password'] else _root_auto }}
 {% if ansible_facts.os_family != 'Alpine' %}
 UsePAM yes
 {% endif %}
-AllowUsers root {{ _admin_user_names | default(admin_users) | join(" ") }}
+AllowUsers {{ _allow if _allow | length > 0 else 'root ' ~ (_admin_user_names | default(admin_users) | join(' ')) }}
 Subsystem sftp {{ '/usr/libexec/openssh/sftp-server' if ansible_facts.os_family == 'RedHat' else '/usr/libexec/sftp-server' if ansible_facts.os_family == 'FreeBSD' else '/usr/lib/openssh/sftp-server' if ansible_facts.os_family == 'Debian' else '/usr/lib/ssh/sftp-server' }}
 """,
     'roles/users/defaults/main.yml': """\
@@ -10615,6 +10791,46 @@ apache2_php_modules:
     - apache2_mod_rewrite | default(true) | bool
   notify: Restart apache2
 
+# Enable mod_cgid on Debian for any service that opts into cgi-bin.
+- name: Enable mod_cgid (Debian)
+  command: a2enmod cgid
+  args:
+    creates: /etc/apache2/mods-enabled/cgid.load
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - _apache2_services | selectattr('value.app.cgi_bin_enabled', 'defined')
+      | selectattr('value.app.cgi_bin_enabled') | list | length > 0
+  notify: Restart apache2
+
+# Ensure DocumentRoot (htdocs by default) exists for each apache2 service.
+# Owned by the service owner if defined, otherwise root, so the service
+# user can deploy site content without further chowning.
+- name: Ensure Apache2 DocumentRoot exists
+  file:
+    path: "{{ item.value.app.document_root |
+              default((item.value.app.web_root | default('/var/www/' + item.value.domain)) + '/htdocs') }}"
+    state: directory
+    owner: "{{ item.value.owner | default('root') }}"
+    group: "{{ item.value.owner | default('root') }}"
+    mode: "0755"
+  loop: "{{ _apache2_services }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# Ensure cgi-bin directory exists for services that opt in.
+- name: Ensure Apache2 cgi-bin directory exists
+  file:
+    path: "{{ item.value.app.cgi_bin_path |
+              default((item.value.app.web_root | default('/var/www/' + item.value.domain)) + '/cgi-bin/') }}"
+    state: directory
+    owner: "{{ item.value.owner | default('root') }}"
+    group: "{{ item.value.owner | default('root') }}"
+    mode: "0755"
+  loop: "{{ _apache2_services }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: item.value.app.cgi_bin_enabled | default(false) | bool
+
 # Deploy per-service vhosts.
 - name: Deploy Apache2 vhost for each service
   template:
@@ -10661,19 +10877,33 @@ apache2_php_modules:
   when: ansible_facts.os_family == 'FreeBSD'
 """,
     'roles/apache2/templates/apache2_vhost.conf.j2': """\
+{% set _web_base = _svc.value.app.web_root | default('/var/www/' + _svc.value.domain) %}
+{% set _docroot = _svc.value.app.document_root | default(_web_base + '/htdocs') %}
+{% set _cgi_enabled = _svc.value.app.cgi_bin_enabled | default(false) | bool %}
+{% set _cgi_path = _svc.value.app.cgi_bin_path | default(_web_base + '/cgi-bin/') %}
 <VirtualHost 127.0.0.1:{{ _port }}>
     ServerName {{ _svc.value.domain }}
 {% for _alias in _svc.value.aliases | default([]) %}
     ServerAlias {{ _alias }}
 {% endfor %}
-    DocumentRoot {{ _svc.value.app.document_root | default('/var/www/' + _svc.value.domain) }}
+    DocumentRoot {{ _docroot }}
 
-    <Directory {{ _svc.value.app.document_root | default('/var/www/' + _svc.value.domain) }}>
+    <Directory {{ _docroot }}>
         Options -Indexes +FollowSymLinks
         AllowOverride All
         Require all granted
     </Directory>
 
+{% if _cgi_enabled %}
+    ScriptAlias /cgi-bin/ {{ _cgi_path }}
+    <Directory {{ _cgi_path }}>
+        Options +ExecCGI
+        AllowOverride None
+        Require all granted
+        SetHandler cgi-script
+    </Directory>
+
+{% endif %}
 {% if _svc.value.app.php | default(false) | bool %}
     <FilesMatch "\\.php$">
 {% if ansible_facts.os_family == 'Debian' %}

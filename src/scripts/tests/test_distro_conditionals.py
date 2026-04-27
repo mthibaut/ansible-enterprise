@@ -109,7 +109,9 @@ class TestSshHardeningDistro(unittest.TestCase):
 
     def test_dropin_template_omits_subsystem_and_uses_normalized_admin_names(self):
         text = _read(self.SSHD_DROPIN_TEMPLATE)
-        self.assertIn("AllowUsers root {{ _admin_user_names | default(admin_users) | join(\" \") }}", text)
+        # AllowUsers now flows through ssh_allow_users override; auto path
+        # still derives 'root ' + admin_user_names join.
+        self.assertIn("'root ' ~ (_admin_user_names | default(admin_users) | join(' '))", text)
         self.assertNotIn("Subsystem sftp", text)
 
     def test_monolithic_template_retains_subsystem_path_logic(self):
@@ -470,7 +472,9 @@ class TestAdminUsersRegression(unittest.TestCase):
 
     def test_sshd_config_uses_normalized_admin_user_names(self):
         text = _read(self.SSHD_TEMPLATE)
-        self.assertIn("AllowUsers root {{ _admin_user_names | default(admin_users) | join(\" \") }}", text)
+        # AllowUsers now flows through ssh_allow_users override; auto path
+        # still derives 'root ' + admin_user_names join.
+        self.assertIn("'root ' ~ (_admin_user_names | default(admin_users) | join(' '))", text)
         self.assertNotIn("AllowUsers root {{ admin_users | join(\" \") }}", text)
 
     def test_bootstrap_normalizes_rich_admin_users(self):
@@ -1337,23 +1341,28 @@ class TestMailserverPackagesArch(unittest.TestCase):
     def test_arch_excludes_opendkim_tools(self):
         """opendkim-tools is bundled in opendkim on Arch; separate package does not exist."""
         text = _read(self.TASKS)
-        # The ternary is: [Arch list] if os_family == 'Archlinux' else [RedHat list]
-        # So the Arch package list appears BEFORE the 'Archlinux' keyword.
-        arch_idx = text.index("Archlinux")
-        arch_list = text[arch_idx - 150 : arch_idx]
-        self.assertNotIn("opendkim-tools", arch_list)
+        # _opendkim_pkgs branch: ['opendkim', 'opendkim-tools'] if family in
+        # ['Debian', 'RedHat'] else ['opendkim']. Arch falls in else.
+        idx = text.index("_opendkim_pkgs")
+        block = text[idx:idx + 400]
+        self.assertIn("'opendkim'", block)
+        self.assertIn("else\n        ['opendkim']", block)
 
     def test_debian_includes_opendkim_tools(self):
         """Debian ships opendkim-tools as a separate package."""
         text = _read(self.TASKS)
-        debian_idx = text.index("os_family == 'Debian'")
-        debian_block = text[debian_idx - 200 : debian_idx]
-        self.assertIn("opendkim-tools", debian_block)
+        idx = text.index("_opendkim_pkgs")
+        block = text[idx:idx + 400]
+        # Debian and RedHat share the with-tools branch
+        self.assertIn("['opendkim', 'opendkim-tools']", block)
+        self.assertIn("os_family in ['Debian', 'RedHat']", block)
 
     def test_redhat_includes_opendkim_tools(self):
         text = _read(self.TASKS)
-        # RedHat falls in the final else branch
-        self.assertIn("opendkim-tools", text)
+        idx = text.index("_opendkim_pkgs")
+        block = text[idx:idx + 400]
+        self.assertIn("['opendkim', 'opendkim-tools']", block)
+        self.assertIn("'RedHat'", block)
 
 
 class TestUpdatePasswordIdempotence(unittest.TestCase):

@@ -387,5 +387,41 @@ class TestAnsibleCfgInBuild(unittest.TestCase):
         )
 
 
+class TestSetFactKeysDoNotSelfReference(unittest.TestCase):
+    """Regression: keys within a single set_fact cannot reference each other
+    (Ansible 2.18+ enforces this strictly). _ae_tls_cert_dir must be set in
+    its own task before _tls_fullchain_path / _tls_privkey_path can use it.
+    Caught only at runtime: the task fails with '_ae_tls_cert_dir is undefined'
+    when nginx renders a TLS-enabled service."""
+
+    def _split_set_fact_blocks(self, text):
+        """Yield (task_name, block_body) for each set_fact task in the file."""
+        chunks = re.split(r'\n(?=- name:)', text)
+        for chunk in chunks:
+            name_match = re.match(r'- name:\s*(.+)', chunk)
+            if name_match and 'set_fact:' in chunk:
+                yield name_match.group(1).strip(), chunk
+
+    def test_render_service_does_not_self_reference_storage_dirs(self):
+        text = _read("roles/nginx/tasks/render_service.yml")
+        for name, block in self._split_set_fact_blocks(text):
+            defines_dirs = (
+                '_ae_tls_cert_dir:' in block
+                or '_ae_tls_private_dir:' in block
+            )
+            uses_dirs = (
+                '{{ _ae_tls_cert_dir' in block
+                or '{{ _ae_tls_private_dir' in block
+            )
+            self.assertFalse(
+                defines_dirs and uses_dirs,
+                msg=(
+                    f"set_fact task '{name}' both defines and references "
+                    "_ae_tls_*_dir; keys in one set_fact cannot see each "
+                    "other in Ansible 2.18+. Split into two tasks."
+                ),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
