@@ -174,6 +174,7 @@ class TestMain(unittest.TestCase):
             with mock.patch("urllib.request.urlretrieve"):
                 sys.argv = [
                     "geoip_ingest.py",
+                    "--provider", "maxmind",
                     "--license-key", "TESTKEY",
                     "--download-dir", str(dl_dir),
                     "--sets-dir", str(sets_dir),
@@ -252,6 +253,7 @@ class TestDownloadFlags(unittest.TestCase):
             with mock.patch("urllib.request.urlretrieve"):
                 sys.argv = [
                     "geoip_ingest.py",
+                    "--provider", "maxmind",
                     "--license-key", "TESTKEY",
                     "--download-dir", str(dl_dir),
                     "--sets-dir", str(sets_dir),
@@ -280,6 +282,7 @@ class TestDownloadFlags(unittest.TestCase):
             with mock.patch("urllib.request.urlretrieve") as mock_dl:
                 sys.argv = [
                     "geoip_ingest.py",
+                    "--provider", "maxmind",
                     "--license-key", "TESTKEY",
                     "--download-dir", str(dl_dir),
                     "--sets-dir", str(sets_dir),
@@ -302,6 +305,7 @@ class TestDownloadFlags(unittest.TestCase):
             countries_file.write_text("BE\n")
             sys.argv = [
                 "geoip_ingest.py",
+                "--provider", "maxmind",
                 "--license-key", "TESTKEY",
                 "--download-dir", str(dl_dir),
                 "--sets-dir", str(sets_dir),
@@ -321,6 +325,7 @@ class TestDownloadFlags(unittest.TestCase):
             with mock.patch("urllib.request.urlretrieve"):
                 sys.argv = [
                     "geoip_ingest.py",
+                    "--provider", "maxmind",
                     "--license-key", "TESTKEY",
                     "--download-dir", str(dl_dir),
                     "--download-only",

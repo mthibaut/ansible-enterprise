@@ -114,7 +114,7 @@ class TestMasterPlaybooks(unittest.TestCase):
         self.assertIn("name: preflight", text)
         self.assertIn("- role: common", text)
         self.assertIn("- role: ssh_hardening", text)
-        self.assertIn("ssh_manage | default(true) | bool", text)
+        self.assertIn("ssh_managed | default(ae_managed | default(true)) | bool", text)
         self.assertNotIn("- role: users", text)
         self.assertNotIn("- role: firewall", text)
         self.assertNotIn("- role: nginx", text)
@@ -421,6 +421,40 @@ class TestSetFactKeysDoNotSelfReference(unittest.TestCase):
                     "other in Ansible 2.18+. Split into two tasks."
                 ),
             )
+
+
+class TestFirewallGeoSelfInit(unittest.TestCase):
+    """firewall_geo sets _geoip_sets_dir/_geoip_format itself so it can run
+    when the geoip role was skipped (e.g. ae_managed=false with explicit
+    firewall_managed=true)."""
+
+    def test_set_fact_present(self):
+        tasks = _read("roles/firewall_geo/tasks/main.yml")
+        self.assertIn("_geoip_sets_dir", tasks)
+        self.assertIn("when: _geoip_sets_dir is not defined", tasks)
+
+    def test_set_fact_before_first_template(self):
+        tasks = _read("roles/firewall_geo/tasks/main.yml")
+        init_pos = tasks.index("when: _geoip_sets_dir is not defined")
+        first_use = tasks.index("30-geoip-defines.nft.j2")
+        self.assertLess(init_pos, first_use)
+
+
+class TestWorkloadEnabledFilter(unittest.TestCase):
+    """enabled: false skips a workload without touching anything already running."""
+
+    def test_deploy_loop_rejects_enabled_false(self):
+        tasks = _read("roles/workloads/tasks/main.yml")
+        self.assertIn("rejectattr('enabled', 'equalto', false)", tasks)
+
+    def test_nft_template_skips_disabled_workloads(self):
+        tmpl = _read("roles/workloads/templates/40-workloads.nft.j2")
+        self.assertIn("_wl.enabled | default(true) | bool", tmpl)
+
+    def test_defaults_document_enabled_field(self):
+        defaults = _read("roles/workloads/defaults/main.yml")
+        self.assertIn("enabled:", defaults)
+        self.assertIn("state: absent", defaults)
 
 
 if __name__ == "__main__":

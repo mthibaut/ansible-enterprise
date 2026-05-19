@@ -4001,3 +4001,41 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      - Tests: new `TestImapAndDkimToggles` (12 tests) covers
        defaults, port default, package conditionals, gated blocks,
        and template branching.
+
+241. `checkpoint-241-postfix-relayhost-transport-map`
+     Adds Postfix `relayhost` and `transport_maps` support for the
+     gateway/mailbox-host split pattern.
+     - Use case: a public gateway host (e.g. `gregoriusgild.be`)
+       accepts inbound mail and forwards to an internal MTA
+       (`murphy.gregoriusgild.be`) via `transport_maps`; the
+       internal MTA sends outbound through the gateway via
+       `relayhost`.
+     - Defaults: `mailserver.relayhost` (flat `mailserver_relayhost`,
+       default `''`) and `mailserver.transport_map` (flat
+       `mailserver_transport_map`, default `{}`).
+     - Template `main.cf.j2`: `relayhost = ...` emitted when
+       `mailserver.relayhost` is non-empty; `transport_maps =
+       lmdb:.../transport` emitted when `mailserver.transport_map`
+       is non-empty; both after the masquerade stanza.
+     - New template `roles/mailserver/templates/transport.j2`:
+       iterates `mailserver.transport_map.items()` to produce the
+       Postfix lookup table.
+     - Tasks: new `Deploy postfix transport map` task gated on
+       `transport_map | length > 0`, notifies new
+       `Rebuild postfix transport map` handler.
+     - Handler: `Rebuild postfix transport map` runs
+       `postmap lmdb:/etc/postfix/transport`.
+     - Tests: new `TestRelayhostAndTransportMap` (9 tests).
+
+242. `checkpoint-242-workloads-enabled-flag`
+     - `enabled: false` on a workload entry skips it on every Ansible run
+       without touching anything already running (`state: absent` remains
+       the explicit teardown path).
+     - Deploy loop in `roles/workloads/tasks/main.yml` appends
+       `| rejectattr('enabled', 'equalto', false) | list`.
+     - `40-workloads.nft.j2` adds `and _wl.enabled | default(true) | bool`
+       to the port-open guard.
+     - `defaults/main.yml` documents the `enabled` field.
+     - Tests: `TestWorkloadEnabledFilter` (3 tests) in
+       `test_generator_invariants.py`.
+     - Tests: new `TestRelayhostAndTransportMap` (9 tests).

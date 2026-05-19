@@ -69,17 +69,17 @@ class TestSshHardeningDistro(unittest.TestCase):
         text = _read(self.HANDLERS)
         self.assertIn("else 'sshd'", text)
 
-    def test_common_defaults_expose_ssh_manage_toggle(self):
+    def test_common_defaults_expose_ssh_managed_toggle(self):
         text = _read(self.COMMON_DEFAULTS)
-        self.assertIn("ssh_manage: true", text)
+        self.assertIn("ssh_managed: true", text)
         self.assertIn("leave SSH daemon packaging and configuration unmanaged", text)
         self.assertIn("pkg_manager_update_policy: auto", text)
         self.assertIn("pkg_manager_update_valid_time: 3600", text)
 
-    def test_site_gates_ssh_hardening_role_on_ssh_manage(self):
+    def test_site_gates_ssh_hardening_role_on_ssh_managed(self):
         text = _read(self.SITE)
         self.assertIn("- role: ssh_hardening", text)
-        self.assertIn("when: ssh_manage | default(true) | bool", text)
+        self.assertIn("ssh_managed | default(ae_managed | default(true)) | bool", text)
 
     def test_linux_families_use_sshd_config_dropin(self):
         text = _read(self.TASKS)
@@ -490,6 +490,28 @@ class TestAdminUsersRegression(unittest.TestCase):
         self.assertIn("_key | quote", text)
 
 
+class TestUserAccountsRegression(unittest.TestCase):
+
+    USERS_TASKS = "roles/users/tasks/main.yml"
+    SSH_TASKS = "roles/ssh_hardening/tasks/main.yml"
+
+    def test_user_accounts_append_only_when_groups_are_defined(self):
+        text = _read(self.USERS_TASKS)
+        self.assertIn('groups: "{{ item.groups | default(omit) }}"', text)
+        self.assertIn('append: "{{ item.groups is defined }}"', text)
+        self.assertNotIn("append: true", text)
+
+    def test_ssh_keys_use_core_lineinfile_not_authorized_key_collection(self):
+        users = _read(self.USERS_TASKS)
+        ssh = _read(self.SSH_TASKS)
+        self.assertIn("Ensure managed user .ssh directories exist", users)
+        self.assertIn("Deploy authorized SSH keys", users)
+        self.assertIn("Deploy shared admin SSH key", ssh)
+        self.assertIn("Deploy per-user admin SSH keys", ssh)
+        self.assertNotIn("ansible.posix.authorized_key", users)
+        self.assertNotIn("ansible.posix.authorized_key", ssh)
+
+
 # ---------------------------------------------------------------------------
 # nfs role
 # ---------------------------------------------------------------------------
@@ -561,6 +583,43 @@ class TestNfsRoleRegression(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# iSCSI role
+# ---------------------------------------------------------------------------
+
+class TestIscsiRole(unittest.TestCase):
+
+    DEFAULTS = "roles/iscsi/defaults/main.yml"
+    TASKS = "roles/iscsi/tasks/main.yml"
+    SITE = "site.yml"
+
+    def test_iscsi_role_installs_initiator_and_orders_debian_before_mounts(self):
+        defaults = _read(self.DEFAULTS)
+        tasks = _read(self.TASKS)
+        self.assertIn("iscsi:", defaults)
+        self.assertIn("enabled: false", defaults)
+        self.assertIn("early_boot: true", defaults)
+        self.assertIn("'open-iscsi' if ansible_facts.os_family in ['Debian'", tasks)
+        self.assertIn("Start open-iscsi before filesystem mounting (Debian)", tasks)
+        self.assertIn("Before=remote-fs-pre.target remote-fs.target", tasks)
+        self.assertIn("TimeoutStartSec=30s", tasks)
+        self.assertIn("node.startup", tasks)
+        self.assertIn("mounts: []", defaults)
+        self.assertIn("_iscsi_mount_service", tasks)
+        self.assertIn("Configure iSCSI-backed filesystem mounts", tasks)
+        self.assertIn("_netdev", tasks)
+        self.assertIn("x-systemd.requires={{ _iscsi_mount_service }}", tasks)
+        self.assertIn("x-systemd.after={{ _iscsi_mount_service }}", tasks)
+        self.assertIn("x-systemd.device-timeout", tasks)
+
+    def test_site_runs_iscsi_before_storage_consumers(self):
+        site = _read(self.SITE)
+        self.assertIn("- role: iscsi", site)
+        self.assertIn("iscsi.enabled | default(false) | bool", site)
+        self.assertLess(site.index("- role: iscsi"), site.index("- role: samba"))
+        self.assertLess(site.index("- role: iscsi"), site.index("- role: nfs"))
+
+
+# ---------------------------------------------------------------------------
 # file_copy role
 # ---------------------------------------------------------------------------
 
@@ -574,10 +633,17 @@ class TestFileCopyRegression(unittest.TestCase):
         self.assertIn("content - inline file content to write instead of copying src", text)
         self.assertIn("dest: /etc/myapp/generated.conf", text)
 
+    def test_file_copy_defaults_document_directory_state(self):
+        text = _read(self.DEFAULTS)
+        self.assertIn("\"file\" (default) or \"directory\"", text)
+        self.assertIn("state: directory", text)
+        self.assertIn("Directory default: \"0755\"", text)
+
     def test_file_copy_supports_inline_content_and_parent_directories(self):
         text = _read(self.TASKS)
         self.assertIn("Validate file_copy items", text)
-        self.assertIn("exactly one of src or content", text)
+        self.assertIn("file entries require exactly one of src or content", text)
+        self.assertIn("directory entries must not set src or content", text)
         self.assertIn("Ensure parent directories for copied files exist", text)
         self.assertIn("path: \"{{ item.dest | dirname }}\"", text)
         self.assertIn("Copy files from contrib to remote host", text)
@@ -585,6 +651,13 @@ class TestFileCopyRegression(unittest.TestCase):
         self.assertIn("Write inline file content to remote host", text)
         self.assertIn("content: \"{{ item.content }}\"", text)
         self.assertIn("- item.content is defined", text)
+
+    def test_file_copy_supports_directory_entries(self):
+        text = _read(self.TASKS)
+        self.assertIn("Manage directory entries", text)
+        self.assertIn("item.state | default('file') == 'directory'", text)
+        self.assertIn("item.state | default('file') == 'file'", text)
+        self.assertIn("mode: \"{{ item.mode | default('0755') }}\"", text)
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +679,11 @@ class TestProxmoxInfraRegression(unittest.TestCase):
         self.assertIn("always        : destroy + recreate on every run", text)
         self.assertIn("infra_force_rebuild=true", text)
         self.assertIn("build/.infra-state/<inventory_hostname>.json", text)
+
+    def test_infra_playbook_exposes_api_timeout(self):
+        text = _read(self.INFRA)
+        self.assertIn("_pve_api_timeout: \"{{ _proxmox.api_timeout | default(30) }}\"", text)
+        self.assertIn("api_timeout: \"{{ _pve_api_timeout }}\"", text)
 
     def test_infra_playbook_persists_and_uses_config_hash_state(self):
         text = _read(self.INFRA)
@@ -713,6 +791,7 @@ class TestCertbotDistro(unittest.TestCase):
         self.assertIn("Build certificate request list", text)
         self.assertIn("services | default({}) | dict2items", text)
         self.assertIn("mailserver.tls", text)
+        self.assertIn("'mailserver' in (_required_providers | default([]))", text)
         self.assertIn("certificates | default({})", text)
         self.assertIn("(_svc.value.security | default({})).tls", text)
         self.assertIn("'consumer': 'mailserver'", text)
@@ -1465,7 +1544,7 @@ class TestPfFirewall(unittest.TestCase):
         text = _read(self.PF_CONF)
         self.assertIn("mailserver", text)
         self.assertIn("mailserver_ports", text)
-        self.assertIn("default([25, 587, 143, 465])", text)
+        self.assertIn("default([25, 587, 143, 465, 993])", text)
 
     def test_pf_conf_node_exporter_conditional(self):
         text = _read(self.PF_CONF)
@@ -1693,9 +1772,10 @@ class TestFreeBSDSupport(unittest.TestCase):
         """OpenSSH is in FreeBSD base - only sudo needs installing."""
         text = _read("roles/ssh_hardening/tasks/main.yml")
         self.assertIn("FreeBSD", text)
-        # FreeBSD branch should have sudo but not openssh-server
-        idx = text.index("FreeBSD")
-        block = text[idx - 50 : idx + 80]
+        # FreeBSD branch should have sudo but not openssh-server; anchor on
+        # the install task to avoid the _root_group set_fact hitting first
+        idx = text.index("Install OpenSSH server and sudo\n")
+        block = text[idx : idx + 200]
         self.assertIn("sudo", block)
 
     def test_certbot_dig_package_freebsd_is_bind_tools(self):
@@ -1836,6 +1916,21 @@ class TestFirewallRefactorPhaseOne(unittest.TestCase):
         text = _read("roles/firewall_geo/templates/30-legacy.nft.j2")
         self.assertNotIn("wireguard_instances", text)
         self.assertNotIn("listen_port | default(51820)", text)
+
+    def test_firewall_seeds_missing_geoip_sets_before_early_apply(self):
+        """Stale firewall_geo drop-ins must not break the firewall role's
+        early nftables apply before firewall_geo rerenders them.
+        """
+        text = _read("roles/firewall/tasks/main.yml")
+        self.assertLess(
+            text.index("Seed missing GeoIP nftables set files"),
+            text.index("Apply nftables ruleset"),
+        )
+        self.assertIn("force: false", text)
+        self.assertIn("geoip_ssh_ipv4", text)
+        self.assertIn("geoip_https_ipv6", text)
+        self.assertIn("0.0.0.0/0", text)
+        self.assertIn("::/0", text)
 
 
 class TestFirewallRefactorPhaseTwo(unittest.TestCase):

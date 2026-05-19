@@ -1,5 +1,5 @@
-source_hash: 46b589bc49b51fd1a73308c2e00e276ac69550e063d12b8c7be38b4339335ee2
-output_hash: 107807654d7d5de9ffbdaae1a0899ed6caed5616a681be5168aabc5ea480de83
+source_hash: cdef7147e11ee580015ad056ddbbc5dc6804402dbe39cbe82c0dae8de76f618f
+output_hash: 413d618bd1a3699d7021368165a48764711356e8a97956ace08412e7ba0ae84c
 generated_files:
   - ansible.cfg
   - baseline.yml
@@ -72,6 +72,8 @@ generated_files:
   - roles/grafana/defaults/main.yml
   - roles/grafana/handlers/main.yml
   - roles/grafana/tasks/main.yml
+  - roles/iscsi/defaults/main.yml
+  - roles/iscsi/tasks/main.yml
   - roles/mailserver/defaults/main.yml
   - roles/mailserver/handlers/main.yml
   - roles/mailserver/tasks/main.yml
@@ -82,10 +84,13 @@ generated_files:
   - roles/mailserver/templates/KeyTable.j2
   - roles/mailserver/templates/SigningTable.j2
   - roles/mailserver/templates/TrustedHosts.j2
+  - roles/mailserver/templates/blocked_domains.j2
   - roles/mailserver/templates/generic.j2
+  - roles/mailserver/templates/header_checks.j2
   - roles/mailserver/templates/main.cf.j2
   - roles/mailserver/templates/master.cf.j2
   - roles/mailserver/templates/opendkim.conf.j2
+  - roles/mailserver/templates/transport.j2
   - roles/nextcloud/defaults/main.yml
   - roles/nextcloud/handlers/main.yml
   - roles/nextcloud/meta/main.yml

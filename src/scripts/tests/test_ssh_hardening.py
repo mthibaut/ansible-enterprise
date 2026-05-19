@@ -94,5 +94,20 @@ class TestAllowUsersOverride(unittest.TestCase):
     def test_full_cfg(self): self._check(_read(FULL_CFG))
 
 
+class TestRootGroupSelfInit(unittest.TestCase):
+    """ssh_hardening sets _root_group itself so it can run without common."""
+
+    def test_set_fact_present(self):
+        tasks = _read(BUILD / "roles/ssh_hardening/tasks/main.yml")
+        self.assertIn("_root_group", tasks)
+        self.assertIn("when: _root_group is not defined", tasks)
+
+    def test_set_fact_before_first_use(self):
+        tasks = _read(BUILD / "roles/ssh_hardening/tasks/main.yml")
+        init_pos = tasks.index("when: _root_group is not defined")
+        first_use = tasks.index('group: "{{ _root_group }}"')
+        self.assertLess(init_pos, first_use)
+
+
 if __name__ == "__main__":
     unittest.main()

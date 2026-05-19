@@ -185,10 +185,11 @@ FILE_MANIFEST: Dict[str, str] = {
 # -- GeoIP (defaults in roles/geoip/defaults/main.yml) -----------------------
 # Set the following flat vars in vault.yml; the geoip dict is assembled there:
 # geoip_enabled: true
-# geoip_license_key: "YOUR_KEY"
+# geoip_provider: ipdeny          # ipdeny (default) or maxmind
 # geoip_allowed_countries: [BE, NL, DE]
 # geoip_ssh_allowed_countries: [BE, NL]
 # geoip_allowlist_entries: [1.2.3.4, 10.0.0.0/8]
+# geoip_license_key: "YOUR_KEY"   # maxmind only
 
 # -- Node exporter (defaults in roles/node_exporter/defaults/main.yml) --------
 # node_exporter_enabled: false
@@ -236,10 +237,12 @@ admin_ssh_public_key: "ssh-ed25519 AAAAEXAMPLE"
 
 # GeoIP (required when geoip_enabled: true):
 # geoip_enabled: true
-# geoip_license_key: "YOUR_MAXMIND_LICENSE_KEY"
+# geoip_provider: ipdeny          # ipdeny (default, no key) or maxmind
 # geoip_allowed_countries: [BE, NL, DE, FR, GB, US]
 # geoip_ssh_allowed_countries: [BE, NL]
 # geoip_allowlist_entries: [1.2.3.4, 10.0.0.0/8]
+# MaxMind only (geoip_provider: maxmind):
+# geoip_license_key: "YOUR_MAXMIND_LICENSE_KEY"
 
 # Certbot DNS-01 (required when certbot_dns_local: true):
 # Generate: tsig-keygen certbot-acme | awk '/secret/{gsub(/[";]/,"",$2); print $2}'
@@ -254,6 +257,13 @@ certbot_email: ""
 # mailserver_masquerade_domains: [example.com]
 # mailserver_local_domains: [example.com]
 # mailserver_relay_domains: []
+# Optional: trusted networks allowed to relay without auth (gateway hosts).
+# mailserver_mynetworks: [127.0.0.0/8, 192.168.20.0/24]
+# Optional: upstream relay for outbound mail (mailbox hosts behind a gateway).
+# mailserver_relayhost: "[mail.example.com]"
+# Optional: per-domain inbound forwarding to an internal MTA (gateway hosts).
+# mailserver_transport_map:
+#   example.com: smtp:murphy.example.com
 # Optional: skip Dovecot install/config and close 587/143/465 (port 25 only).
 # mailserver_imap_enabled: false
 # Optional: skip OpenDKIM install/config and the postfix milter.
@@ -268,6 +278,21 @@ certbot_email: ""
 #   -----END PRIVATE KEY-----
 # mailserver_dkim_txt_record: |
 #   "v=DKIM1; k=rsa; p=MIIBIjAN..."
+# Optional: restrict Postfix to IPv4 only (useful on IPv4-only hosts).
+# mailserver_inet_protocols: ipv4
+# Optional: DNSBL rejection - list of RBL hosts for reject_rbl_client.
+# mailserver_rbl_checks: [zen.spamhaus.org, bl.spamcop.net]
+# Optional: install policyd-spf and check SPF on inbound mail.
+# mailserver_spf_enabled: true
+# Optional: install spamass-milter and wire SpamAssassin as a Postfix milter.
+# mailserver_spamassassin_enabled: true
+# Optional: pcre header_checks rules (list of {pattern, action} dicts).
+# mailserver_header_checks:
+#   - pattern: /^X-Spam-Flag: YES/
+#     action: DISCARD
+# Optional: sender domain blocklist (regexp patterns, each becomes a REJECT).
+# mailserver_blocked_domains:
+#   - /^(.+@)?spam[.]example[.]com$/
 
 # Nextcloud (required when services.nextcloud.enabled: true):
 nextcloud_admin_password: "CHANGE_ME"
@@ -597,6 +622,7 @@ strategy = free
 collections:
   - name: community.general
   - name: ansible.posix
+    version: ">=2.1.0"
   - name: community.crypto
   - name: community.mysql
   - name: community.proxmox
@@ -610,7 +636,8 @@ ssh_port: 22
 # Set false to leave SSH daemon packaging and configuration unmanaged on this host.
 # Useful when SSH is controlled externally or when you do not want Ansible to
 # modify sshd_config / sshd_config.d.
-ssh_manage: true
+# DEPRECATED name ssh_manage still accepted for backwards compatibility.
+ssh_managed: true
 
 # Privileged admin accounts with sudo + SSH access.
 # Supports simple strings (backwards compatible) or dicts:
@@ -699,6 +726,20 @@ pkg_manager_proxy: {}
 #   no_proxy: localhost,127.0.0.1
 host_environment: {}
 
+# Global managed flag -- set to false to skip all role configuration on a host.
+# Individual roles can be re-enabled by setting {role}_managed: true even when
+# ae_managed is false. This lets you bring a production host under Ansible
+# control one role at a time without disturbing the others.
+#
+# Example (host_vars for a host being migrated):
+#   ae_managed: false          # hands off everything by default
+#   firewall_managed: true     # but let Ansible own the firewall
+#   ssh_managed: true          # and SSH hardening
+#
+# All per-role flags default to ae_managed (which defaults to true), so
+# existing hosts with no explicit configuration are unaffected.
+ae_managed: true
+
 # Override default package mirror per distribution (lowercase ansible_facts.distribution).
 # Only the main archive URL is replaced; security repositories are left untouched.
 # Example:
@@ -725,6 +766,13 @@ pkg_manager_update_policy: auto
 # Cache validity window in seconds for package managers that support TTL-based
 # refresh behavior in auto mode (currently APT).
 pkg_manager_update_valid_time: 3600
+
+# Additional host packages to install with the native package manager.
+# Example:
+# packages:
+#   - squid
+#   - tcpdump
+packages: []
 
 # Services dict. Declare application services in inventory group_vars
 # or host_vars. Each entry drives nginx, DNS, TLS, and firewall config.
@@ -831,11 +879,16 @@ ssh_allow_users: ''
     'roles/geoip/defaults/main.yml': """\
 ---
 # GeoIP configuration. Override individual keys in inventory group_vars.
-# Vault keys (geoip_enabled, geoip_license_key, geoip_allowed_countries,
-# geoip_ssh_allowed_countries, geoip_allowlist_entries) are flat variables
-# set in vault.yml and interpolated here.
+# Flat variables set in vault.yml or host_vars:
+#   geoip_enabled:              true/false
+#   geoip_provider:             ipdeny (default) or maxmind
+#   geoip_license_key:          MaxMind GeoLite2 license key (maxmind only)
+#   geoip_allowed_countries:    ISO country codes for HTTP/HTTPS filtering
+#   geoip_ssh_allowed_countries: ISO codes for SSH (defaults to allowed_countries)
+#   geoip_allowlist_entries:    IPs/CIDRs that bypass GeoIP filtering
 geoip:
   enabled: "{{ geoip_enabled | default(false) | bool }}"
+  provider: "{{ geoip_provider | default('ipdeny') }}"
   license_key: "{{ geoip_license_key | default('') }}"
   download_dir: /var/lib/geoip
   sets_dir: /etc/nftables.d/geoip
@@ -874,7 +927,7 @@ geoip:
 #   mailserver_ports:               Mail listener ports/services to expose in
 #                                   the firewall for this host's mail services.
 #                                   Accepts numbers and /etc/services names.
-#                                   Default: [25, 587, 143, 465]
+#                                   Default: [25, 587, 143, 465, 993]
 #   mailserver_open_ports:          DEPRECATED alias for mailserver_ports.
 #   mailserver_tls_enabled:         Enable TLS for Postfix/Dovecot.
 #   mailserver_tls_certificate:     Certificate registry key; defaults to domain.
@@ -898,6 +951,47 @@ geoip:
 #                                   written to mail.txt for operator
 #                                   inspection. Required when
 #                                   mailserver_dkim_private_key_pem is set.
+#   mailserver_mynetworks:          List of CIDR ranges Postfix trusts for
+#                                   relaying without authentication (Postfix
+#                                   mynetworks). Default: [] (Postfix uses its
+#                                   built-in default of loopback only).
+#                                   Set this on gateway hosts to allow internal
+#                                   mailbox hosts to relay outbound mail.
+#                                   Example: [127.0.0.0/8, 192.168.20.0/24]
+#   mailserver_relayhost:           Upstream SMTP relay for outbound mail
+#                                   (Postfix relayhost directive). Use this on
+#                                   mailbox hosts that send outbound through a
+#                                   gateway. Example: [mail.example.com]
+#                                   Leave unset (default '') for direct delivery.
+#   mailserver_transport_map:       Dict of domain -> nexthop entries written
+#                                   to /etc/postfix/transport and referenced via
+#                                   transport_maps. Use this on gateway hosts to
+#                                   forward inbound mail to an internal MTA.
+#                                   Example:
+#                                     example.com: smtp:murphy.example.com
+#                                   Leave unset (default {}) to skip.
+#   mailserver_inet_protocols:      Postfix inet_protocols (default: all).
+#                                   Set to ipv4 on IPv4-only hosts.
+#   mailserver_rbl_checks:          List of DNSBL hosts appended as
+#                                   reject_rbl_client checks in
+#                                   smtpd_recipient_restrictions.
+#                                   Example: [zen.spamhaus.org, bl.spamcop.net]
+#   mailserver_spf_enabled:         Install postfix-policyd-spf-python and add
+#                                   check_policy_service to
+#                                   smtpd_recipient_restrictions. Default false.
+#   mailserver_spamassassin_enabled: Install spamass-milter and add
+#                                   unix:spamass/spamass.sock to Postfix
+#                                   smtpd_milters/non_smtpd_milters. Default false.
+#   mailserver_header_checks:       List of {pattern, action} dicts written to
+#                                   /etc/postfix/header_checks (pcre). When
+#                                   non-empty, header_checks directive is added.
+#                                   Example:
+#                                     [{pattern: /^X-Spam-Flag: YES/, action: DISCARD}]
+#   mailserver_blocked_domains:     List of regexp patterns written to
+#                                   /etc/postfix/blocked_domains. When non-empty,
+#                                   adds check_sender_access to
+#                                   smtpd_sender_restrictions.
+#                                   Example: [/^(.+@)?spam[.]example[.]com$/]
 mailserver:
   enabled: "{{ mailserver_enabled | default(false) | bool }}"
   domain: "{{ mailserver_domain | default('mail.example.com') }}"
@@ -909,7 +1003,7 @@ mailserver:
   masquerade_hosts: "{{ mailserver_masquerade_hosts | default([]) }}"
   local_domains: "{{ mailserver_local_domains | default([]) }}"
   relay_domains: "{{ mailserver_relay_domains | default([]) }}"
-  open_ports: "{{ mailserver_ports | default(mailserver_open_ports | default(([25, 587, 143, 465] if (mailserver_imap_enabled | default(true) | bool) else [25]))) }}"
+  open_ports: "{{ mailserver_ports | default(mailserver_open_ports | default(([25, 587, 143, 465, 993] if (mailserver_imap_enabled | default(true) | bool) else [25]))) }}"
   tls:
     enabled: "{{ mailserver_tls_enabled | default(false) | bool }}"
     certificate: "{{ mailserver_tls_certificate | default(mailserver_domain | default('mail.example.com')) }}"
@@ -919,18 +1013,32 @@ mailserver:
     enabled: "{{ mailserver_dkim_enabled | default(true) | bool }}"
     private_key_pem: "{{ mailserver_dkim_private_key_pem | default('') }}"
     txt_record: "{{ mailserver_dkim_txt_record | default('') }}"
+  mynetworks: "{{ mailserver_mynetworks | default([]) }}"
+  relayhost: "{{ mailserver_relayhost | default('') }}"
+  transport_map: "{{ mailserver_transport_map | default({}) }}"
+  inet_protocols: "{{ mailserver_inet_protocols | default('all') }}"
+  rbl_checks: "{{ mailserver_rbl_checks | default([]) }}"
+  spf:
+    enabled: "{{ mailserver_spf_enabled | default(false) | bool }}"
+  spamassassin:
+    enabled: "{{ mailserver_spamassassin_enabled | default(false) | bool }}"
+  header_checks: "{{ mailserver_header_checks | default([]) }}"
+  blocked_domains: "{{ mailserver_blocked_domains | default([]) }}"
 """,
     'roles/file_copy/defaults/main.yml': """\
 ---
-# List of files to copy from the local repo to the managed host.
+# List of files (and optionally directories) to manage on the remote host.
 # Each item is a dict with the following keys:
 #
+#   state  - "file" (default) or "directory". When "directory", the entry
+#             manages an empty directory at dest with the given ownership
+#             and mode; src and content must not be set.
 #   src    - path relative to the playbook root (e.g. contrib/myscript.sh)
 #   content - inline file content to write instead of copying src
 #   dest   - absolute destination path on the remote host
-#   owner  - file owner (default: root)
-#   group  - file group (default: root)
-#   mode   - file mode (default: "0644")
+#   owner  - owner (default: root)
+#   group  - group (default: root)
+#   mode   - mode. File default: "0644". Directory default: "0755".
 #   setype - SELinux type to apply with restorecon or chcon on RedHat
 #             (optional; omit when SELinux is not enforcing or type is correct
 #             by default). Common values: bin_t, etc_t, var_t, httpd_sys_content_t
@@ -954,6 +1062,11 @@ mailserver:
 #           log level = 1
 #       dest: /etc/myapp/generated.conf
 #       mode: "0644"
+#     - state: directory
+#       dest: /var/lib/myapp/cache
+#       owner: myapp
+#       group: myapp
+#       mode: "0750"
 file_copy_items: []
 """,
     'roles/file_copy/tasks/main.yml': """\
@@ -963,8 +1076,10 @@ file_copy_items: []
   assert:
     that:
       - item.dest is defined
-      - (item.src is defined) != (item.content is defined)
-    fail_msg: "Each file_copy_items entry must define dest and exactly one of src or content"
+      - (item.state | default('file')) in ['file', 'directory']
+      - (item.state | default('file')) != 'directory' or (item.src is not defined and item.content is not defined)
+      - (item.state | default('file')) == 'directory' or ((item.src is defined) != (item.content is defined))
+    fail_msg: "Each file_copy_items entry must define dest; file entries require exactly one of src or content; directory entries must not set src or content"
   loop: "{{ file_copy_items | default([]) }}"
   when: file_copy_items | default([]) | length > 0
 
@@ -976,7 +1091,21 @@ file_copy_items: []
     group: "{{ _root_group }}"
     mode: "0755"
   loop: "{{ file_copy_items | default([]) }}"
-  when: file_copy_items | default([]) | length > 0
+  when:
+    - file_copy_items | default([]) | length > 0
+    - item.state | default('file') == 'file'
+
+- name: Manage directory entries
+  file:
+    path: "{{ item.dest }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop: "{{ file_copy_items | default([]) }}"
+  when:
+    - file_copy_items | default([]) | length > 0
+    - item.state | default('file') == 'directory'
 
 - name: Copy files from contrib to remote host
   copy:
@@ -988,6 +1117,7 @@ file_copy_items: []
   loop: "{{ file_copy_items | default([]) }}"
   when:
     - file_copy_items | default([]) | length > 0
+    - item.state | default('file') == 'file'
     - item.src is defined
 
 - name: Write inline file content to remote host
@@ -1000,6 +1130,7 @@ file_copy_items: []
   loop: "{{ file_copy_items | default([]) }}"
   when:
     - file_copy_items | default([]) | length > 0
+    - item.state | default('file') == 'file'
     - item.content is defined
 
 # Restore SELinux file context on RedHat when setype is specified.
@@ -1172,7 +1303,7 @@ certbot_selfsigned_days: 365
       {%-   endif -%}
       {%- endfor -%}
       {%- set _mail_tls = mailserver.tls | default({}) -%}
-      {%- if mailserver.enabled | default(false) | bool and _mail_tls.enabled | default(false) | bool -%}
+      {%- if (mailserver.enabled | default(false) | bool or 'mailserver' in (_required_providers | default([]))) and _mail_tls.enabled | default(false) | bool -%}
       {%-   set _name = _mail_tls.certificate | default(mailserver.domain) -%}
       {%-   set _cert = (certificates | default({})).get(_name, {}) -%}
       {%-   set _domains = _cert.domains | default([mailserver.domain]) -%}
@@ -1660,11 +1791,24 @@ fi
       - ssh_port | int < 65536
     fail_msg: "ssh_port must be between 1 and 65535"
 
+- name: Assert packages is a list when defined
+  assert:
+    that:
+      - packages is iterable
+      - packages is not string
+    fail_msg: "packages must be a list of package names"
+
 # On FreeBSD the privileged group is 'wheel', not 'root'.
 # Use _root_group everywhere a file or directory needs the root group.
 - name: Set root group name
   set_fact:
     _root_group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
+
+- name: Install host package list
+  package:
+    name: "{{ packages | default([]) }}"
+    state: present
+  when: packages | default([]) | length > 0
 
 - name: Resolve trusted root certificate store
   set_fact:
@@ -2277,7 +2421,7 @@ dns:
   #       dnssec:
   #         enabled: true
   #         algorithm: ECDSAP256SHA256   # default
-  #         key_directory: /etc/bind/keys
+  #         # key_directory is optional; omit it to use the distro default.
   #         # Optional: provide pre-generated keys instead of auto-generating
   #         # ksk_file: /path/to/Ktest.example.com.+013+12345.key
   #         # zsk_file: /path/to/Ktest.example.com.+013+67890.key
@@ -2733,6 +2877,11 @@ if __name__ == "__main__":
     _bind_zone_group: >-
       {{ 'bind'  if ansible_facts.os_family in ['Debian', 'FreeBSD']
          else 'named' }}
+    _bind_dnssec_key_dir: >-
+      {{ '/var/lib/bind/keys' if ansible_facts.os_family == 'Debian'
+         else '/var/bind/keys' if ansible_facts.os_family == 'Alpine'
+         else '/usr/local/etc/namedb/keys' if ansible_facts.os_family == 'FreeBSD'
+         else '/var/named/keys' }}
 
 # remote_primary zones have no local BIND instance - skip install if all zones
 # are remote_primary or zone list is empty.
@@ -3141,7 +3290,7 @@ if __name__ == "__main__":
 # dnssec-keygen generates them. Both are idempotent via creates:.
 - name: Ensure DNSSEC key directory exists
   file:
-    path: "{{ item.dnssec.key_directory | default('/etc/bind/keys') }}"
+    path: "{{ item.dnssec.key_directory | default(_bind_dnssec_key_dir) }}"
     state: directory
     owner: root
     group: "{{ _bind_zone_group }}"
@@ -3158,7 +3307,7 @@ if __name__ == "__main__":
 - name: Copy operator-provided DNSSEC KSK
   copy:
     src: "{{ item.dnssec.ksk_file }}"
-    dest: "{{ item.dnssec.key_directory | default('/etc/bind/keys') }}/"
+    dest: "{{ item.dnssec.key_directory | default(_bind_dnssec_key_dir) }}/"
     owner: root
     group: "{{ _bind_zone_group }}"
     mode: "0640"
@@ -3169,7 +3318,7 @@ if __name__ == "__main__":
 - name: Copy operator-provided DNSSEC ZSK
   copy:
     src: "{{ item.dnssec.zsk_file }}"
-    dest: "{{ item.dnssec.key_directory | default('/etc/bind/keys') }}/"
+    dest: "{{ item.dnssec.key_directory | default(_bind_dnssec_key_dir) }}/"
     owner: root
     group: "{{ _bind_zone_group }}"
     mode: "0640"
@@ -3356,7 +3505,7 @@ zone "{{ _zone.name }}" {
 {% if _zone.dnssec.enabled | default(false) | bool %}
     dnssec-policy default;
     inline-signing yes;
-    key-directory "{{ _zone.dnssec.key_directory | default('/etc/bind/keys') }}";
+    key-directory "{{ _zone.dnssec.key_directory | default(_bind_dnssec_key_dir) }}";
 {% endif %}
 {% set _valid_updates = [] %}
 {% for _upd in _zone.allow_update | default([]) %}
@@ -3574,6 +3723,34 @@ firewall_extra_forward: []
     - nat-postrouting
   when: ansible_facts.os_family != 'FreeBSD'
 
+- name: Ensure GeoIP nftables set directory exists
+  file:
+    path: /etc/nftables.d/geoip
+    state: directory
+    mode: "0755"
+  when: ansible_facts.os_family != 'FreeBSD'
+
+# The firewall role runs before firewall_geo writes the current GeoIP drop-ins.
+# A host can still have stale /etc/nftables.d/defines/30-geoip.nft from an
+# earlier run. Seed missing set files as allow-all so the early nft apply can
+# parse safely without weakening existing real GeoIP sets.
+- name: Seed missing GeoIP nftables set files for early firewall apply
+  copy:
+    dest: "/etc/nftables.d/geoip/{{ item.name }}.nft"
+    content: "define {{ item.name }} = { {{ item.cidr }} }\\n"
+    mode: "0644"
+    force: false
+  loop:
+    - { name: geoip_ssh_ipv4, cidr: "0.0.0.0/0" }
+    - { name: geoip_ssh_ipv6, cidr: "::/0" }
+    - { name: geoip_allowed_ipv4, cidr: "0.0.0.0/0" }
+    - { name: geoip_allowed_ipv6, cidr: "::/0" }
+    - { name: geoip_http_ipv4, cidr: "0.0.0.0/0" }
+    - { name: geoip_http_ipv6, cidr: "::/0" }
+    - { name: geoip_https_ipv4, cidr: "0.0.0.0/0" }
+    - { name: geoip_https_ipv6, cidr: "::/0" }
+  when: ansible_facts.os_family != 'FreeBSD'
+
 - name: Deploy nftables skeleton
   template:
     src: nftables.conf.j2
@@ -3713,12 +3890,17 @@ ip saddr {{ _d.saddr }} {{ _d.proto }} dport {{ _d.dport }} dnat to {{ _d.to }}{
 {% endfor %}
 """,
     'roles/firewall/templates/10-forward-dnat.nft.j2': """\
-# Forward-chain accepts matching each firewall_dnat entry, plus firewall_extra_forward.
-# Without these, DNATed packets are dropped by the forward-chain default policy.
+# Forward-chain accepts matching firewall_dnat and firewall_masquerade entries,
+# plus firewall_extra_forward. Without these, forwarded packets are dropped by
+# the forward-chain default policy.
 {% for _d in firewall_dnat | default([]) %}
 {% set _to_host = _d.to.split(':')[0] %}
 {% set _to_port = _d.to.split(':')[1] if ':' in _d.to else _d.dport %}
 ip daddr {{ _to_host }} {{ _d.proto }} dport {{ _to_port }} accept{% if _d.comment is defined %} comment "{{ _d.comment }} (forward)"{% endif %}
+
+{% endfor %}
+{% for _m in firewall_masquerade | default([]) %}
+ip saddr {{ _m.saddr }} oifname "{{ _m.oif }}" accept{% if _m.comment is defined %} comment "{{ _m.comment }} (forward)"{% endif %}
 
 {% endfor %}
 {% for _f in firewall_extra_forward | default([]) %}
@@ -3748,6 +3930,12 @@ ip saddr {{ _m.saddr }} oifname "{{ _m.oif }}" masquerade{% if _m.comment is def
 #
 # This role is Linux-only. On FreeBSD, geoip logic is rendered inline by the
 # firewall role's pf.conf.j2 (pf has no include-based drop-in mechanism).
+- name: Set GeoIP sets directory and format (when geoip role did not run)
+  set_fact:
+    _geoip_sets_dir: "{{ geoip.sets_dir }}"
+    _geoip_format: nftables
+  when: _geoip_sets_dir is not defined
+
 - name: Skip firewall_geo on FreeBSD
   meta: end_host
   when: ansible_facts.os_family == 'FreeBSD'
@@ -3776,22 +3964,28 @@ ip saddr {{ _m.saddr }} oifname "{{ _m.oif }}" masquerade{% if _m.comment is def
     'roles/firewall_geo/templates/30-legacy.nft.j2': (SRC / "templates/roles/firewall_geo/30-legacy.nft.j2").read_text(encoding="utf-8"),
     'roles/geoip/files/geoip_ingest.py': '''\
 #!/usr/bin/env python3
-# Downloads MaxMind GeoLite2-Country-CSV and generates nftables set files.
-# Args: --license-key --download-dir --sets-dir --countries-file
+# GeoIP ingestion: generates nftables/pf set files from MaxMind or ipdeny.
+# Provider maxmind: downloads GeoLite2-Country-CSV.zip (license key required).
+# Provider ipdeny:  fetches per-country CIDR lists from ipdeny.com (no key).
 import argparse
 import csv
 import pathlib
 import shutil
+import sys
 import tempfile
 import urllib.request
 import zipfile
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--license-key", required=True)
-    ap.add_argument("--download-dir", required=True)
+    ap.add_argument("--provider", choices=["maxmind", "ipdeny"], default="ipdeny",
+                    help="Data source: ipdeny (default, no key) or maxmind (license key required)")
+    ap.add_argument("--license-key", default="",
+                    help="MaxMind GeoLite2 license key (maxmind provider only)")
+    ap.add_argument("--download-dir", default=None,
+                    help="Directory for cached MaxMind archive (maxmind provider only)")
     ap.add_argument("--sets-dir", default=None,
-                    help="Directory for generated .nft set files (required unless --download-only)")
+                    help="Directory for generated set files (required unless --download-only)")
     ap.add_argument("--countries-file", default=None,
                     help="Path to allowed-countries list (required unless --download-only)")
     ap.add_argument("--set-prefix", default="geoip_allowed",
@@ -3799,21 +3993,59 @@ def parse_args():
     ap.add_argument("--format", choices=["nftables", "pf"], default="nftables",
                     help="Output format: nftables (.nft define) or pf (.txt one-CIDR-per-line)")
     ap.add_argument("--download-only", action="store_true",
-                    help="Download the MaxMind archive and exit without generating sets")
+                    help="Download MaxMind archive and exit (maxmind provider only)")
     ap.add_argument("--skip-download", action="store_true",
-                    help="Skip the MaxMind download; use the existing archive in download-dir")
+                    help="Skip MaxMind download; use existing archive (maxmind provider only)")
     args = ap.parse_args()
     if not args.download_only:
         if not args.sets_dir:
             ap.error("--sets-dir is required unless --download-only is set")
         if not args.countries_file:
             ap.error("--countries-file is required unless --download-only is set")
+    if args.provider == "maxmind":
+        if not args.license_key:
+            ap.error("--license-key is required for maxmind provider")
+        if not args.download_dir:
+            ap.error("--download-dir is required for maxmind provider")
     return args
 
+def write_sets(sets_dir, prefix, ipv4, ipv6, fmt):
+    sets_dir = pathlib.Path(sets_dir)
+    sets_dir.mkdir(parents=True, exist_ok=True)
+    def _nft(name, cidrs):
+        body = ", ".join(cidrs)
+        inner = " " + body + " " if body else " "
+        return "define " + name + " = {" + inner + "}\\n"
+    if fmt == "nftables":
+        (sets_dir / (prefix + "_ipv4.nft")).write_text(
+            _nft(prefix + "_ipv4", ipv4), encoding="utf-8")
+        (sets_dir / (prefix + "_ipv6.nft")).write_text(
+            _nft(prefix + "_ipv6", ipv6), encoding="utf-8")
+    else:
+        (sets_dir / (prefix + "_ipv4.txt")).write_text(
+            "\\n".join(ipv4) + ("\\n" if ipv4 else ""), encoding="utf-8")
+        (sets_dir / (prefix + "_ipv6.txt")).write_text(
+            "\\n".join(ipv6) + ("\\n" if ipv6 else ""), encoding="utf-8")
+
+def ingest_ipdeny(countries, sets_dir, prefix, fmt):
+    ipv4_url = "https://www.ipdeny.com/ipblocks/data/aggregated/{}-aggregated.zone"
+    ipv6_url = "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/{}-aggregated.zone"
+    ipv4, ipv6 = [], []
+    for cc in countries:
+        cc = cc.lower()
+        for url, lst in [(ipv4_url.format(cc), ipv4), (ipv6_url.format(cc), ipv6)]:
+            try:
+                with urllib.request.urlopen(url, timeout=30) as r:
+                    lst.extend(
+                        line.strip()
+                        for line in r.read().decode().splitlines()
+                        if line.strip() and not line.startswith("#")
+                    )
+            except Exception as exc:
+                print(f"WARNING: could not fetch {url}: {exc}", file=sys.stderr)
+    write_sets(sets_dir, prefix, sorted(set(ipv4)), sorted(set(ipv6)), fmt)
+
 def load_geoname_map(tmp):
-    """Build geoname_id -> country_iso_code from the locations CSV.
-    GeoLite2-Country-Blocks-*.csv contains geoname_id but not country_iso_code;
-    the join is required to filter by country."""
     geoname_map = {}
     for loc_file in tmp.rglob("*-Country-Locations-en.csv"):
         with open(loc_file, newline="", encoding="utf-8") as f:
@@ -3824,7 +4056,7 @@ def load_geoname_map(tmp):
                     geoname_map[gid] = iso
     return geoname_map
 
-def collect(paths, countries, geoname_map):
+def collect_maxmind(paths, countries, geoname_map):
     cidrs = []
     for path in paths:
         with open(path, newline="", encoding="utf-8") as f:
@@ -3836,54 +4068,52 @@ def collect(paths, countries, geoname_map):
                     cidrs.append(row["network"])
     return sorted(set(cidrs))
 
-def main():
-    args = parse_args()
-    download_dir = pathlib.Path(args.download_dir)
+collect = collect_maxmind  # backward-compatible alias
+
+def ingest_maxmind(license_key, download_dir, countries, sets_dir, prefix, fmt, skip_download):
+    download_dir = pathlib.Path(download_dir)
     download_dir.mkdir(parents=True, exist_ok=True)
     archive = download_dir / "GeoLite2-Country-CSV.zip"
-    if not args.skip_download:
+    if not skip_download:
         url = (
             "https://download.maxmind.com/app/geoip_download"
-            "?edition_id=GeoLite2-Country-CSV&license_key=" + args.license_key + "&suffix=zip"
+            "?edition_id=GeoLite2-Country-CSV&license_key=" + license_key + "&suffix=zip"
         )
         urllib.request.urlretrieve(url, archive)
-    if args.download_only:
-        return
-    sets_dir = pathlib.Path(args.sets_dir)
-    sets_dir.mkdir(parents=True, exist_ok=True)
-    with open(args.countries_file, encoding="utf-8") as f:
-        countries = {line.strip().upper() for line in f if line.strip()}
-    if not countries:
-        if args.format == "nftables":
-            (sets_dir / (args.set_prefix + "_ipv4.nft")).write_text(
-                "define " + args.set_prefix + "_ipv4 = { }\\n", encoding="utf-8")
-            (sets_dir / (args.set_prefix + "_ipv6.nft")).write_text(
-                "define " + args.set_prefix + "_ipv6 = { }\\n", encoding="utf-8")
-        else:
-            (sets_dir / (args.set_prefix + "_ipv4.txt")).write_text("", encoding="utf-8")
-            (sets_dir / (args.set_prefix + "_ipv6.txt")).write_text("", encoding="utf-8")
-        return
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="geoipcsv-"))
     try:
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(tmp)
         geoname_map = load_geoname_map(tmp)
-        ipv4 = collect(list(tmp.rglob("*-Blocks-IPv4.csv")), countries, geoname_map)
-        ipv6 = collect(list(tmp.rglob("*-Blocks-IPv6.csv")), countries, geoname_map)
-        if args.format == "nftables":
-            (sets_dir / (args.set_prefix + "_ipv4.nft")).write_text(
-                "define " + args.set_prefix + "_ipv4 = { " + ", ".join(ipv4) + " }\\n",
-                encoding="utf-8")
-            (sets_dir / (args.set_prefix + "_ipv6.nft")).write_text(
-                "define " + args.set_prefix + "_ipv6 = { " + ", ".join(ipv6) + " }\\n",
-                encoding="utf-8")
-        else:  # pf: one CIDR per line
-            (sets_dir / (args.set_prefix + "_ipv4.txt")).write_text(
-                "\\n".join(ipv4) + ("\\n" if ipv4 else ""), encoding="utf-8")
-            (sets_dir / (args.set_prefix + "_ipv6.txt")).write_text(
-                "\\n".join(ipv6) + ("\\n" if ipv6 else ""), encoding="utf-8")
+        ipv4 = collect_maxmind(list(tmp.rglob("*-Blocks-IPv4.csv")), countries, geoname_map)
+        ipv6 = collect_maxmind(list(tmp.rglob("*-Blocks-IPv6.csv")), countries, geoname_map)
+        write_sets(sets_dir, prefix, ipv4, ipv6, fmt)
     finally:
         shutil.rmtree(tmp)
+
+def main():
+    args = parse_args()
+    # MaxMind download-only: fetch archive and exit before reading countries.
+    if args.download_only:
+        download_dir = pathlib.Path(args.download_dir)
+        download_dir.mkdir(parents=True, exist_ok=True)
+        url = (
+            "https://download.maxmind.com/app/geoip_download"
+            "?edition_id=GeoLite2-Country-CSV&license_key=" + args.license_key + "&suffix=zip"
+        )
+        urllib.request.urlretrieve(url, download_dir / "GeoLite2-Country-CSV.zip")
+        return
+    with open(args.countries_file, encoding="utf-8") as f:
+        countries = {line.strip().upper() for line in f if line.strip()}
+    if not countries:
+        write_sets(args.sets_dir, args.set_prefix, [], [], args.format)
+        return
+    if args.provider == "ipdeny":
+        ingest_ipdeny(countries, args.sets_dir, args.set_prefix, args.format)
+    else:
+        ingest_maxmind(
+            args.license_key, args.download_dir, countries,
+            args.sets_dir, args.set_prefix, args.format, args.skip_download)
 
 if __name__ == "__main__":
     main()
@@ -3891,20 +4121,32 @@ if __name__ == "__main__":
     'roles/geoip/files/geoip_refresh.sh': """\
 #!/usr/bin/env bash
 # GeoIP weekly refresh - managed by Ansible. Do not edit manually.
-# Downloads fresh MaxMind data, regenerates firewall sets, reloads firewall.
+# Fetches fresh country IP data, regenerates firewall sets, reloads firewall.
 set -euo pipefail
 CONF=/etc/geoip/geoip.conf
 [[ -f ${CONF} ]] || { echo ERROR: ${CONF} not found >&2; exit 1; }
 # shellcheck disable=SC1090
 source ${CONF}
+PROVIDER="${PROVIDER:-ipdeny}"
 log() { logger -t geoip_refresh "$*"; echo "[$(date -Iseconds)] $*"; }
 ingest() {
-  python3 ${INGEST} --license-key ${LICENSE_KEY} --download-dir ${DOWNLOAD_DIR}
-    --sets-dir ${SETS_DIR} --countries-file $1 --set-prefix $2
-    --skip-download --format ${FORMAT}
+  local countries_file=$1 prefix=$2
+  if [ "${PROVIDER}" = "maxmind" ]; then
+    python3 ${INGEST} --provider maxmind --license-key ${LICENSE_KEY} \\
+      --download-dir ${DOWNLOAD_DIR} --sets-dir ${SETS_DIR} \\
+      --countries-file ${countries_file} --set-prefix ${prefix} \\
+      --skip-download --format ${FORMAT}
+  else
+    python3 ${INGEST} --provider ipdeny \\
+      --sets-dir ${SETS_DIR} --countries-file ${countries_file} \\
+      --set-prefix ${prefix} --format ${FORMAT}
+  fi
 }
-log Starting weekly GeoIP refresh
-python3 ${INGEST} --license-key ${LICENSE_KEY} --download-dir ${DOWNLOAD_DIR} --download-only
+log "Starting GeoIP refresh (provider: ${PROVIDER})"
+if [ "${PROVIDER}" = "maxmind" ]; then
+  python3 ${INGEST} --provider maxmind --license-key ${LICENSE_KEY} \\
+    --download-dir ${DOWNLOAD_DIR} --download-only
+fi
 ingest ${COUNTRIES_GLOBAL} geoip_allowed
 ingest ${COUNTRIES_SSH}    geoip_ssh
 ingest ${COUNTRIES_HTTP}   geoip_http
@@ -4001,24 +4243,27 @@ log GeoIP refresh complete
       {% endfor %}
   when: geoip.enabled | default(false) | bool
 
-# Download the MaxMind archive at most once per day.
-# MaxMind rate-limits downloads; running the playbook multiple times
-# per day or generating multiple sets must not trigger repeated downloads.
-- name: Stat GeoIP archive
+# MaxMind: download the archive at most once per day (rate-limited upstream).
+# ipdeny: no pre-download needed; each ingest call fetches directly.
+- name: Stat MaxMind archive
   stat:
     path: "{{ geoip.download_dir }}/GeoLite2-Country-CSV.zip"
   register: _geoip_archive_stat
-  when: geoip.enabled | default(false) | bool
+  when:
+    - geoip.enabled | default(false) | bool
+    - geoip.provider | default('ipdeny') == 'maxmind'
 
-- name: Download GeoIP database (at most once per day)
+- name: Download MaxMind GeoIP database (at most once per day)
   command: >
     python3 /usr/local/sbin/geoip_ingest.py
+    --provider maxmind
     --license-key {{ geoip.license_key }}
     --download-dir {{ geoip.download_dir }}
     --download-only
   changed_when: false
   when:
     - geoip.enabled | default(false) | bool
+    - geoip.provider | default('ipdeny') == 'maxmind'
     - not _geoip_archive_stat.stat.exists
       or (now(utc=True).strftime('%s') | int
           - _geoip_archive_stat.stat.mtime | int) > 86400
@@ -4026,12 +4271,15 @@ log GeoIP refresh complete
 - name: Run GeoIP ingestion (SSH port set)
   command: >
     python3 /usr/local/sbin/geoip_ingest.py
+    --provider {{ geoip.provider | default('ipdeny') }}
+    {% if geoip.provider | default('ipdeny') == 'maxmind' %}
     --license-key {{ geoip.license_key }}
     --download-dir {{ geoip.download_dir }}
+    --skip-download
+    {% endif %}
     --sets-dir {{ _geoip_sets_dir }}
     --countries-file {{ geoip.download_dir }}/allowed_countries_ssh.txt
     --set-prefix geoip_ssh
-    --skip-download
     --format {{ _geoip_format }}
   changed_when: false
   when: geoip.enabled | default(false) | bool
@@ -4039,12 +4287,15 @@ log GeoIP refresh complete
 - name: Run GeoIP ingestion (global set)
   command: >
     python3 /usr/local/sbin/geoip_ingest.py
+    --provider {{ geoip.provider | default('ipdeny') }}
+    {% if geoip.provider | default('ipdeny') == 'maxmind' %}
     --license-key {{ geoip.license_key }}
     --download-dir {{ geoip.download_dir }}
+    --skip-download
+    {% endif %}
     --sets-dir {{ _geoip_sets_dir }}
     --countries-file {{ geoip.download_dir }}/allowed_countries.txt
     --set-prefix geoip_allowed
-    --skip-download
     --format {{ _geoip_format }}
   changed_when: false
   when: geoip.enabled | default(false) | bool
@@ -4080,12 +4331,15 @@ log GeoIP refresh complete
 - name: Run GeoIP ingestion (HTTP port set)
   command: >
     python3 /usr/local/sbin/geoip_ingest.py
+    --provider {{ geoip.provider | default('ipdeny') }}
+    {% if geoip.provider | default('ipdeny') == 'maxmind' %}
     --license-key {{ geoip.license_key }}
     --download-dir {{ geoip.download_dir }}
+    --skip-download
+    {% endif %}
     --sets-dir {{ _geoip_sets_dir }}
     --countries-file {{ geoip.download_dir }}/allowed_countries_http.txt
     --set-prefix geoip_http
-    --skip-download
     --format {{ _geoip_format }}
   changed_when: false
   when: geoip.enabled | default(false) | bool
@@ -4118,12 +4372,15 @@ log GeoIP refresh complete
 - name: Run GeoIP ingestion (HTTPS port set)
   command: >
     python3 /usr/local/sbin/geoip_ingest.py
+    --provider {{ geoip.provider | default('ipdeny') }}
+    {% if geoip.provider | default('ipdeny') == 'maxmind' %}
     --license-key {{ geoip.license_key }}
     --download-dir {{ geoip.download_dir }}
+    --skip-download
+    {% endif %}
     --sets-dir {{ _geoip_sets_dir }}
     --countries-file {{ geoip.download_dir }}/allowed_countries_https.txt
     --set-prefix geoip_https
-    --skip-download
     --format {{ _geoip_format }}
   changed_when: false
   when: geoip.enabled | default(false) | bool
@@ -4131,8 +4388,11 @@ log GeoIP refresh complete
     'roles/geoip/templates/geoip.conf.j2': """\
 # GeoIP configuration - managed by Ansible. Do not edit manually.
 # Read by /usr/local/sbin/geoip_refresh.sh
+PROVIDER={{ geoip.provider | default('ipdeny') }}
+{% if geoip.provider | default('ipdeny') == 'maxmind' %}
 LICENSE_KEY={{ geoip.license_key }}
 DOWNLOAD_DIR={{ geoip.download_dir }}
+{% endif %}
 SETS_DIR={{ _geoip_sets_dir }}
 FORMAT={{ _geoip_format }}
 INGEST=/usr/local/sbin/geoip_ingest.py
@@ -4145,6 +4405,9 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
 ---
 - name: Rebuild postfix generic map
   command: postmap lmdb:/etc/postfix/generic
+
+- name: Rebuild postfix transport map
+  command: postmap lmdb:/etc/postfix/transport
 
 - name: Reload postfix
   service:
@@ -4212,6 +4475,20 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
         ['opendkim']
       }}
   when: mailserver.dkim.enabled | default(true) | bool
+
+- name: Append policyd-spf package
+  set_fact:
+    _mail_packages: "{{ _mail_packages + ['postfix-policyd-spf-python'] }}"
+  when:
+    - mailserver.spf.enabled | default(false) | bool
+    - ansible_facts.os_family == 'Debian'
+
+- name: Append spamass-milter package
+  set_fact:
+    _mail_packages: "{{ _mail_packages + ['spamass-milter'] }}"
+  when:
+    - mailserver.spamassassin.enabled | default(false) | bool
+    - ansible_facts.os_family == 'Debian'
 
 # opendkim is not in the default RHEL 9 repositories.
 # EPEL and CodeReady Builder (CRB) must be enabled first.
@@ -4548,6 +4825,32 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
     - Rebuild postfix generic map
     - Reload postfix
 
+- name: Deploy postfix transport map
+  template:
+    src: transport.j2
+    dest: "{{ _postfix_conf_dir }}/transport"
+    mode: "0644"
+  when: mailserver.transport_map | default({}) | length > 0
+  notify:
+    - Rebuild postfix transport map
+    - Reload postfix
+
+- name: Deploy postfix header_checks
+  template:
+    src: header_checks.j2
+    dest: "{{ _postfix_conf_dir }}/header_checks"
+    mode: "0644"
+  when: mailserver.header_checks | default([]) | length > 0
+  notify: Reload postfix
+
+- name: Deploy postfix blocked_domains
+  template:
+    src: blocked_domains.j2
+    dest: "{{ _postfix_conf_dir }}/blocked_domains"
+    mode: "0644"
+  when: mailserver.blocked_domains | default([]) | length > 0
+  notify: Reload postfix
+
 # OpenDKIM systemd drop-in + service start: also gated on dkim.enabled.
 - name: Activate OpenDKIM service
   when: mailserver.dkim.enabled | default(true) | bool
@@ -4665,6 +4968,17 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
   failed_when: "_postfix_start.rc != 0 and 'already running' not in _postfix_start.stderr"
   when: ansible_facts.os_family == 'FreeBSD'
 
+- name: Enable and start spamass-milter
+  systemd:
+    name: spamass-milter
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - mailserver.spamassassin.enabled | default(false) | bool
+    - ansible_facts.os_family == 'Debian'
+    - not ansible_check_mode
+
 - name: Deploy mailserver nftables drop-in
   template:
     src: 40-mailserver.nft.j2
@@ -4720,6 +5034,7 @@ mail._domainkey.{{ mailserver.domain }} {{ mailserver.domain }}:mail:{{ _opendki
 """,
     'roles/mailserver/templates/SigningTable.j2': """\
 *@{{ mailserver.domain }} mail._domainkey.{{ mailserver.domain }}
+*@*.{{ mailserver.domain }} mail._domainkey.{{ mailserver.domain }}
 """,
     'roles/mailserver/templates/TrustedHosts.j2': """\
 127.0.0.1
@@ -4736,11 +5051,35 @@ localhost
 {{ user }}@{{ ansible_facts.fqdn | default('localhost') }} {{ user }}@{{ _rewrite_to }}
 {% endfor %}
 """,
+    'roles/mailserver/templates/transport.j2': """\
+# Postfix transport map -- managed by Ansible, do not edit manually.
+# mailserver_transport_map entries: domain -> nexthop (e.g. smtp:murphy.example.com)
+{% for _domain, _nexthop in mailserver.transport_map.items() %}
+{{ _domain }}    {{ _nexthop }}
+{% endfor %}
+""",
+    'roles/mailserver/templates/header_checks.j2': """\
+# Postfix header_checks (pcre) -- managed by Ansible, do not edit manually.
+# mailserver_header_checks entries: list of {pattern, action} dicts.
+{% for _check in mailserver.header_checks | default([]) %}
+{{ _check.pattern }} {{ _check.action }}
+{% endfor %}
+""",
+    'roles/mailserver/templates/blocked_domains.j2': """\
+# Postfix blocked_domains sender filter -- managed by Ansible, do not edit manually.
+# mailserver_blocked_domains entries: regexp patterns, each rejected at SMTP time.
+{% for _pattern in mailserver.blocked_domains | default([]) %}
+{{ _pattern }} REJECT
+{% endfor %}
+""",
     'roles/mailserver/templates/main.cf.j2': """\
 myhostname = {{ mailserver.domain }}
 myorigin = {{ '/etc/mailname' if ansible_facts.os_family != 'FreeBSD' else mailserver.domain }}
 inet_interfaces = all
-inet_protocols = all
+inet_protocols = {{ mailserver.inet_protocols | default('all') }}
+{% if mailserver.mynetworks | default([]) | length > 0 %}
+mynetworks = {{ mailserver.mynetworks | join(', ') }}
+{% endif %}
 # mydestination: domains for which Postfix delivers mail locally.
 # Always includes localhost and the server's own domain.
 # Add further domains via mailserver_local_domains in host_vars.
@@ -4763,21 +5102,50 @@ smtpd_tls_key_file = {{ _mail_tls_privkey_path }}
 smtpd_sasl_type = dovecot
 smtpd_sasl_path = private/auth
 smtpd_sasl_auth_enable = yes
-smtpd_recipient_restrictions = permit_sasl_authenticated,permit_mynetworks,reject_unauth_destination
-{% else %}
-smtpd_recipient_restrictions = permit_mynetworks,reject_unauth_destination
 {% endif %}
-{% if mailserver.dkim.enabled | default(true) | bool %}
+{% set _rcpt_restrictions = [] %}
+{% if mailserver.imap.enabled | default(true) | bool %}
+{%   set _ = _rcpt_restrictions.append('permit_sasl_authenticated') %}
+{% endif %}
+{%   set _ = _rcpt_restrictions.append('permit_mynetworks') %}
+{%   set _ = _rcpt_restrictions.append('reject_unauth_destination') %}
+{% if mailserver.spf.enabled | default(false) | bool %}
+{%   set _ = _rcpt_restrictions.append('check_policy_service unix:private/policyd-spf') %}
+{% endif %}
+{% for _rbl in mailserver.rbl_checks | default([]) %}
+{%   set _ = _rcpt_restrictions.append('reject_rbl_client ' ~ _rbl) %}
+{% endfor %}
+smtpd_recipient_restrictions = {{ _rcpt_restrictions | join(',\n    ') }}
+{% if mailserver.blocked_domains | default([]) | length > 0 %}
+smtpd_sender_restrictions = check_sender_access regexp:{{ _postfix_conf_dir }}/blocked_domains, permit
+{% endif %}
+{% if mailserver.header_checks | default([]) | length > 0 %}
+header_checks = pcre:{{ _postfix_conf_dir }}/header_checks
+{% endif %}
+{% if mailserver.dkim.enabled | default(true) | bool or mailserver.spamassassin.enabled | default(false) | bool %}
 milter_default_action = accept
 milter_protocol = 2
-smtpd_milters = inet:127.0.0.1:8891
-non_smtpd_milters = inet:127.0.0.1:8891
+{% set _milters = [] %}
+{% if mailserver.dkim.enabled | default(true) | bool %}
+{%   set _ = _milters.append('inet:127.0.0.1:8891') %}
+{% endif %}
+{% if mailserver.spamassassin.enabled | default(false) | bool %}
+{%   set _ = _milters.append('unix:spamass/spamass.sock') %}
+{% endif %}
+smtpd_milters = {{ _milters | join(', ') }}
+non_smtpd_milters = {{ _milters | join(', ') }}
 {% endif %}
 {% if mailserver.masquerading_enabled | default(false) | bool %}
 smtp_generic_maps = lmdb:{{ _postfix_conf_dir }}/generic
 {% if mailserver.masquerade_domains | default([]) | length > 0 %}
 masquerade_domains = {{ mailserver.masquerade_domains | join(', ') }}
 {% endif %}
+{% endif %}
+{% if mailserver.relayhost | default('') | length > 0 %}
+relayhost = {{ mailserver.relayhost }}
+{% endif %}
+{% if mailserver.transport_map | default({}) | length > 0 %}
+transport_maps = lmdb:{{ _postfix_conf_dir }}/transport
 {% endif %}
 """,
     'roles/mailserver/templates/master.cf.j2': """\
@@ -4827,6 +5195,10 @@ virtual   unix  -       n       n       -       -       virtual
 lmtp      unix  -       -       y       -       -       lmtp
 anvil     unix  -       -       y       -       1       anvil
 scache    unix  -       -       y       -       1       scache
+{% if mailserver.spf.enabled | default(false) | bool %}
+policyd-spf  unix  -       n       n       -       0       spawn
+  user=policyd-spf argv=/usr/bin/policyd-spf
+{% endif %}
 """,
     'roles/mailserver/templates/opendkim.conf.j2': """\
 Syslog yes
@@ -4855,7 +5227,7 @@ InternalHosts {{ _opendkim_dir }}/TrustedHosts
 """,
     'roles/mailserver/templates/40-mailserver.nft.j2': """\
 # managed by ansible - mailserver role
-{% for _port in mailserver_ports | default(mailserver.open_ports | default([25, 587, 143, 465])) %}
+{% for _port in mailserver_ports | default(mailserver.open_ports | default([25, 587, 143, 465, 993])) %}
 tcp dport {{ _port }} accept
 {% endfor %}
 """,
@@ -5939,6 +6311,301 @@ ip  saddr {{ _host }} udp dport 111 accept
 {% endif %}
 {% endfor %}
 """,
+    'roles/iscsi/defaults/main.yml': """\
+---
+# iSCSI initiator support for hosts whose filesystems depend on SAN/NAS block
+# devices. Keep target/path policy in inventory; the role owns package,
+# service, and boot ordering.
+iscsi:
+  enabled: false
+
+  # Optional IQN written to /etc/iscsi/initiatorname.iscsi.
+  # initiator_name: iqn.2026-05.example:host
+
+  # Debian's open-iscsi units can start too late for mounts backed by iSCSI.
+  # When true, add ordering so sessions come up before remote-fs-pre.target.
+  early_boot: true
+
+  # Bound systemd-networkd-wait-online when early_boot is enabled. A stale or
+  # irrelevant interface must not block iSCSI startup indefinitely.
+  manage_networkd_wait_online: true
+  networkd_wait_online_timeout: 15s
+
+  # Optional targets to discover/login. If omitted, existing node DB entries
+  # are left intact and services handle automatic login.
+  # targets:
+  #   - portal: 192.168.20.9
+  #     target: iqn.2000-01.com.synology:nas.target
+  #     startup: automatic
+  targets: []
+
+  # Filesystems on iSCSI block devices. These are local filesystems from the
+  # kernel's point of view, but they must be marked _netdev so systemd does not
+  # try to mount them as plain local disks before iSCSI login has happened.
+  # The role appends _netdev, x-systemd.requires/after=<iscsi service>, and a
+  # device timeout even when opts is supplied.
+  # mounts:
+  #   - src: UUID=...
+  #     path: /srv/storage
+  #     fstype: ext4
+  #     opts: defaults
+  #     state: mounted
+  mounts: []
+""",
+    'roles/iscsi/tasks/main.yml': """\
+---
+- name: Set iSCSI package and service facts
+  set_fact:
+    _iscsi_pkg: >-
+      {{ 'open-iscsi' if ansible_facts.os_family in ['Debian', 'Archlinux', 'Suse', 'Alpine']
+         else 'iscsi-initiator-utils' if ansible_facts.os_family == 'RedHat'
+         else '' }}
+    _iscsi_services: >-
+      {{ ['iscsid', 'open-iscsi'] if ansible_facts.os_family == 'Debian'
+         else ['iscsid', 'iscsi'] if ansible_facts.os_family == 'RedHat'
+         else ['iscsid'] }}
+    _iscsi_mount_service: >-
+      {{ 'open-iscsi.service' if ansible_facts.os_family == 'Debian'
+         else 'iscsi.service' if ansible_facts.os_family == 'RedHat'
+         else 'iscsid.service' }}
+
+- name: Install iSCSI initiator package
+  package:
+    name: "{{ _iscsi_pkg }}"
+    state: present
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - _iscsi_pkg | length > 0
+
+- name: Configure iSCSI initiator name
+  copy:
+    dest: /etc/iscsi/initiatorname.iscsi
+    mode: "0644"
+    content: |
+      InitiatorName={{ iscsi.initiator_name }}
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - iscsi.initiator_name is defined
+    - iscsi.initiator_name | length > 0
+  register: _iscsi_initiator_name
+
+- name: Ensure Debian iSCSI systemd override directories exist
+  file:
+    path: "/etc/systemd/system/{{ item }}.service.d"
+    state: directory
+    mode: "0755"
+  loop:
+    - iscsid
+    - open-iscsi
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - ansible_facts.service_mgr == 'systemd'
+    - iscsi.early_boot | default(true) | bool
+
+- name: Ensure networkd wait-online override directory exists (Debian)
+  file:
+    path: /etc/systemd/system/systemd-networkd-wait-online.service.d
+    state: directory
+    mode: "0755"
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - ansible_facts.service_mgr == 'systemd'
+    - iscsi.early_boot | default(true) | bool
+    - iscsi.manage_networkd_wait_online | default(true) | bool
+
+- name: Bound networkd wait-online during iSCSI boot (Debian)
+  copy:
+    dest: /etc/systemd/system/systemd-networkd-wait-online.service.d/10-ansible-enterprise-timeout.conf
+    mode: "0644"
+    content: |
+      [Service]
+      TimeoutStartSec={{ iscsi.networkd_wait_online_timeout | default('15s') }}
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - ansible_facts.service_mgr == 'systemd'
+    - iscsi.early_boot | default(true) | bool
+    - iscsi.manage_networkd_wait_online | default(true) | bool
+  register: _iscsi_networkd_wait_online_override
+
+- name: Start iscsid before filesystem mounting (Debian)
+  copy:
+    dest: /etc/systemd/system/iscsid.service.d/10-ansible-enterprise-early.conf
+    mode: "0644"
+    content: |
+      [Unit]
+      DefaultDependencies=no
+      Wants=network-online.target
+      After=network-online.target
+      Before=remote-fs-pre.target
+
+      [Service]
+      TimeoutStartSec=15s
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - ansible_facts.service_mgr == 'systemd'
+    - iscsi.early_boot | default(true) | bool
+  register: _iscsi_iscsid_override
+
+- name: Start open-iscsi before filesystem mounting (Debian)
+  copy:
+    dest: /etc/systemd/system/open-iscsi.service.d/10-ansible-enterprise-early.conf
+    mode: "0644"
+    content: |
+      [Unit]
+      DefaultDependencies=no
+      Wants=network-online.target remote-fs-pre.target
+      After=network-online.target iscsid.service
+      Before=remote-fs-pre.target remote-fs.target
+
+      [Service]
+      TimeoutStartSec=30s
+  when:
+    - ansible_facts.os_family == 'Debian'
+    - ansible_facts.service_mgr == 'systemd'
+    - iscsi.early_boot | default(true) | bool
+  register: _iscsi_open_iscsi_override
+
+- name: Reload systemd when iSCSI boot ordering changed
+  systemd:
+    daemon_reload: true
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - ansible_facts.service_mgr == 'systemd'
+    - >
+      (_iscsi_iscsid_override is defined and _iscsi_iscsid_override is changed)
+      or (_iscsi_open_iscsi_override is defined and _iscsi_open_iscsi_override is changed)
+      or (_iscsi_networkd_wait_online_override is defined and _iscsi_networkd_wait_online_override is changed)
+
+- name: Restart iscsid when initiator name changed
+  service:
+    name: iscsid
+    state: restarted
+  when:
+    - _iscsi_initiator_name is defined
+    - _iscsi_initiator_name is changed
+    - not ansible_check_mode
+
+- name: Enable and start iSCSI services
+  systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ _iscsi_services }}"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - ansible_facts.service_mgr == 'systemd'
+    - not ansible_check_mode
+
+- name: Discover configured iSCSI targets
+  command:
+    argv:
+      - iscsiadm
+      - --mode
+      - discovery
+      - --type
+      - sendtargets
+      - --portal
+      - "{{ item.portal }}"
+  loop: "{{ iscsi.targets | default([]) }}"
+  loop_control:
+    label: "{{ item.portal }}"
+  changed_when: false
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - item.portal is defined
+    - item.portal | length > 0
+
+- name: Set configured iSCSI targets to automatic startup
+  command:
+    argv:
+      - iscsiadm
+      - --mode
+      - node
+      - --targetname
+      - "{{ item.target }}"
+      - --portal
+      - "{{ item.portal }}"
+      - --op
+      - update
+      - --name
+      - node.startup
+      - --value
+      - "{{ item.startup | default('automatic') }}"
+  loop: "{{ iscsi.targets | default([]) }}"
+  loop_control:
+    label: "{{ item.target | default(item.portal) }}"
+  changed_when: false
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - item.portal is defined
+    - item.target is defined
+
+- name: Login to configured iSCSI targets
+  command:
+    argv:
+      - iscsiadm
+      - --mode
+      - node
+      - --targetname
+      - "{{ item.target }}"
+      - --portal
+      - "{{ item.portal }}"
+      - --login
+  loop: "{{ iscsi.targets | default([]) }}"
+  loop_control:
+    label: "{{ item.target | default(item.portal) }}"
+  register: _iscsi_login
+  changed_when: "'successful' in (_iscsi_login.stdout | default('') ~ _iscsi_login.stderr | default(''))"
+  failed_when: >
+    _iscsi_login.rc != 0
+    and 'already present' not in (_iscsi_login.stdout | default('') ~ _iscsi_login.stderr | default(''))
+    and 'already exists' not in (_iscsi_login.stdout | default('') ~ _iscsi_login.stderr | default(''))
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - item.portal is defined
+    - item.target is defined
+    - item.login | default(true) | bool
+
+- name: Ensure iSCSI mountpoint directories exist
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default(_root_group) }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop: "{{ iscsi.mounts | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  failed_when: false
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - item.state | default('mounted') != 'absent'
+
+- name: Configure iSCSI-backed filesystem mounts
+  mount:
+    src: "{{ item.src }}"
+    path: "{{ item.path }}"
+    fstype: "{{ item.fstype }}"
+    opts: >-
+      {%- set _opts = item.opts | default('defaults') -%}
+      {{- _opts -}}
+      {%- if '_netdev' not in _opts.split(',') -%},_netdev{%- endif -%}
+      {%- if ('x-systemd.requires=' ~ _iscsi_mount_service) not in _opts.split(',') -%},x-systemd.requires={{ _iscsi_mount_service }}{%- endif -%}
+      {%- if ('x-systemd.after=' ~ _iscsi_mount_service) not in _opts.split(',') -%},x-systemd.after={{ _iscsi_mount_service }}{%- endif -%}
+      {%- if 'x-systemd.device-timeout=' not in _opts -%},x-systemd.device-timeout={{ item.device_timeout | default('30s') }}{%- endif -%}
+    state: "{{ item.state | default('mounted') }}"
+    dump: "{{ item.dump | default('0') }}"
+    passno: "{{ item.passno | default('0') }}"
+  loop: "{{ iscsi.mounts | default([]) }}"
+  loop_control:
+    label: "{{ item.src }} -> {{ item.path }}"
+  when:
+    - ansible_facts.os_family != 'FreeBSD'
+    - item.src is defined
+    - item.path is defined
+    - item.fstype is defined
+""",
     'roles/samba/defaults/main.yml': """\
 ---
 # Samba server configuration.
@@ -6219,6 +6886,14 @@ node_exporter_enabled: true
 # Override in inventory if another service occupies 9100.
 node_exporter_port: 9100
 
+# Address the node_exporter binds to.
+# Defaults to 127.0.0.1 (loopback only) when node_exporter_scrape_addresses
+# is empty, and 0.0.0.0 (all interfaces) when remote scrapers are allowlisted.
+# nftables still restricts who can reach the port; this just lets the daemon
+# answer on the interface that allowlisted traffic actually arrives on.
+# Override explicitly to pin to a specific IP.
+node_exporter_listen_address: "{{ '0.0.0.0' if node_exporter_scrape_addresses else '127.0.0.1' }}"
+
 # IP addresses and CIDRs permitted to scrape metrics on node_exporter_port.
 # 127.0.0.1 is always accepted regardless of this list (local tooling).
 # Set to the IP(s) of your Prometheus server(s).
@@ -6329,7 +7004,7 @@ node_exporter_version: "1.8.2"
       User=node_exporter
       Group=node_exporter
       Type=simple
-      ExecStart=/usr/local/bin/node_exporter --web.listen-address=127.0.0.1:{{ node_exporter_port }}
+      ExecStart=/usr/local/bin/node_exporter --web.listen-address={{ node_exporter_listen_address }}:{{ node_exporter_port }}
       Restart=on-failure
 
       [Install]
@@ -6341,7 +7016,7 @@ node_exporter_version: "1.8.2"
 # The pkg-installed rc.d script handles daemonization correctly.
 # We only need to set the listen address flag via sysrc.
 - name: Set node_exporter listen address (FreeBSD)
-  command: sysrc node_exporter_args="--web.listen-address=127.0.0.1:{{ node_exporter_port }}"
+  command: sysrc node_exporter_args="--web.listen-address={{ node_exporter_listen_address }}:{{ node_exporter_port }}"
   changed_when: false
   when: ansible_facts.os_family == 'FreeBSD'
 
@@ -6365,7 +7040,7 @@ node_exporter_version: "1.8.2"
     content: |
       [Service]
       ExecStart=
-      ExecStart=/usr/bin/prometheus-node-exporter --web.listen-address=127.0.0.1:{{ node_exporter_port }}
+      ExecStart=/usr/bin/prometheus-node-exporter --web.listen-address={{ node_exporter_listen_address }}:{{ node_exporter_port }}
   when: ansible_facts.os_family == 'Debian'
   notify: Restart node_exporter
 
@@ -6392,7 +7067,7 @@ node_exporter_version: "1.8.2"
   command: >
     daemon -p /var/run/node_exporter.pid
     /usr/local/bin/node_exporter
-    --web.listen-address=127.0.0.1:{{ node_exporter_port }}
+    --web.listen-address={{ node_exporter_listen_address }}:{{ node_exporter_port }}
   args:
     creates: /var/run/node_exporter.pid
   when: ansible_facts.os_family == 'FreeBSD'
@@ -7678,6 +8353,9 @@ container_engine_docker_edition: ce
 #       pid_limit: max PIDs
 #       read_only: mount root filesystem read-only (default false)
 #       security_opt: list of security options
+#     enabled:     true | false (default true; false skips this workload on every run
+#                  without touching anything already running -- use state: absent to
+#                  actively tear it down)
 #     state:       present | absent (default present; absent removes the workload)
 #
 # Example:
@@ -7737,7 +8415,7 @@ workloads: []
 # -- Deploy present workloads (in depends_on order) --
 - name: Deploy workloads
   include_tasks: "{{ container_engine }}/instance.yml"
-  loop: "{{ workloads | default([]) | rejectattr('state', 'defined') | list + workloads | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present') | list }}"
+  loop: "{{ (workloads | default([]) | rejectattr('state', 'defined') | list + workloads | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present') | list) | rejectattr('enabled', 'equalto', false) | list }}"
   loop_control:
     loop_var: _wl
 
@@ -7986,7 +8664,7 @@ WantedBy=multi-user.target default.target
     'roles/workloads/templates/40-workloads.nft.j2': """\
 # managed by ansible - workloads role
 {% for _wl in workloads | default([]) %}
-{% if _wl.state | default('present') == 'present' %}
+{% if _wl.state | default('present') == 'present' and _wl.enabled | default(true) | bool %}
 {% for _p in _wl.ports | default([]) %}
 {% set _host_port = _p.split(':')[0] | regex_replace('/.*$', '') %}
 {{ 'udp' if '/udp' in _p else 'tcp' }} dport {{ _host_port }} accept
@@ -8634,6 +9312,11 @@ write_config("Ansible: update firewall aliases");
 """,
     'roles/ssh_hardening/tasks/main.yml': """\
 ---
+- name: Set root group fact
+  set_fact:
+    _root_group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
+  when: _root_group is not defined
+
 - name: Install OpenSSH server and sudo (SUSE)
   command:
     argv: >-
@@ -8865,8 +9548,6 @@ write_config("Ansible: update firewall aliases");
   when: (item.stdout | default('') | trim) | length > 0
 
 # Ensure .ssh directory exists with correct ownership before deploying keys.
-# This is done separately so authorized_key with manage_dir: false is
-# idempotent and works in check mode (path: is explicit).
 - name: Ensure admin user .ssh directories exist
   file:
     path: "{{ '/root/.ssh' if item.name == 'root' else '/home/' + item.name + '/.ssh' }}"
@@ -8879,14 +9560,15 @@ write_config("Ansible: update firewall aliases");
     label: "{{ item.name }}"
 
 # Deploy the shared admin SSH key to all admin users.
-# path: is set explicitly so check mode works even when the user
-# was not yet created (the user module is a no-op in check mode).
 - name: Deploy shared admin SSH key
-  ansible.posix.authorized_key:
-    user: "{{ item.name }}"
-    key: "{{ admin_ssh_public_key }}"
+  lineinfile:
     path: "{{ '/root/.ssh/authorized_keys' if item.name == 'root' else '/home/' + item.name + '/.ssh/authorized_keys' }}"
-    manage_dir: false
+    line: "{{ admin_ssh_public_key }}"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ _admin_primary_groups[item.name] | default(omit) }}"
+    mode: "0600"
+    state: present
   loop: "{{ _admin_users }}"
   loop_control:
     label: "{{ item.name }}"
@@ -8896,11 +9578,13 @@ write_config("Ansible: update firewall aliases");
 
 # Deploy per-user SSH keys (rich format only).
 - name: Deploy per-user admin SSH keys
-  ansible.posix.authorized_key:
-    user: "{{ item.0.name }}"
-    key: "{{ item.1 }}"
+  lineinfile:
     path: "{{ '/root/.ssh/authorized_keys' if item.0.name == 'root' else '/home/' + item.0.name + '/.ssh/authorized_keys' }}"
-    manage_dir: false
+    line: "{{ item.1 }}"
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ _admin_primary_groups[item.0.name] | default(omit) }}"
+    mode: "0600"
     state: present
   loop: "{{ _admin_users | selectattr('ssh_keys', 'defined') | subelements('ssh_keys') }}"
   loop_control:
@@ -8996,7 +9680,7 @@ user_accounts: []
     uid: "{{ item.uid | default(omit) }}"
     group: "{{ item.group | default(item.name if item.gid is defined else omit) }}"
     groups: "{{ item.groups | default(omit) }}"
-    append: true
+    append: "{{ item.groups is defined }}"
     shell: "{{ item.shell | default('/bin/bash') }}"
     home: "{{ item.home | default(omit) }}"
     create_home: "{{ item.create_home | default(true) | bool }}"
@@ -9008,10 +9692,26 @@ user_accounts: []
   loop_control:
     label: "{{ item.name }}"
 
+- name: Ensure managed user .ssh directories exist
+  file:
+    path: "{{ item.home | default('/home/' + item.name) }}/.ssh"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.group | default(item.name) }}"
+    mode: "0700"
+  loop: "{{ user_accounts | default([]) | selectattr('ssh_keys', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.state | default('present') == 'present'
+
 - name: Deploy authorized SSH keys
-  ansible.posix.authorized_key:
-    user: "{{ item.0.name }}"
-    key: "{{ item.1 }}"
+  lineinfile:
+    path: "{{ item.0.home | default('/home/' + item.0.name) }}/.ssh/authorized_keys"
+    line: "{{ item.1 }}"
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.group | default(item.0.name) }}"
+    mode: "0600"
     state: present
   loop: "{{ user_accounts | default([]) | selectattr('ssh_keys', 'defined') | subelements('ssh_keys') }}"
   loop_control:
@@ -9127,6 +9827,7 @@ user_accounts: []
     _pve_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
     _pve_validate_certs: "{{ _proxmox.validate_certs | default(false) }}"
     _pve_timeout: "{{ _proxmox.timeout | default(300) }}"
+    _pve_api_timeout: "{{ _proxmox.api_timeout | default(30) }}"
     _proxmox_default_cores: "{{ 2 if _infra_type == 'vm' else 2 }}"
     _proxmox_default_memory: "{{ 4096 if _infra_type == 'vm' else 2048 }}"
 
@@ -9308,6 +10009,7 @@ user_accounts: []
         full: true
         state: present
         timeout: "{{ _pve_timeout }}"
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -9333,6 +10035,7 @@ user_accounts: []
         update: true
         state: present
         timeout: "{{ _pve_timeout }}"
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -9358,6 +10061,7 @@ user_accounts: []
         update: true
         state: present
         timeout: "{{ _pve_timeout }}"
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -9375,6 +10079,7 @@ user_accounts: []
         disk: "{{ item.disk | default('scsi' + (idx | string)) }}"
         size: "{{ item.size }}"
         state: resized
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       loop: "{{ _proxmox.disks | default([]) }}"
       loop_control:
@@ -9396,6 +10101,7 @@ user_accounts: []
         vmid: "{{ _infra_id }}"
         state: started
         timeout: "{{ _pve_timeout }}"
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -9430,6 +10136,7 @@ user_accounts: []
         features: "{{ _proxmox.features | default(omit) }}"
         state: present
         timeout: "{{ _pve_timeout }}"
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -9447,6 +10154,7 @@ user_accounts: []
         vmid: "{{ _infra_id }}"
         state: started
         timeout: "{{ _pve_timeout }}"
+        api_timeout: "{{ _pve_api_timeout }}"
       delegate_to: localhost
       when:
         - _infra_provider == 'proxmox'
@@ -9697,9 +10405,10 @@ user_accounts: []
   roles:
     - role: common
       tags: [common, always]
+      when: common_managed | default(ae_managed | default(true)) | bool
     - role: ssh_hardening
       tags: [ssh_hardening, ssh]
-      when: ssh_manage | default(true) | bool
+      when: ssh_managed | default(ae_managed | default(true)) | bool
 """,
     'site.yml': """\
 ---
@@ -9961,25 +10670,30 @@ user_accounts: []
   roles:
     - role: common
       tags: [common, always]
+      when: common_managed | default(ae_managed | default(true)) | bool
     - role: ssh_hardening
       tags: [ssh_hardening, ssh]
-      when: ssh_manage | default(true) | bool
+      when: ssh_managed | default(ae_managed | default(true)) | bool
     - role: users
       tags: [users]
+      when: users_managed | default(ae_managed | default(true)) | bool
     - role: geoip
       tags: [geoip]
       when: >
-        geoip.enabled | default(false) | bool
-        or (
-        firewall_enabled | default(false) | bool
-        and 'maxmind_nftables' in (_required_providers | default([]))
-        )
+        (geoip_managed | default(ae_managed | default(true)) | bool)
+        and (geoip.enabled | default(false) | bool
+        or (firewall_enabled | default(false) | bool
+        and 'maxmind_nftables' in (_required_providers | default([]))))
     - role: firewall
       tags: [firewall, nftables]
-      when: firewall_enabled | default(false) | bool
+      when: >
+        (firewall_managed | default(ae_managed | default(true)) | bool)
+        and firewall_enabled | default(false) | bool
     - role: firewall_geo
       tags: [firewall_geo, firewall, nftables]
-      when: firewall_enabled | default(false) | bool
+      when: >
+        (firewall_managed | default(ae_managed | default(true)) | bool)
+        and firewall_enabled | default(false) | bool
     # dns installs and configures BIND. Skipped when no zones are needed.
     # "Zones needed" means: explicitly declared zones, local DNS-01 certbot
     # dns role: activated when dns.enabled is true and zones are declared,
@@ -9987,7 +10701,8 @@ user_accounts: []
     - role: dns
       tags: [dns]
       when: >
-        dns.enabled | default(false) | bool
+        (dns_managed | default(ae_managed | default(true)) | bool)
+        and dns.enabled | default(false) | bool
         and (
         dns.zones | default([]) | length > 0
         or 'bind' in (_required_providers | default([]))
@@ -9997,6 +10712,8 @@ user_accounts: []
     - role: certbot
       tags: [certbot, tls]
       when: >-
+        (certbot_managed | default(ae_managed | default(true)) | bool)
+        and (
         (
         services.values()
         | selectattr('security.tls.enabled', 'defined')
@@ -10005,91 +10722,136 @@ user_accounts: []
         )
         or
         mailserver.tls.enabled | default(false) | bool
+        )
     # apache2 before nginx: Apache2 must be listening before nginx
     # starts proxying to it. The role is a no-op when no service has
     # app.type: apache2.
     - role: apache2
       tags: [apache2, web]
+      when: apache2_managed | default(ae_managed | default(true)) | bool
     - role: nginx
       tags: [nginx, web]
-      when: nginx_enabled | default(false) | bool
+      when: >
+        (nginx_managed | default(ae_managed | default(true)) | bool)
+        and nginx_enabled | default(false) | bool
     - role: nextcloud
       tags: [nextcloud]
       when:
+        - nextcloud_managed | default(ae_managed | default(true)) | bool
         - services.nextcloud is defined
         - services.nextcloud.enabled | default(false) | bool
         - services.nextcloud.app.type == 'nextcloud'
     - role: mailserver
       tags: [mailserver, mail]
       when: >
+        (mailserver_managed | default(ae_managed | default(true)) | bool)
+        and (
         mailserver.enabled | default(false) | bool
         or 'mailserver' in (_required_providers | default([]))
+        )
     # node_exporter runs on every host by default (node_exporter_enabled: true).
     # It binds to 127.0.0.1 only; the firewall allows scraping from
     # node_exporter_scrape_addresses on port 9100.
     - role: node_exporter
       tags: [node_exporter, monitoring]
-      when: node_exporter_enabled | default(false) | bool
+      when: >
+        (node_exporter_managed | default(ae_managed | default(true)) | bool)
+        and node_exporter_enabled | default(false) | bool
     - role: docker
       tags: [docker]
       when: >
-        ansible_facts.os_family != 'FreeBSD'
+        (docker_managed | default(ae_managed | default(true)) | bool)
+        and ansible_facts.os_family != 'FreeBSD'
         and (prometheus_enabled | default(false) | bool
         or grafana_enabled | default(false) | bool)
     - role: prometheus
       tags: [prometheus, monitoring]
       when: >
-        prometheus_enabled | default(false) | bool
+        (prometheus_managed | default(ae_managed | default(true)) | bool)
+        and prometheus_enabled | default(false) | bool
         and ansible_facts.os_family != 'FreeBSD'
     - role: grafana
       tags: [grafana, monitoring]
       when: >
-        grafana_enabled | default(false) | bool
+        (grafana_managed | default(ae_managed | default(true)) | bool)
+        and grafana_enabled | default(false) | bool
         and ansible_facts.os_family != 'FreeBSD'
     - role: openvpn
       tags: [openvpn, vpn]
-      when: openvpn_instances | default([]) | length > 0
+      when: >
+        (openvpn_managed | default(ae_managed | default(true)) | bool)
+        and openvpn_instances | default([]) | length > 0
     - role: wireguard
       tags: [wireguard, vpn]
-      when: wireguard_instances | default([]) | length > 0
+      when: >
+        (wireguard_managed | default(ae_managed | default(true)) | bool)
+        and wireguard_instances | default([]) | length > 0
     - role: step_ca
       tags: [step_ca, pki]
-      when: step_ca.enabled | default(false) | bool
+      when: >
+        (step_ca_managed | default(ae_managed | default(true)) | bool)
+        and step_ca.enabled | default(false) | bool
+    - role: iscsi
+      tags: [iscsi, storage]
+      when: >
+        (iscsi_managed | default(ae_managed | default(true)) | bool)
+        and iscsi.enabled | default(false) | bool
     - role: samba
       tags: [samba]
-      when: samba.enabled | default(false) | bool
+      when: >
+        (samba_managed | default(ae_managed | default(true)) | bool)
+        and samba.enabled | default(false) | bool
     - role: nfs
       tags: [nfs, mounts]
       when: >
+        (nfs_managed | default(ae_managed | default(true)) | bool)
+        and (
         nfs.server.enabled | default(false) | bool
         or nfs.client.enabled | default(false) | bool
         or 'nfs' in (_required_providers | default([]))
         or mounts | default([]) | length > 0
+        )
+    # file_copy runs on every host but is a no-op when file_copy_items is empty.
+    # Placed before container_engine/workloads so any directories or files
+    # workloads depend on (e.g. bind-mount source paths) exist beforehand.
+    - role: file_copy
+      tags: [file_copy, files]
+      when: file_copy_managed | default(ae_managed | default(true)) | bool
     - role: container_engine
       tags: [container_engine, containers]
-      when: workloads | default([]) | length > 0
+      when: >
+        (container_engine_managed | default(ae_managed | default(true)) | bool)
+        and workloads | default([]) | length > 0
     - role: workloads
       tags: [workloads, containers]
-      when: workloads | default([]) | length > 0
+      when: >
+        (workloads_managed | default(ae_managed | default(true)) | bool)
+        and workloads | default([]) | length > 0
     - role: proxmox_host
       tags: [proxmox_host, hypervisor]
       when: >
+        (proxmox_host_managed | default(ae_managed | default(true)) | bool)
+        and (
         proxmox_host.enabled | default(false) | bool
         or 'proxmox_host' in (_required_providers | default([]))
         or 'hypervisor' in (_required_providers | default([]))
+        )
     - role: proxmox
       tags: [proxmox, hypervisor]
       when: >
+        (proxmox_managed | default(ae_managed | default(true)) | bool)
+        and (
         proxmox.enabled | default(false) | bool
         or 'proxmox' in (_required_providers | default([]))
+        )
     - role: pfsense
       tags: [pfsense, router, firewall]
       when: >
+        (pfsense_managed | default(ae_managed | default(true)) | bool)
+        and (
         pfsense.enabled | default(false) | bool
         or 'pfsense' in (_required_providers | default([]))
-    # file_copy runs on every host but is a no-op when file_copy_items is empty.
-    - role: file_copy
-      tags: [file_copy, files]
+        )
 """,
     # Separate playbook for bootstrap -- no SSH connection to target hosts.
     # Usage: ansible-playbook bootstrap.yml -l <host>
@@ -10366,8 +11128,15 @@ prometheus_enabled: false
 # Prometheus Docker image tag.
 prometheus_version: "v3.0.0"
 
-# Port Prometheus listens on (bound to 127.0.0.1).
+# Port Prometheus listens on.
 prometheus_port: 9090
+
+# Address the Prometheus server binds to.
+# Defaults to 127.0.0.1 because the expected access path is via the nginx
+# reverse proxy with TLS and access_allowlist. Override to 0.0.0.0 (or a
+# specific interface IP) only if you intend direct remote access; in that
+# case ensure firewall rules restrict the source addresses.
+prometheus_listen_address: "127.0.0.1"
 
 # Host path for Prometheus data persistence.
 prometheus_data_dir: /var/lib/prometheus
@@ -10454,7 +11223,7 @@ prometheus_retention: "30d"
         --config.file=/etc/prometheus/prometheus.yml \\
         --storage.tsdb.path=/prometheus \\
         --storage.tsdb.retention.time={{ prometheus_retention }} \\
-        --web.listen-address=127.0.0.1:{{ prometheus_port }}
+        --web.listen-address={{ prometheus_listen_address }}:{{ prometheus_port }}
       ExecStop=/usr/bin/docker stop prometheus
 
       [Install]

@@ -267,6 +267,18 @@ generated_contracts:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py
+  roles/mailserver/templates/transport.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/header_checks.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/mailserver/templates/blocked_domains.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
   roles/mailserver/templates/main.cf.j2:
     source_of_truth:
       - PROMPT.md
@@ -324,6 +336,14 @@ generated_contracts:
       - PROMPT.md
       - generate_ansible_enterprise.py
   roles/samba/templates/40-samba.nft.j2:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/iscsi/defaults/main.yml:
+    source_of_truth:
+      - PROMPT.md
+      - generate_ansible_enterprise.py
+  roles/iscsi/tasks/main.yml:
     source_of_truth:
       - PROMPT.md
       - generate_ansible_enterprise.py

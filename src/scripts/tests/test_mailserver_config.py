@@ -10,6 +10,9 @@ Covers:
 - Both new keys present in defaults dict
 - Flat variable documentation present in defaults
 - Mailserver firewall templates derive from mailserver_ports
+- relayhost directive conditional on mailserver.relayhost
+- transport_maps directive conditional on mailserver.transport_map
+- transport.j2 template iterates transport_map dict
 """
 import pathlib
 import unittest
@@ -92,14 +95,74 @@ class TestMailserverDefaults(unittest.TestCase):
     def test_open_ports_default_present(self):
         text = _read(self.DEFAULTS)
         self.assertIn("open_ports", text)
-        # Default list is now imap-conditional: [25, 587, 143, 465] when
+        # Default list is now imap-conditional: [25, 587, 143, 465, 993] when
         # imap.enabled, [25] otherwise. The full expression:
         self.assertIn(
             "mailserver_ports | default(mailserver_open_ports | "
-            "default(([25, 587, 143, 465] if (mailserver_imap_enabled | "
+            "default(([25, 587, 143, 465, 993] if (mailserver_imap_enabled | "
             "default(true) | bool) else [25])))",
             text,
         )
+
+
+class TestRelayhostAndTransportMap(unittest.TestCase):
+    """relayhost and transport_map directives in main.cf.j2 and transport.j2."""
+
+    MAIN_CF   = "roles/mailserver/templates/main.cf.j2"
+    TRANSPORT = "roles/mailserver/templates/transport.j2"
+    DEFAULTS  = "roles/mailserver/defaults/main.yml"
+    TASKS     = "roles/mailserver/tasks/main.yml"
+    HANDLERS  = "roles/mailserver/handlers/main.yml"
+
+    def test_relayhost_conditional_in_main_cf(self):
+        """relayhost directive must be inside a conditional block."""
+        text = _read(self.MAIN_CF)
+        self.assertIn("if mailserver.relayhost", text)
+        self.assertIn("relayhost = ", text)
+
+    def test_transport_maps_conditional_in_main_cf(self):
+        """transport_maps directive must be inside a conditional block."""
+        text = _read(self.MAIN_CF)
+        self.assertIn("if mailserver.transport_map", text)
+        self.assertIn("transport_maps = lmdb:", text)
+
+    def test_transport_template_iterates_dict(self):
+        """transport.j2 must iterate transport_map dict entries."""
+        text = _read(self.TRANSPORT)
+        self.assertIn("transport_map.items()", text)
+
+    def test_relayhost_key_in_defaults(self):
+        text = _read(self.DEFAULTS)
+        self.assertIn("relayhost", text)
+        self.assertIn("mailserver_relayhost | default('')", text)
+
+    def test_transport_map_key_in_defaults(self):
+        text = _read(self.DEFAULTS)
+        self.assertIn("transport_map", text)
+        self.assertIn("mailserver_transport_map | default({})", text)
+
+    def test_deploy_transport_task_present(self):
+        text = _read(self.TASKS)
+        self.assertIn("Deploy postfix transport map", text)
+        self.assertIn("transport.j2", text)
+
+    def test_deploy_transport_task_gated_on_map_length(self):
+        text = _read(self.TASKS)
+        idx = text.index("Deploy postfix transport map")
+        block = text[idx:idx + 400]
+        self.assertIn("mailserver.transport_map", block)
+
+    def test_postmap_transport_handler_present(self):
+        text = _read(self.HANDLERS)
+        self.assertIn("Rebuild postfix transport map", text)
+        self.assertIn("postmap lmdb:/etc/postfix/transport", text)
+
+    def test_relayhost_after_masquerade_in_main_cf(self):
+        """relayhost must appear after masquerade_domains in main.cf."""
+        text = _read(self.MAIN_CF)
+        masq_pos = text.index("masquerading_enabled")
+        relay_pos = text.index("relayhost =")
+        self.assertLess(masq_pos, relay_pos)
 
 
 class TestOpendkimConfTemplate(unittest.TestCase):
@@ -221,16 +284,16 @@ class TestMailserverFirewallTemplate(unittest.TestCase):
         self.assertIn("mailserver_ports", text)
         self.assertIn("for _port in", text)
 
-    def test_nft_firewall_default_port_list_omits_stale_imaps(self):
+    def test_nft_firewall_default_port_list_includes_imaps(self):
         text = _read(self.TEMPLATE)
-        self.assertIn("default([25, 587, 143, 465])", text)
+        self.assertIn("default([25, 587, 143, 465, 993])", text)
         self.assertNotIn("default([25, 587, 465, 993])", text)
 
     def test_pf_firewall_uses_open_ports_variable(self):
         text = _read(self.PF_TEMPLATE)
         self.assertIn("mailserver_ports", text)
         self.assertIn("join(', ')", text)
-        self.assertIn("mailserver_ports | default(mailserver.open_ports | default([25, 587, 143, 465]))", text)
+        self.assertIn("mailserver_ports | default(mailserver.open_ports | default([25, 587, 143, 465, 993]))", text)
 
 
 class TestImapAndDkimToggles(unittest.TestCase):
@@ -255,7 +318,7 @@ class TestImapAndDkimToggles(unittest.TestCase):
 
     def test_open_ports_default_drops_to_25_when_imap_off(self):
         text = _read(self.DEFAULTS)
-        self.assertIn("[25, 587, 143, 465] if (mailserver_imap_enabled | default(true) | bool) else [25]", text)
+        self.assertIn("[25, 587, 143, 465, 993] if (mailserver_imap_enabled | default(true) | bool) else [25]", text)
 
     def test_dovecot_config_block_gated_on_imap_enabled(self):
         text = _read(self.TASKS)
@@ -299,14 +362,18 @@ class TestImapAndDkimToggles(unittest.TestCase):
     def test_main_cf_sasl_block_gated_on_imap(self):
         text = _read(self.MAIN_CF)
         self.assertIn("if mailserver.imap.enabled", text)
-        # Both branches present: with-SASL and without
+        # SASL directives gated on imap.enabled
         self.assertIn("smtpd_sasl_type = dovecot", text)
-        self.assertIn("permit_mynetworks,reject_unauth_destination", text)
+        # recipient restrictions built via list; both entries must appear
+        self.assertIn("permit_mynetworks", text)
+        self.assertIn("reject_unauth_destination", text)
 
     def test_main_cf_milter_block_gated_on_dkim(self):
         text = _read(self.MAIN_CF)
         self.assertIn("if mailserver.dkim.enabled", text)
-        self.assertIn("smtpd_milters = inet:127.0.0.1:8891", text)
+        # milters built via Jinja2 list; DKIM socket appended when dkim.enabled
+        self.assertIn("_milters.append('inet:127.0.0.1:8891')", text)
+        self.assertIn("smtpd_milters = ", text)
 
     def test_master_cf_submission_and_smtps_gated_on_imap(self):
         text = _read(self.MASTER)
