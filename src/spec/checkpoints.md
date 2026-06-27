@@ -4005,9 +4005,9 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
 241. `checkpoint-241-postfix-relayhost-transport-map`
      Adds Postfix `relayhost` and `transport_maps` support for the
      gateway/mailbox-host split pattern.
-     - Use case: a public gateway host (e.g. `gregoriusgild.be`)
+     - Use case: a public gateway host (e.g. `example.com`)
        accepts inbound mail and forwards to an internal MTA
-       (`murphy.gregoriusgild.be`) via `transport_maps`; the
+       (`murphy.example.com`) via `transport_maps`; the
        internal MTA sends outbound through the gateway via
        `relayhost`.
      - Defaults: `mailserver.relayhost` (flat `mailserver_relayhost`,
