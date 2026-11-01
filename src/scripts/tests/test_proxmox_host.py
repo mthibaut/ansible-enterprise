@@ -1,6 +1,6 @@
 """
 Unit tests for the generated proxmox_host role (Linux host preparation
-for Proxmox VE: apt repos, nag removal, extra packages, IOMMU/vfio).
+for Proxmox VE: apt repos, nag removal, IOMMU/vfio).
 
 The proxmox_host role exists as the SSH-based companion to the API-only
 proxmox role (checkpoint-234 split). It owns everything that requires
@@ -36,9 +36,9 @@ class TestProxmoxHostRole(unittest.TestCase):
         text = _read_build(self.DEFAULTS)
         self.assertIn("proxmox_host:", text)
         self.assertIn("enabled: false", text)
+        self.assertIn("pve:", text)
         self.assertIn("repo: no_subscription", text)
         self.assertIn("remove_nag: true", text)
-        self.assertIn("extra_packages: []", text)
         self.assertIn("iommu:", text)
         self.assertIn("cpu_vendor: intel", text)
 
@@ -63,13 +63,11 @@ class TestProxmoxHostRole(unittest.TestCase):
     def test_tasks_use_proxmox_host_namespace_throughout(self):
         text = _read_build(self.TASKS)
         # Should use proxmox_host.* not proxmox.*
-        self.assertIn("proxmox_host.repo", text)
+        self.assertIn("proxmox_host.pve.repo", text)
         self.assertIn("proxmox_host.remove_nag", text)
-        self.assertIn("proxmox_host.extra_packages", text)
         self.assertIn("proxmox_host.iommu", text)
         self.assertNotIn("proxmox.repo", text)
         self.assertNotIn("proxmox.remove_nag", text)
-        self.assertNotIn("proxmox.extra_packages", text)
         self.assertNotIn("proxmox.iommu", text)
 
     def test_tasks_cover_repo_nag_packages_iommu(self):
@@ -77,11 +75,36 @@ class TestProxmoxHostRole(unittest.TestCase):
         self.assertIn("pve-no-subscription", text)
         self.assertIn("pve-enterprise", text)
         self.assertIn("Remove subscription nag from web UI", text)
-        self.assertIn("Install extra Proxmox packages", text)
         self.assertIn("Enable IOMMU in GRUB", text)
         self.assertIn("Load vfio modules", text)
         self.assertIn("intel_iommu=on", text)
         self.assertIn("amd_iommu=on", text)
+
+    def test_defaults_have_ceph_repo_block(self):
+        text = _read_build(self.DEFAULTS)
+        self.assertIn("ceph:", text)
+        self.assertIn('repo: "off"', text)
+        self.assertIn("release: squid", text)
+
+    def test_tasks_cover_ceph_repo(self):
+        text = _read_build(self.TASKS)
+        self.assertIn("Configure Ceph no-subscription repository", text)
+        self.assertIn("Configure Ceph enterprise repository", text)
+        self.assertIn("download.proxmox.com/debian/ceph-", text)
+        self.assertIn("proxmox_host.ceph.repo", text)
+        self.assertIn("proxmox_host.ceph.release", text)
+
+    def test_nag_removal_is_reapply_safe(self):
+        """The nag patch must survive widget-toolkit upgrades via an APT
+        DPkg hook, not a one-shot guard that skips forever."""
+        text = _read_build(self.TASKS)
+        self.assertIn("/usr/local/bin/pve-remove-nag.sh", text)
+        self.assertIn("/etc/apt/apt.conf.d/no-nag-script", text)
+        self.assertIn("DPkg::Post-Invoke", text)
+        # Surgical patch (status check only), not the blunt Ext.Msg override,
+        # and never the broken creates:.bak one-shot guard.
+        self.assertIn("NoMoreNagging", text)
+        self.assertNotIn("proxmoxlib.js.bak", text)
 
     def test_tasks_have_no_cluster_api_calls(self):
         """The proxmox_host role must not delegate API calls -- that's
@@ -110,9 +133,29 @@ class TestSiteYmlOrdering(unittest.TestCase):
     def test_proxmox_host_activated_by_hypervisor_capability(self):
         text = _read_build(self.SITE)
         # Find the proxmox_host block
-        block = text.split("- role: proxmox_host", 1)[1].split("- role: proxmox\n", 1)[0]
+        block = text.split("- role: proxmox_host", 1)[1].split("- role: ssh_hardening\n", 1)[0]
         self.assertIn("proxmox_host.enabled", block)
         self.assertIn("'hypervisor' in (_required_providers", block)
+
+    def test_proxmox_host_runs_before_package_installs(self):
+        """proxmox_host configures the apt repos (enterprise -> no-subscription
+        + ceph), so it must run EARLY -- before any package-installing role --
+        or a fresh PVE node 401s on the subscription-only enterprise repo. It is
+        placed right after common, ahead of ssh_hardening and the packages role."""
+        text = _read_build(self.SITE)
+        common_idx = text.find("- role: common")
+        host_idx = text.find("- role: proxmox_host")
+        ssh_idx = text.find("- role: ssh_hardening")
+        pkg_idx = text.find("- role: packages")
+        self.assertGreater(host_idx, common_idx, "proxmox_host must follow common")
+        self.assertLess(host_idx, ssh_idx, "proxmox_host must be early (before ssh_hardening)")
+        self.assertLess(host_idx, pkg_idx, "proxmox_host must precede the packages role (repo setup)")
+
+    def test_proxmox_host_flushes_apt_cache_for_later_roles(self):
+        """After swapping repos, proxmox_host flushes handlers so the apt cache
+        is refreshed before later package-installing roles run (not at play end)."""
+        text = _read_build("roles/proxmox_host/tasks/main.yml")
+        self.assertIn("meta: flush_handlers", text)
 
 
 class TestCapabilityDispatch(unittest.TestCase):

@@ -142,7 +142,7 @@ class TestProxmoxBackupJobs(unittest.TestCase):
         self.assertNotIn("ansible_facts.os_family == 'Debian'", tasks)
 
         defaults = _read_build(self.DEFAULTS)
-        defaults_forbidden = ["repo:", "remove_nag", "extra_packages", "iommu:", "cpu_vendor"]
+        defaults_forbidden = ["repo:", "remove_nag", "iommu:", "cpu_vendor"]
         for marker in defaults_forbidden:
             self.assertNotIn(marker, defaults, f"host-OS default leaked into proxmox role: {marker!r}")
 

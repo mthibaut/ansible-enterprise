@@ -767,13 +767,6 @@ pkg_manager_update_policy: auto
 # refresh behavior in auto mode (currently APT).
 pkg_manager_update_valid_time: 3600
 
-# Additional host packages to install with the native package manager.
-# Example:
-# packages:
-#   - squid
-#   - tcpdump
-packages: []
-
 # Services dict. Declare application services in inventory group_vars
 # or host_vars. Each entry drives nginx, DNS, TLS, and firewall config.
 # See group_vars/all/main.yml for examples.
@@ -1044,7 +1037,7 @@ mailserver:
 #             by default). Common values: bin_t, etc_t, var_t, httpd_sys_content_t
 #
 # Example:
-#   file_copy_items:
+#   file_copy:
 #     - src: contrib/myapp-logrotate.conf
 #       dest: /etc/logrotate.d/myapp
 #       owner: root
@@ -1067,7 +1060,7 @@ mailserver:
 #       owner: myapp
 #       group: myapp
 #       mode: "0750"
-file_copy_items: []
+file_copy: []
 """,
     'roles/file_copy/tasks/main.yml': """\
 ---
@@ -1079,9 +1072,9 @@ file_copy_items: []
       - (item.state | default('file')) in ['file', 'directory']
       - (item.state | default('file')) != 'directory' or (item.src is not defined and item.content is not defined)
       - (item.state | default('file')) == 'directory' or ((item.src is defined) != (item.content is defined))
-    fail_msg: "Each file_copy_items entry must define dest; file entries require exactly one of src or content; directory entries must not set src or content"
-  loop: "{{ file_copy_items | default([]) }}"
-  when: file_copy_items | default([]) | length > 0
+    fail_msg: "Each file_copy entry must define dest; file entries require exactly one of src or content; directory entries must not set src or content"
+  loop: "{{ file_copy | default([]) }}"
+  when: file_copy | default([]) | length > 0
 
 - name: Ensure parent directories for copied files exist
   file:
@@ -1090,9 +1083,9 @@ file_copy_items: []
     owner: root
     group: "{{ _root_group }}"
     mode: "0755"
-  loop: "{{ file_copy_items | default([]) }}"
+  loop: "{{ file_copy | default([]) }}"
   when:
-    - file_copy_items | default([]) | length > 0
+    - file_copy | default([]) | length > 0
     - item.state | default('file') == 'file'
 
 - name: Manage directory entries
@@ -1102,9 +1095,9 @@ file_copy_items: []
     owner: "{{ item.owner | default('root') }}"
     group: "{{ item.group | default('root') }}"
     mode: "{{ item.mode | default('0755') }}"
-  loop: "{{ file_copy_items | default([]) }}"
+  loop: "{{ file_copy | default([]) }}"
   when:
-    - file_copy_items | default([]) | length > 0
+    - file_copy | default([]) | length > 0
     - item.state | default('file') == 'directory'
 
 - name: Copy files from contrib to remote host
@@ -1114,9 +1107,9 @@ file_copy_items: []
     owner: "{{ item.owner | default('root') }}"
     group: "{{ item.group | default('root') }}"
     mode: "{{ item.mode | default('0644') }}"
-  loop: "{{ file_copy_items | default([]) }}"
+  loop: "{{ file_copy | default([]) }}"
   when:
-    - file_copy_items | default([]) | length > 0
+    - file_copy | default([]) | length > 0
     - item.state | default('file') == 'file'
     - item.src is defined
 
@@ -1127,9 +1120,9 @@ file_copy_items: []
     owner: "{{ item.owner | default('root') }}"
     group: "{{ item.group | default('root') }}"
     mode: "{{ item.mode | default('0644') }}"
-  loop: "{{ file_copy_items | default([]) }}"
+  loop: "{{ file_copy | default([]) }}"
   when:
-    - file_copy_items | default([]) | length > 0
+    - file_copy | default([]) | length > 0
     - item.state | default('file') == 'file'
     - item.content is defined
 
@@ -1139,23 +1132,50 @@ file_copy_items: []
 # setype to explicitly set the type with chcon instead.
 - name: Restore default SELinux context
   command: restorecon -v "{{ item.dest }}"
-  loop: "{{ file_copy_items | default([]) }}"
+  loop: "{{ file_copy | default([]) }}"
   when:
     - ansible_facts.os_family == 'RedHat'
     - item.setype is not defined
-    - file_copy_items | default([]) | length > 0
+    - file_copy | default([]) | length > 0
   register: _restorecon_result
   changed_when: "'Relabeled' in (_restorecon_result.stdout | default(''))"
 
 - name: Set explicit SELinux type when setype is specified
   command: chcon -t "{{ item.setype }}" "{{ item.dest }}"
-  loop: "{{ file_copy_items | default([]) }}"
+  loop: "{{ file_copy | default([]) }}"
   when:
     - ansible_facts.os_family == 'RedHat'
     - item.setype is defined
-    - file_copy_items | default([]) | length > 0
+    - file_copy | default([]) | length > 0
   register: _chcon_result
   changed_when: true
+""",
+    'roles/packages/defaults/main.yml': """\
+---
+# Host packages to install via the native package manager (cross-platform
+# `package:` module). The flat list is assembled by the consumer inventory's
+# scope layering (packages_all + packages_group + packages_host, concat+unique);
+# this role just installs it. Direct use is also fine:
+#   packages:
+#     - nvme-cli
+#     - smartmontools
+packages: []
+""",
+    'roles/packages/tasks/main.yml': """\
+---
+# No-op when packages is empty.
+- name: Assert packages is a list when defined
+  assert:
+    that:
+      - packages is iterable
+      - packages is not string
+    fail_msg: "packages must be a list of package names"
+
+- name: Install host packages
+  package:
+    name: "{{ packages | default([]) }}"
+    state: present
+  when: packages | default([]) | length > 0
 """,
     'roles/certbot/defaults/main.yml': """\
 ---
@@ -1791,24 +1811,11 @@ fi
       - ssh_port | int < 65536
     fail_msg: "ssh_port must be between 1 and 65535"
 
-- name: Assert packages is a list when defined
-  assert:
-    that:
-      - packages is iterable
-      - packages is not string
-    fail_msg: "packages must be a list of package names"
-
 # On FreeBSD the privileged group is 'wheel', not 'root'.
 # Use _root_group everywhere a file or directory needs the root group.
 - name: Set root group name
   set_fact:
     _root_group: "{{ 'wheel' if ansible_facts.os_family == 'FreeBSD' else 'root' }}"
-
-- name: Install host package list
-  package:
-    name: "{{ packages | default([]) }}"
-    state: present
-  when: packages | default([]) | length > 0
 
 - name: Resolve trusted root certificate store
   set_fact:
@@ -4619,7 +4626,7 @@ COUNTRIES_HTTPS={{ geoip.download_dir }}/allowed_countries_https.txt
 # FreeBSD postfix from ports uses myhostname in main.cf directly.
 - name: Write /etc/mailname
   copy:
-    content: "{{ mailserver.domain }}\n"
+    content: "{{ mailserver.domain }}\\n"
     dest: /etc/mailname
     mode: "0644"
   when: ansible_facts.os_family != 'FreeBSD'
@@ -8783,12 +8790,24 @@ WantedBy=multi-user.target
 # notifications, storage, users, ACLs) live in the separate proxmox role.
 proxmox_host:
   enabled: false
-  # Repository type: enterprise (requires subscription) or no_subscription (free).
-  repo: no_subscription
+  # PVE package repository.
+  #   repo:    no_subscription (free) or enterprise (requires subscription)
+  #   release: Debian suite for the repo line (bookworm/trixie); "" =>
+  #            auto-detect (ansible_facts.distribution_release). NOT a PVE
+  #            codename -- PVE repos are keyed by the Debian suite.
+  pve:
+    repo: no_subscription
+    release: ""
   # Remove the "no valid subscription" nag dialog from the web UI.
   remove_nag: true
-  # Extra packages to install on the Proxmox host.
-  extra_packages: []
+  # Ceph package repository (pveceph/ceph updates on this node).
+  #   repo:    no_subscription (free), enterprise (subscription), or "off"
+  #            (do not manage a Ceph repo -- default).
+  #   release: Ceph codename for your PVE major -- reef (PVE 8),
+  #            squid (PVE 9.0-9.1), tentacle (PVE 9.2+).
+  ceph:
+    repo: "off"
+    release: squid
   # PCI passthrough / IOMMU.
   iommu:
     enabled: false
@@ -8820,46 +8839,97 @@ proxmox_host:
     fail_msg: "The proxmox_host role only supports Debian-based Proxmox VE hosts"
 
 # -- Repository configuration -----------------------------------------------
+# The Debian suite in each repo line honours proxmox_host.pve.release when set,
+# otherwise auto-detects (bookworm/trixie).
 - name: Configure Proxmox no-subscription repository
   apt_repository:
-    repo: "deb http://download.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-no-subscription"
+    repo: "deb http://download.proxmox.com/debian/pve {{ (proxmox_host.pve.release | default('')) or ansible_facts.distribution_release }} pve-no-subscription"
     filename: pve-no-subscription
     state: present
-  when: proxmox_host.repo | default('no_subscription') == 'no_subscription'
+  when: proxmox_host.pve.repo | default('no_subscription') == 'no_subscription'
   notify: Update apt cache
 
 - name: Disable Proxmox enterprise repository
   apt_repository:
-    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
+    repo: "deb https://enterprise.proxmox.com/debian/pve {{ (proxmox_host.pve.release | default('')) or ansible_facts.distribution_release }} pve-enterprise"
     filename: pve-enterprise
     state: absent
-  when: proxmox_host.repo | default('no_subscription') == 'no_subscription'
+  when: proxmox_host.pve.repo | default('no_subscription') == 'no_subscription'
   notify: Update apt cache
 
 - name: Enable Proxmox enterprise repository
   apt_repository:
-    repo: "deb https://enterprise.proxmox.com/debian/pve {{ ansible_facts.distribution_release }} pve-enterprise"
+    repo: "deb https://enterprise.proxmox.com/debian/pve {{ (proxmox_host.pve.release | default('')) or ansible_facts.distribution_release }} pve-enterprise"
     filename: pve-enterprise
     state: present
-  when: proxmox_host.repo | default('no_subscription') == 'enterprise'
+  when: proxmox_host.pve.repo | default('no_subscription') == 'enterprise'
+  notify: Update apt cache
+
+# -- Ceph package repository ------------------------------------------------
+# pveceph pulls Ceph packages from a versioned repo (ceph-<release>). Managed
+# only when proxmox_host.ceph.repo is no_subscription/enterprise; the "off"
+# default leaves it untouched. release selects the Ceph codename for your PVE
+# major (see defaults). Both variants write /etc/apt/sources.list.d/ceph.list.
+- name: Configure Ceph no-subscription repository
+  apt_repository:
+    repo: "deb http://download.proxmox.com/debian/ceph-{{ proxmox_host.ceph.release | default('squid') }} {{ ansible_facts.distribution_release }} no-subscription"
+    filename: ceph
+    state: present
+  when: proxmox_host.ceph.repo | default('off') == 'no_subscription'
+  notify: Update apt cache
+
+- name: Configure Ceph enterprise repository
+  apt_repository:
+    repo: "deb https://enterprise.proxmox.com/debian/ceph-{{ proxmox_host.ceph.release | default('squid') }} {{ ansible_facts.distribution_release }} enterprise"
+    filename: ceph
+    state: present
+  when: proxmox_host.ceph.repo | default('off') == 'enterprise'
   notify: Update apt cache
 
 # -- Web UI subscription nag removal ----------------------------------------
+# Surgical patch (neutralises ONLY the subscription-status check, not every
+# Ext.Msg dialog) shipped as a script + APT DPkg::Post-Invoke hook, so it
+# auto-re-applies after a proxmox-widget-toolkit upgrade rewrites proxmoxlib.js.
+# A prior approach (sed + `creates: .bak`) skipped forever once the .bak
+# existed, so the nag returned permanently after the first update.
+- name: Install subscription-nag patch script
+  copy:
+    dest: /usr/local/bin/pve-remove-nag.sh
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0755"
+    content: |
+      #!/bin/bash
+      # Neutralise the Proxmox VE "No valid subscription" nag. Idempotent and
+      # safe to run repeatedly; re-invoked by the APT DPkg::Post-Invoke hook
+      # after proxmox-widget-toolkit upgrades. Surgical: only the
+      # subscription-status check is touched, not every Ext.Msg dialog.
+      f=/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+      [ -f "$f" ] || exit 0
+      before=$(md5sum "$f")
+      sed -i -e "/data.status/ s/\\!//" -e "/data.status/ s/active/NoMoreNagging/" "$f"
+      [ "$before" != "$(md5sum "$f")" ] && echo changed
+      exit 0
+  when: proxmox_host.remove_nag | default(true) | bool
+
 - name: Remove subscription nag from web UI
-  shell: |
-    sed -i.bak "s/Ext.Msg.show({/void({/g" \\
-      /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
-  args:
-    creates: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js.bak
+  command: /usr/local/bin/pve-remove-nag.sh
+  register: _pve_nag_patch
+  changed_when: "'changed' in _pve_nag_patch.stdout"
   when: proxmox_host.remove_nag | default(true) | bool
   notify: Restart pveproxy
 
-# -- Extra packages ----------------------------------------------------------
-- name: Install extra Proxmox packages
-  apt:
-    name: "{{ proxmox_host.extra_packages | default([]) }}"
-    state: present
-  when: proxmox_host.extra_packages | default([]) | length > 0
+- name: Install APT hook to re-apply nag patch after upgrades
+  copy:
+    dest: /etc/apt/apt.conf.d/no-nag-script
+    owner: root
+    group: "{{ _root_group }}"
+    mode: "0644"
+    content: |
+      // Re-apply the subscription-nag patch after any package unpack (notably
+      // proxmox-widget-toolkit upgrades, which restore the nag).
+      DPkg::Post-Invoke { "/usr/local/bin/pve-remove-nag.sh >/dev/null 2>&1 || true"; };
+  when: proxmox_host.remove_nag | default(true) | bool
 
 # -- IOMMU / PCI passthrough ------------------------------------------------
 - name: Enable IOMMU in GRUB
@@ -8882,6 +8952,12 @@ proxmox_host:
     group: "{{ _root_group }}"
     mode: "0644"
   when: proxmox_host.iommu.enabled | default(false) | bool
+
+# Refresh the apt cache NOW (via the Update apt cache handler) rather than at
+# play end, so every later package-installing role sees the corrected repos
+# (enterprise removed, no-subscription + ceph added). proxmox_host is ordered
+# early in site.yml precisely so this lands before the packages role et al.
+- meta: flush_handlers
 """,
     # ------------------------------------------------------------------ #
     #  proxmox role -- Proxmox VE cluster-config via API (mthibaut.proxmox)#
@@ -9407,7 +9483,7 @@ write_config("Ansible: update firewall aliases");
 
 - name: Grant admin users passwordless sudo
   copy:
-    content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\\n"
     dest: "{{ '/usr/local/etc/sudoers.d/' if ansible_facts.os_family == 'FreeBSD' else '/etc/sudoers.d/' }}{{ item.name }}"
     mode: "0440"
   loop: "{{ _admin_users }}"
@@ -9722,7 +9798,7 @@ user_accounts: []
   copy:
     dest: "/etc/sudoers.d/{{ item.name }}"
     mode: "0440"
-    content: "{{ item.name }} ALL=(ALL) NOPASSWD: ALL\n"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD: ALL\\n"
     validate: "visudo -cf %s"
   loop: "{{ user_accounts | default([]) }}"
   loop_control:
@@ -10671,6 +10747,19 @@ user_accounts: []
     - role: common
       tags: [common, always]
       when: common_managed | default(ae_managed | default(true)) | bool
+    # proxmox_host runs EARLY: on a PVE host it swaps the subscription-only
+    # pve-enterprise apt repo for no-subscription + ceph and refreshes the
+    # cache, so every later package-installing role (packages, nginx, certbot,
+    # ...) has working apt. Skipped on non-PVE hosts via the capability gate.
+    - role: proxmox_host
+      tags: [proxmox_host, hypervisor]
+      when: >
+        (proxmox_host_managed | default(ae_managed | default(true)) | bool)
+        and (
+        proxmox_host.enabled | default(false) | bool
+        or 'proxmox_host' in (_required_providers | default([]))
+        or 'hypervisor' in (_required_providers | default([]))
+        )
     - role: ssh_hardening
       tags: [ssh_hardening, ssh]
       when: ssh_managed | default(ae_managed | default(true)) | bool
@@ -10811,12 +10900,15 @@ user_accounts: []
         or 'nfs' in (_required_providers | default([]))
         or mounts | default([]) | length > 0
         )
-    # file_copy runs on every host but is a no-op when file_copy_items is empty.
+    # file_copy runs on every host but is a no-op when file_copy is empty.
     # Placed before container_engine/workloads so any directories or files
     # workloads depend on (e.g. bind-mount source paths) exist beforehand.
     - role: file_copy
       tags: [file_copy, files]
       when: file_copy_managed | default(ae_managed | default(true)) | bool
+    - role: packages
+      tags: [packages]
+      when: packages_managed | default(ae_managed | default(true)) | bool
     - role: container_engine
       tags: [container_engine, containers]
       when: >
@@ -10827,15 +10919,6 @@ user_accounts: []
       when: >
         (workloads_managed | default(ae_managed | default(true)) | bool)
         and workloads | default([]) | length > 0
-    - role: proxmox_host
-      tags: [proxmox_host, hypervisor]
-      when: >
-        (proxmox_host_managed | default(ae_managed | default(true)) | bool)
-        and (
-        proxmox_host.enabled | default(false) | bool
-        or 'proxmox_host' in (_required_providers | default([]))
-        or 'hypervisor' in (_required_providers | default([]))
-        )
     - role: proxmox
       tags: [proxmox, hypervisor]
       when: >

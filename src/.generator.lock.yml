@@ -1,5 +1,5 @@
-source_hash: b3ae4b480881338b172ebae023ca04f6b133d995f41ea4c5a05ab14024f85da4
-output_hash: 963b850c4f74c3999226f847214f300d9a90fc7cbc03248420e9d6541b65576f
+source_hash: 7523fba3f6dfbc4a5ac84fc4d4a2da9358ef0ee07c738ee8270e7d2d61471181
+output_hash: 43e500238de6f7c4e368b5d4ee30d702b9d7f18f3ed6fc2bc045972f487961e8
 generated_files:
   - ansible.cfg
   - baseline.yml
@@ -121,6 +121,8 @@ generated_files:
   - roles/openvpn/templates/40-openvpn.nft.j2
   - roles/openvpn/templates/client.conf.j2
   - roles/openvpn/templates/server.conf.j2
+  - roles/packages/defaults/main.yml
+  - roles/packages/tasks/main.yml
   - roles/pfsense/defaults/main.yml
   - roles/pfsense/handlers/main.yml
   - roles/pfsense/tasks/main.yml

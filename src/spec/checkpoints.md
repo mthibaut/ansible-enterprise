@@ -4039,3 +4039,79 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
      - Tests: `TestWorkloadEnabledFilter` (3 tests) in
        `test_generator_invariants.py`.
      - Tests: new `TestRelayhostAndTransportMap` (9 tests).
+
+243. `checkpoint-243-packages-role-and-file-copy-rename`
+     De-hacks host package installs and unifies the list-var naming.
+     - New first-class `roles/packages` (defaults + tasks) installs a flat
+       `packages` list via the cross-platform `package:` module, gated
+       `packages_managed | default(ae_managed | default(true))`. Wired into
+       site.yml right after `file_copy`, tagged `[packages]`.
+     - Removes the Debian-only `proxmox_host.extra_packages` `apt:` task and
+       its default (supersedes checkpoint-234): it duplicated a generic
+       cross-platform capability inside the proxmox role. The stray inline
+       `packages` handling in the `common` role is likewise gone; the new
+       role owns it.
+     - Renames the `file_copy_items` variable to `file_copy` throughout
+       (role name and var now coincide, which is valid). Supersedes the
+       `file_copy_items` naming of checkpoint-096.
+     - Nag-removal idempotency fix: the `Remove subscription nag` task moves
+       from `sed -i.bak` + `creates: .bak` (which skipped forever once the
+       `.bak` existed, so the nag returned permanently after a PVE update)
+       to the `replace` module, which re-applies whenever the pattern
+       reappears and is a no-op otherwise.
+     - Consumer-side (gilde tree, out of this repo) carries the scope
+       layering: keyed-dict `combine` for `file_copy`, list `concat|unique`
+       for `packages`.
+     - Tests: `extra_packages` assertions dropped from `test_proxmox_host.py`
+       and `test_proxmox.py`; `file_copy` tests unaffected (assert on
+       `item.*` / task names).
+
+244. `checkpoint-244-proxmox-host-ceph-repo-and-durable-nag`
+     Extracts two tasks from the community `post-pve-install.sh` into
+     `proxmox_host`, both scoped to the host role (no generic mechanism
+     warranted yet).
+     - PVE repo config restructured for symmetry with ceph: the flat
+       `proxmox_host.repo` becomes `proxmox_host.pve.{repo,release}`.
+       `release` is the Debian suite for the repo line (bookworm/trixie),
+       `""` => auto-detect via `ansible_facts.distribution_release`; it is a
+       pin/override knob, NOT a PVE codename (PVE repos are keyed by the
+       Debian suite). BREAKING: consumers setting `proxmox_host.repo` must
+       move to `proxmox_host.pve.repo`.
+     - Ceph package repository: new `proxmox_host.ceph.{repo,release}`
+       (`repo`: `no_subscription` / `enterprise` / `"off"` default;
+       `release`: Ceph codename per PVE major -- reef/squid/tentacle). Two
+       `apt_repository` tasks write `/etc/apt/sources.list.d/ceph.list`,
+       mirroring the pve-no-subscription/enterprise pattern. Fills the gap
+       for pveceph updates on no-subscription cluster nodes.
+     - Durable nag removal supersedes checkpoint-243's `replace` task. Now a
+       shipped script `/usr/local/bin/pve-remove-nag.sh` (surgical patch of
+       the subscription-status check only, via `sed /data.status/`, not the
+       blunt `Ext.Msg.show` override) plus an APT `DPkg::Post-Invoke` hook at
+       `/etc/apt/apt.conf.d/no-nag-script` that re-applies it automatically
+       after every `proxmox-widget-toolkit` upgrade -- closing the window
+       where the nag returns between Ansible runs. The `Remove subscription
+       nag from web UI` task now invokes the script with
+       `changed_when: 'changed' in stdout` (script emits `changed` only on an
+       actual md5 delta).
+     - Tests: `test_defaults_have_ceph_repo_block`, `test_tasks_cover_ceph_repo`,
+       `test_nag_removal_is_reapply_safe` added to `test_proxmox_host.py`.
+
+245. `checkpoint-245-proxmox-host-runs-before-package-installs`
+     Ordering bug: `proxmox_host` (which swaps the subscription-only
+     `pve-enterprise` apt repo for no-subscription + ceph) ran LATE in
+     site.yml — after `packages` and the service roles. On a fresh PVE node
+     the default enterprise repo is still present, so the first `apt` install
+     (`packages`, nginx, certbot, ...) 401s before proxmox_host fixes the
+     sources.
+     - `proxmox_host` moved to run **immediately after `common`**, ahead of
+       `ssh_hardening` and every package-installing role. Capability gate
+       unchanged, so non-PVE hosts still skip it.
+     - `proxmox_host/tasks/main.yml` ends with `- meta: flush_handlers` so the
+       `Update apt cache` handler fires right after the repo swap (not at play
+       end), giving later roles a cache that reflects the corrected repos.
+     - `proxmox` (cluster API) stays in its original late position; the split
+       is fine (proxmox_host still precedes proxmox).
+     - Tests: `test_proxmox_host_runs_before_package_installs` and
+       `test_proxmox_host_flushes_apt_cache_for_later_roles` added;
+       `test_proxmox_host_activated_by_hypervisor_capability` retargeted to the
+       new neighbour (`ssh_hardening`).
