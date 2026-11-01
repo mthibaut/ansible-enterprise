@@ -4115,3 +4115,18 @@ Every checkpoint must include a HANDOFF.md update. The full procedure is:
        `test_proxmox_host_flushes_apt_cache_for_later_roles` added;
        `test_proxmox_host_activated_by_hypervisor_capability` retargeted to the
        new neighbour (`ssh_hardening`).
+
+246. `checkpoint-246-claude-md-contract-pointer`
+     Adds a repo-root `CLAUDE.md` so every Claude session loads the
+     repository contracts before changing anything. A session skipped
+     `src/spec/contracts.md` and edited the generator without a test first;
+     nothing in the repo pointed at the contracts.
+     - `CLAUDE.md` (free zone, not generated): lists the contract and spec
+       files, states that the generator writes only `build/` and that
+       `src/spec/*` / `src/scripts/*` are edited directly despite stale
+       GENERATED headers, and the rules: a test for every change, spec ->
+       test -> generator -> contracts -> checkpoint order, scrub contract,
+       ASCII-only, back up the generator and keep the lock unchanged for
+       refactors, no commits to `main` or pushes unless asked.
+     - Tests: `test_claude_md.py` (file exists, ASCII-only, every referenced
+       contract/spec path exists, key rules and `make` targets present).
